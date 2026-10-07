@@ -20,7 +20,7 @@ async function main(): Promise<void> {
     name: "minicode",
     version: serverVersion(),
     instructions:
-      "旅行规划工具集：天气、地理编码、路线、景点、住宿、餐厅、网络口碑，以及文档读写。" +
+      "通用 AI 助手工具集（旅行规划为特长）：文档读写、天气、地理编码、路线距离、景点/住宿/餐厅搜索、网络口碑。" +
       "生成或修改行程后必须调用 validate_itinerary；strict 模式未通过时先修正行程再交付。" +
       `write_document 生成的行程单会保存到 ${plansDir} 目录。` +
       (config.tastePreferences !== undefined ? `用户口味偏好：${config.tastePreferences}。` : ""),
