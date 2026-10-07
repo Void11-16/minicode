@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { Session } from "../core/session.ts";
 import { ChatAgent, TurnAbortedError } from "../agent/agent.ts";
@@ -251,6 +251,41 @@ export async function startWebServer(options: WebServerOptions = {}): Promise<Ru
         defaultProfile: defaultProfileId ?? null,
         current: currentSession.modelProfile ?? defaultProfileId ?? null,
       });
+      return;
+    }
+    // 行程地图：列出已保存行程 + 读取单份行程
+    if (req.method === "GET" && url.pathname === "/api/plans") {
+      const plans: Array<{ title: string; days: number; file: string }> = [];
+      try {
+        const names = await readdir(join(rootDir, "plans"));
+        for (const name of names.filter((n) => n.endsWith(".json") && !n.endsWith(".quality.json")).sort()) {
+          try {
+            const data = JSON.parse(await readFile(join(rootDir, "plans", name), "utf8")) as {
+              title?: string;
+              days?: unknown[];
+            };
+            plans.push({ title: data.title ?? name, days: data.days?.length ?? 0, file: name });
+          } catch {
+            // 跳过损坏的 JSON
+          }
+        }
+      } catch {
+        // plans 目录不存在 = 没有已保存行程
+      }
+      stateJson(res, { plans });
+      return;
+    }
+    if (req.method === "GET" && url.pathname.startsWith("/api/plans/")) {
+      const title = decodeURIComponent(url.pathname.slice("/api/plans/".length));
+      const safe = title.replace(/[^\p{Script=Han}a-zA-Z0-9-_ ]/gu, "").trim().replace(/\s+/g, "-");
+      try {
+        const raw = await readFile(join(rootDir, "plans", `${safe}.json`), "utf8");
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(raw);
+      } catch {
+        res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: `未找到行程「${title}」` }));
+      }
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/models") {
