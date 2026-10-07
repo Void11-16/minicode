@@ -1,0 +1,18 @@
+{
+  "title": "杭州国庆两日游",
+  "destination": "杭州",
+  "startDate": "2026-10-01",
+  "endDate": "2026-10-02",
+  "travelers": 2,
+  "budgetTotalYuan": 3000,
+  "budgetPerMealYuan": 100,
+  "accommodation": "靠近西湖，500 元内",
+  "pace": "适中",
+  "mustVisit": [
+    "灵隐寺",
+    "西湖",
+    "河坊街"
+  ],
+  "tastePreferences": "不吃辣、想尝试本地特色",
+  "notes": "带一位老人，节奏放慢"
+}

@@ -1,0 +1,15 @@
+{
+  "title": "北京五日游",
+  "destination": "北京",
+  "startDate": "2026-10-01",
+  "endDate": "2026-10-05",
+  "travelers": 2,
+  "accommodation": "近地铁站",
+  "pace": "适中",
+  "mustVisit": [
+    "天坛",
+    "地坛"
+  ],
+  "tastePreferences": "吃辣、本地特色（京菜/北京小吃）",
+  "notes": "情侣出行，喜欢摄影"
+}

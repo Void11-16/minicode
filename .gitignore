@@ -1,0 +1,4 @@
+.minicode/
+node_modules/
+.DS_Store
+screenlog.*

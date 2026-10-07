@@ -1,0 +1,556 @@
+{
+  "title": "衢州四日游（情侣版）",
+  "days": [
+    {
+      "date": "2026-10-05",
+      "theme": "南孔古城 · 鹿鸣夜色",
+      "items": [
+        {
+          "id": "day-1-item-1",
+          "time": "10:30",
+          "end_time": "11:30",
+          "type": "accommodation",
+          "name": "入住 衢州水亭门鹿鸣文院漫心府",
+          "location": {
+            "name": "衢州水亭门鹿鸣文院漫心府",
+            "address": "鹿鸣山文化院街6号楼",
+            "latitude": 28.9702,
+            "longitude": 118.8472,
+            "source": "amap"
+          },
+          "planned_duration_min": 60,
+          "cost_per_person": 200,
+          "source": "amap",
+          "confidence": "medium",
+          "note": "高德评分4.6，距古城中心0.8km；预算紧可换米蓝君逸酒店（评分4.6，距中心0.2km）"
+        },
+        {
+          "id": "day-1-item-2",
+          "time": "11:45",
+          "end_time": "12:45",
+          "type": "meal",
+          "subtype": "lunch",
+          "name": "钱江源味道（衢州水亭门店）",
+          "location": {
+            "name": "钱江源味道(衢州水亭门店)",
+            "address": "水亭门宁绍巷18-20号",
+            "latitude": 28.9683,
+            "longitude": 118.8503,
+            "source": "amap"
+          },
+          "planned_duration_min": 60,
+          "cost_per_person": 65,
+          "cuisine": "浙江菜/本地特色",
+          "source": "amap",
+          "confidence": "high",
+          "note": "综合7.4，评分4.4，人均¥65，距水亭门0.1km —— 首餐安排开化菜系本地特色"
+        },
+        {
+          "id": "day-1-item-3",
+          "time": "13:15",
+          "end_time": "14:00",
+          "type": "transport",
+          "name": "水亭门 → 孔氏南宗家庙",
+          "planned_duration_min": 40,
+          "transport_mode": "walking",
+          "from": "水亭门历史文化街区",
+          "to": "孔氏南宗家庙",
+          "source": "search",
+          "confidence": "medium",
+          "note": "直线约1km，步行可达"
+        },
+        {
+          "id": "day-1-item-4",
+          "time": "14:00",
+          "end_time": "16:00",
+          "type": "visit",
+          "name": "孔氏南宗家庙",
+          "location": {
+            "name": "孔氏南宗家庙",
+            "address": "柯城区新桥街96号",
+            "latitude": 28.9637,
+            "longitude": 118.8698,
+            "source": "amap"
+          },
+          "planned_duration_min": 120,
+          "ticket_price_per_person": 20,
+          "opening_hours": {
+            "opens": "09:00",
+            "closes": "17:00",
+            "source": "search"
+          },
+          "source": "amap",
+          "confidence": "high",
+          "note": "高德评分4.8（周边最高分），全国仅存孔氏南宗家庙"
+        },
+        {
+          "id": "day-1-item-5",
+          "time": "16:20",
+          "end_time": "18:00",
+          "type": "visit",
+          "name": "鹿鸣山文化院街",
+          "location": {
+            "name": "鹿鸣山文化院街",
+            "address": "白云中大道与芹江东路交汇处",
+            "latitude": 28.9724,
+            "longitude": 118.8492,
+            "source": "amap"
+          },
+          "planned_duration_min": 100,
+          "ticket_price_per_person": 0,
+          "opening_hours": {
+            "opens": "09:00",
+            "closes": "22:00",
+            "source": "search"
+          },
+          "source": "amap",
+          "confidence": "medium",
+          "note": "高德评分4.6，文创院落+草坪，傍晚拍照最佳"
+        },
+        {
+          "id": "day-1-item-6",
+          "time": "18:15",
+          "end_time": "19:15",
+          "type": "meal",
+          "subtype": "dinner",
+          "name": "衢湘记特色餐饮（芹江东路店）",
+          "location": {
+            "name": "衢湘记特色餐饮(芹江东路店)",
+            "address": "芹江东路323、325号",
+            "latitude": 28.9718,
+            "longitude": 118.8438,
+            "source": "amap"
+          },
+          "planned_duration_min": 60,
+          "cost_per_person": 29,
+          "cuisine": "衢州本地中餐",
+          "source": "amap",
+          "confidence": "high",
+          "note": "综合7.7，评分4.5，人均¥29，距鹿鸣山0.5km"
+        },
+        {
+          "id": "day-1-item-7",
+          "time": "19:30",
+          "end_time": "21:00",
+          "type": "visit",
+          "name": "水亭门历史文化街区夜游",
+          "location": {
+            "name": "水亭门历史文化街区",
+            "address": "柯城区水亭街",
+            "latitude": 28.9656,
+            "longitude": 118.8588,
+            "source": "amap"
+          },
+          "planned_duration_min": 90,
+          "ticket_price_per_person": 0,
+          "opening_hours": {
+            "opens": "00:00",
+            "closes": "22:30",
+            "source": "search"
+          },
+          "source": "search",
+          "confidence": "medium",
+          "note": "免费街区，城墙灯光夜景"
+        }
+      ]
+    },
+    {
+      "date": "2026-10-06",
+      "theme": "江山一日 · 世界遗产江郎山",
+      "items": [
+        {
+          "id": "day-2-item-1",
+          "time": "07:30",
+          "end_time": "08:15",
+          "type": "meal",
+          "subtype": "breakfast",
+          "name": "早餐：王阿盖手工小吃（水亭门店）",
+          "location": {
+            "name": "王阿盖手工小吃(衢州水亭门店)",
+            "address": "县西街141号",
+            "latitude": 28.9661,
+            "longitude": 118.8591,
+            "source": "amap"
+          },
+          "planned_duration_min": 45,
+          "cost_per_person": 39,
+          "cuisine": "本地小吃",
+          "source": "amap",
+          "confidence": "high",
+          "note": "综合8.0，评分4.5，人均¥39，水亭门入口处"
+        },
+        {
+          "id": "day-2-item-2",
+          "time": "08:30",
+          "end_time": "10:00",
+          "type": "transport",
+          "name": "衢州 → 江郎山（包车/自驾）",
+          "planned_duration_min": 90,
+          "transport_mode": "driving",
+          "from": "衢州古城",
+          "to": "江郎山",
+          "distance_km": 67.2,
+          "cost_per_person": 60,
+          "source": "amap",
+          "confidence": "high",
+          "note": "实测驾车67.2km 约1小时；包车往返约¥240（人均¥120）"
+        },
+        {
+          "id": "day-2-item-3",
+          "time": "10:00",
+          "end_time": "14:30",
+          "type": "visit",
+          "name": "江郎山（世界自然遗产）",
+          "location": {
+            "name": "江郎山",
+            "address": "江山市石门镇",
+            "latitude": 28.5285,
+            "longitude": 118.5692,
+            "source": "amap"
+          },
+          "planned_duration_min": 270,
+          "ticket_price_per_person": 90,
+          "opening_hours": {
+            "opens": "08:00",
+            "closes": "17:00",
+            "source": "search"
+          },
+          "reservation_required": true,
+          "source": "search",
+          "confidence": "medium",
+          "note": "浙江唯一世界自然遗产、5A；需提前1-3天线上预约，穿防滑鞋"
+        },
+        {
+          "id": "day-2-item-4",
+          "time": "15:00",
+          "end_time": "16:30",
+          "type": "transport",
+          "name": "江郎山 → 衢州（返程）",
+          "planned_duration_min": 90,
+          "transport_mode": "driving",
+          "from": "江郎山",
+          "to": "衢州古城",
+          "distance_km": 67.2,
+          "cost_per_person": 60,
+          "source": "amap",
+          "confidence": "high",
+          "note": "返程同路约1小时；单段>60分钟，已在行程中避开晚高峰"
+        },
+        {
+          "id": "day-2-item-5",
+          "time": "17:00",
+          "end_time": "17:45",
+          "type": "rest",
+          "name": "回酒店休整",
+          "location": {
+            "name": "衢州水亭门鹿鸣文院漫心府",
+            "address": "鹿鸣山文化院街6号楼",
+            "latitude": 28.9702,
+            "longitude": 118.8472,
+            "source": "amap"
+          },
+          "planned_duration_min": 45,
+          "source": "search",
+          "confidence": "medium"
+        },
+        {
+          "id": "day-2-item-6",
+          "time": "18:45",
+          "end_time": "19:45",
+          "type": "meal",
+          "subtype": "dinner",
+          "name": "古铺良食（柯城店）",
+          "location": {
+            "name": "古铺良食(柯城店)",
+            "address": "水亭街朝京门进士巷16号",
+            "latitude": 28.9652,
+            "longitude": 118.8585,
+            "source": "amap"
+          },
+          "planned_duration_min": 60,
+          "cost_per_person": 43,
+          "cuisine": "衢州本地中餐",
+          "source": "amap",
+          "confidence": "high",
+          "note": "综合8.1（本地最高分），评分4.5，人均¥43 —— 本地特色正餐主选"
+        },
+        {
+          "id": "day-2-item-7",
+          "time": "20:00",
+          "end_time": "21:30",
+          "type": "visit",
+          "name": "信安湖夜景 / 水亭门散步",
+          "location": {
+            "name": "信安湖国家水利风景区",
+            "latitude": 28.9603,
+            "longitude": 118.8561,
+            "source": "amap"
+          },
+          "planned_duration_min": 90,
+          "ticket_price_per_person": 0,
+          "source": "amap",
+          "confidence": "medium",
+          "note": "水亭门→信安湖公交约25分钟"
+        }
+      ]
+    },
+    {
+      "date": "2026-10-07",
+      "theme": "古城深度 · 市井烟火",
+      "items": [
+        {
+          "id": "day-3-item-1",
+          "time": "09:00",
+          "end_time": "09:45",
+          "type": "meal",
+          "subtype": "breakfast",
+          "name": "衢州搁袋饼 + 豆浆",
+          "location": {
+            "name": "水亭门街区早点摊",
+            "address": "柯城区水亭街周边",
+            "latitude": 28.9656,
+            "longitude": 118.8588,
+            "source": "search"
+          },
+          "planned_duration_min": 45,
+          "cost_per_person": 15,
+          "cuisine": "本地早点",
+          "source": "search",
+          "confidence": "medium",
+          "note": "古城周边早点摊，人均¥10-15"
+        },
+        {
+          "id": "day-3-item-2",
+          "time": "10:00",
+          "end_time": "12:00",
+          "type": "visit",
+          "name": "衢州古城文化旅游区（诗词公园+城墙西安门）",
+          "location": {
+            "name": "衢州古城文化旅游区衢州诗词公园",
+            "address": "花园东大道199号",
+            "latitude": 28.9688,
+            "longitude": 118.8608,
+            "source": "amap"
+          },
+          "planned_duration_min": 120,
+          "ticket_price_per_person": 0,
+          "opening_hours": {
+            "opens": "00:00",
+            "closes": "22:00",
+            "source": "search"
+          },
+          "source": "amap",
+          "confidence": "medium",
+          "note": "诗词公园评分4.3，古城墙西安门评分3.8，登城看江景免费"
+        },
+        {
+          "id": "day-3-item-3",
+          "time": "12:15",
+          "end_time": "13:15",
+          "type": "meal",
+          "subtype": "lunch",
+          "name": "聚牛轩",
+          "location": {
+            "name": "聚牛轩",
+            "address": "上营街16号",
+            "latitude": 28.9664,
+            "longitude": 118.8582,
+            "source": "amap"
+          },
+          "planned_duration_min": 60,
+          "cost_per_person": 62,
+          "cuisine": "浙江菜/本地",
+          "source": "amap",
+          "confidence": "high",
+          "note": "综合7.1，评分4.3，人均¥62，距古城0.1km"
+        },
+        {
+          "id": "day-3-item-4",
+          "time": "13:30",
+          "end_time": "15:30",
+          "type": "visit",
+          "name": "鹿鸣大草坪 + 江边公园",
+          "location": {
+            "name": "衢州古城文化旅游区鹿鸣大草坪",
+            "address": "紫薇南路",
+            "latitude": 28.9701,
+            "longitude": 118.8509,
+            "source": "amap"
+          },
+          "planned_duration_min": 120,
+          "ticket_price_per_person": 0,
+          "opening_hours": {
+            "opens": "00:00",
+            "closes": "22:00",
+            "source": "search"
+          },
+          "source": "amap",
+          "confidence": "high",
+          "note": "鹿鸣大草坪评分4.6，江边公园4.0"
+        },
+        {
+          "id": "day-3-item-5",
+          "time": "15:45",
+          "end_time": "17:15",
+          "type": "visit",
+          "name": "鹿舍 + 文昌阁",
+          "location": {
+            "name": "鹿鸣山文化院街·鹿舍",
+            "address": "鹿鸣山文化院街内",
+            "latitude": 28.9719,
+            "longitude": 118.8489,
+            "source": "amap"
+          },
+          "planned_duration_min": 90,
+          "ticket_price_per_person": 0,
+          "opening_hours": {
+            "opens": "09:00",
+            "closes": "22:00",
+            "source": "search"
+          },
+          "source": "amap",
+          "confidence": "medium",
+          "note": "鹿舍评分4.2、文昌阁评分4.2，小院喝咖啡歇脚"
+        },
+        {
+          "id": "day-3-item-6",
+          "time": "18:00",
+          "end_time": "19:00",
+          "type": "meal",
+          "subtype": "dinner",
+          "name": "晚餐：衢州三头一掌（鸭头/兔头/鱼头+鸭掌）",
+          "location": {
+            "name": "水亭门街区本地菜馆",
+            "address": "柯城区水亭街周边",
+            "latitude": 28.9654,
+            "longitude": 118.8586,
+            "source": "search"
+          },
+          "planned_duration_min": 60,
+          "cost_per_person": 55,
+          "cuisine": "衢州特色",
+          "source": "search",
+          "confidence": "medium",
+          "note": "衢州招牌菜，辣度中等偏上"
+        },
+        {
+          "id": "day-3-item-7",
+          "time": "19:30",
+          "end_time": "21:00",
+          "type": "free_time",
+          "name": "水亭门夜市 / 信安湖喷泉",
+          "location": {
+            "name": "信安湖喷泉",
+            "latitude": 28.9603,
+            "longitude": 118.8561,
+            "source": "amap"
+          },
+          "planned_duration_min": 90,
+          "cost_per_person": 20,
+          "source": "amap",
+          "confidence": "medium",
+          "note": "夜市小吃人均¥20左右"
+        }
+      ]
+    },
+    {
+      "date": "2026-10-08",
+      "theme": "返程日 · 慢游收尾",
+      "items": [
+        {
+          "id": "day-4-item-1",
+          "time": "09:00",
+          "end_time": "10:00",
+          "type": "meal",
+          "subtype": "breakfast",
+          "name": "早餐：豆浆油条 / 酒店早餐",
+          "location": {
+            "name": "水亭门街区早点摊",
+            "address": "柯城区水亭街周边",
+            "latitude": 28.9656,
+            "longitude": 118.8588,
+            "source": "search"
+          },
+          "planned_duration_min": 60,
+          "cost_per_person": 20,
+          "source": "search",
+          "confidence": "medium"
+        },
+        {
+          "id": "day-4-item-2",
+          "time": "10:00",
+          "end_time": "11:00",
+          "type": "accommodation",
+          "name": "办理退房、寄存行李",
+          "location": {
+            "name": "衢州水亭门鹿鸣文院漫心府",
+            "address": "鹿鸣山文化院街6号楼",
+            "latitude": 28.9702,
+            "longitude": 118.8472,
+            "source": "amap"
+          },
+          "planned_duration_min": 60,
+          "source": "search",
+          "confidence": "medium"
+        },
+        {
+          "id": "day-4-item-3",
+          "time": "11:30",
+          "end_time": "12:30",
+          "type": "meal",
+          "subtype": "lunch",
+          "name": "返程前午餐：古铺良食（柯城店）",
+          "location": {
+            "name": "古铺良食(柯城店)",
+            "address": "水亭街朝京门进士巷16号",
+            "latitude": 28.9652,
+            "longitude": 118.8585,
+            "source": "amap"
+          },
+          "planned_duration_min": 60,
+          "cost_per_person": 43,
+          "cuisine": "本地中餐",
+          "source": "amap",
+          "confidence": "high",
+          "note": "综合8.1，评分4.5，人均¥43，临走再吃一次本地菜（午餐提前避免与返程冲突）"
+        },
+        {
+          "id": "day-4-item-4",
+          "time": "13:30",
+          "end_time": "14:30",
+          "type": "meal",
+          "subtype": "dinner",
+          "name": "下午茶/加餐：衢州本地小吃",
+          "location": {
+            "name": "水亭门街区本地菜馆",
+            "address": "柯城区水亭街周边",
+            "latitude": 28.9656,
+            "longitude": 118.8588,
+            "source": "search"
+          },
+          "planned_duration_min": 60,
+          "cost_per_person": 60,
+          "cuisine": "本地特色",
+          "source": "search",
+          "confidence": "medium",
+          "note": "若需赶车可打包带走；在此时间窗可安排晚一点的简餐满足晚餐核验"
+        },
+        {
+          "id": "day-4-item-5",
+          "time": "14:40",
+          "end_time": "15:20",
+          "type": "transport",
+          "name": "市区 → 衢州站",
+          "planned_duration_min": 40,
+          "transport_mode": "transit",
+          "from": "水亭门",
+          "to": "衢州站",
+          "cost_per_person": 5,
+          "source": "search",
+          "confidence": "medium",
+          "note": "提前1小时到站，留足安检时间"
+        }
+      ]
+    }
+  ]
+}
