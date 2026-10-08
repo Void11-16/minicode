@@ -24,12 +24,21 @@ export function createSaveItineraryTool(rootDir: string = process.cwd()): Tool {
     description:
       "保存结构化行程单（JSON + Markdown + 质量报告）。保存前执行基础质量核验：P0 拒绝保存，" +
       "P1/P2 会写入质量报告；strict=true 时 P0/P1 都拒绝。生成完整行程后应调用 validate_itinerary " +
-      "并以 strict=true 通过后再向用户交付。修改行程时先 load_itinerary 读取当前版本，只改动用户要求的部分。",
+      "并以 strict=true 通过后再向用户交付。修改行程时先 load_itinerary 读取当前版本，只改动用户要求的部分。" +
+      "餐饮条目为沿途候选餐厅（可无 time；午餐/晚餐建议各 4-6 个候选、覆盖不同价位与菜系），不参与景点路线规划。" +
+      "条目较多（每天 10 条以上）时用 merge=true 按天分批保存：每次只提交 1 天的内容，按 date 替换已有的同一天、" +
+      "其余天原样保留；避免一次输出全部条目导致工具参数超出模型单次输出上限而被截断。",
     parameters: {
       type: "object",
       properties: {
         title: { type: "string", description: "行程标题，例如：杭州两日游" },
         strict: { type: "boolean", description: "默认 false；true 时 P0/P1 问题都会拒绝保存" },
+        merge: {
+          type: "boolean",
+          description:
+            "默认 false（整体覆盖保存）；true 时与已保存的同名行程合并：按 date 用本次提交的天替换已有天，" +
+            "匹配不到或没有 date 的天追加，其余天保留。分天保存大行程时使用。",
+        },
         budget_per_person_yuan: { type: "number", description: "人均总预算（元），可选；用于质量核验" },
         days: {
           type: "array",
@@ -121,7 +130,10 @@ export function createSaveItineraryTool(rootDir: string = process.cwd()): Tool {
     },
     async execute(args) {
       const title = requireString(args, "title");
-      const itinerary = parseItinerary(args);
+      const incoming = parseItinerary(args);
+      const merge = args.merge === true;
+      const file = itineraryFile(rootDir, title);
+      const itinerary = merge ? await mergeSavedItinerary(file, incoming) : incoming;
       const budget = optionalNonNegativeNumber(args.budget_per_person_yuan, "budget_per_person_yuan");
       const strict = args.strict === true;
       const report = validateItinerary(itinerary, budget === undefined ? {} : { budget_per_person_yuan: budget });
@@ -129,7 +141,6 @@ export function createSaveItineraryTool(rootDir: string = process.cwd()): Tool {
         throw new Error(`行程质量校验未通过:\n${renderQualityReport(report)}`);
       }
 
-      const file = itineraryFile(rootDir, title);
       const base = file.slice(0, -5);
       await mkdir(dirname(file), { recursive: true });
       await writeFile(file, JSON.stringify(itinerary, null, 2), "utf8");
@@ -138,8 +149,11 @@ export function createSaveItineraryTool(rootDir: string = process.cwd()): Tool {
       await writeFile(`${base}.quality.md`, renderQualityReport(report), "utf8");
 
       const itemCount = itinerary.days.reduce((sum, day) => sum + day.items.length, 0);
+      const savedLabel = merge
+        ? `已保存「${title}」（合并保存 ${incoming.days.length} 天，共 ${itinerary.days.length} 天 / ${itemCount} 项）:`
+        : `已保存「${title}」（${itinerary.days.length} 天 / ${itemCount} 项）:`;
       return [
-        `已保存「${title}」（${itinerary.days.length} 天 / ${itemCount} 项）:`,
+        savedLabel,
         `质量: ${report.score} / 100（P0 ${report.issue_count.P0} / P1 ${report.issue_count.P1} / P2 ${report.issue_count.P2}）`,
         `${file}（结构化数据）`,
         `${base}.md（可读版本）`,
@@ -147,6 +161,27 @@ export function createSaveItineraryTool(rootDir: string = process.cwd()): Tool {
       ].join("\n");
     },
   };
+}
+
+/**
+ * 合并保存：按 date 用本次提交的天替换已保存的同名天（匹配不到或没有 date 则追加），其余天保留。
+ * 供条目多时按天分批保存，避免单次工具调用输出超出模型上限。
+ */
+async function mergeSavedItinerary(file: string, incoming: Itinerary): Promise<Itinerary> {
+  let saved: Itinerary | null = null;
+  try {
+    saved = parseItinerary(JSON.parse(await readFile(file, "utf8")));
+  } catch {
+    saved = null; // 文件不存在或损坏 → 等价全新保存
+  }
+  if (saved === null) return incoming;
+  const days = [...saved.days];
+  for (const day of incoming.days) {
+    const index = day.date === undefined ? -1 : days.findIndex((savedDay) => savedDay.date === day.date);
+    if (index >= 0) days[index] = day;
+    else days.push(day);
+  }
+  return { title: incoming.title, days };
 }
 
 export function createLoadItineraryTool(rootDir: string = process.cwd()): Tool {
@@ -177,7 +212,7 @@ export function createValidateItineraryTool(rootDir: string = process.cwd()): To
   return {
     name: "validate_itinerary",
     description:
-      "核验已保存的行程：时间顺序与重叠、午餐/晚餐、餐段、过长交通、当日总时长、重复地点、预算、数据置信度。" +
+      "核验已保存的行程：时间顺序与重叠、时间线空档、赶路时间、游玩时长、午餐/晚餐、餐段、餐食候选数量、过长交通、当日总时长、景点路线折返、重复地点、预算、数据置信度。" +
       "生成或修改行程后必须调用；strict=true 时 P0/P1 问题会抛错，要求模型修正后重试。",
     parameters: {
       type: "object",

@@ -18,6 +18,8 @@ export interface AgentRuntimeOptions {
   readonly maxToolRounds?: number;
   /** 压缩前归档原始会话（数据安全） */
   readonly archive?: (session: Session, nextEpoch: number) => Promise<void>;
+  /** 持久化检查点：会话历史在安全边界落盘（崩溃时最多丢进行中的半步） */
+  readonly onCheckpoint?: (sessionId: string) => void | Promise<void>;
   readonly onEvent?: (sessionId: string, event: AgentEvent) => void;
   readonly onPermission?: (sessionId: string, request: PermissionRequest) => Promise<boolean>;
   readonly onTextDelta?: (sessionId: string, delta: string) => void;
@@ -126,7 +128,9 @@ export class AgentRuntime {
       }
 
       const reply = await agent.run(input, {
-        maxToolRounds: this.options.maxToolRounds ?? 12,
+        // 通用 agent 场景（读文件→改代码→跑测试→修）需要更多轮次；上限保护仍在
+        maxToolRounds: this.options.maxToolRounds ?? 30,
+        onCheckpoint: () => this.options.onCheckpoint?.(sessionId),
         onEvent: (event) => this.options.onEvent?.(sessionId, event),
         onPermission: (request) =>
           this.options.onPermission?.(sessionId, request) ?? Promise.resolve(true),

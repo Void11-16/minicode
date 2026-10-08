@@ -14,6 +14,8 @@ export class Session {
   private epochNumber = 0;
   private titleValue: string | undefined;
   private modelProfileValue: string | undefined;
+  private workspaceValue: string | undefined;
+  private approvalModeValue: "ask" | "edits" | undefined;
   private readonly estimator = new TokenEstimator();
 
   constructor(id: string = defaultSessionId(), initialMessages: readonly Message[] = []) {
@@ -55,6 +57,27 @@ export class Session {
 
   setModelProfile(id: string | undefined): void {
     this.modelProfileValue = id;
+  }
+
+  /** 本会话的工作区（文件读写与命令执行的根目录；undefined = 装配默认） */
+  get workspace(): string | undefined {
+    return this.workspaceValue;
+  }
+
+  setWorkspace(path: string | undefined): void {
+    this.workspaceValue = path;
+  }
+
+  /**
+   * 审批模式（会话级）：ask=逐条确认 / edits=自动编辑（工作区文件写入免确认）/ trust=信任会话。
+   * trust 仅内存有效（不持久化，重启/恢复后回到 ask|edits）。
+   */
+  get approvalMode(): "ask" | "edits" {
+    return this.approvalModeValue ?? "edits";
+  }
+
+  setApprovalMode(mode: "ask" | "edits"): void {
+    this.approvalModeValue = mode;
   }
 
   /** 当前校准系数（透明度/调试用） */
@@ -131,6 +154,8 @@ export class Session {
       title: this.titleValue,
       calibration: this.estimator.calibrationFactor,
       modelProfile: this.modelProfileValue,
+      workspace: this.workspaceValue,
+      approvalMode: this.approvalModeValue,
     };
   }
 
@@ -158,6 +183,12 @@ export class Session {
     if (data.modelProfile !== undefined && data.modelProfile !== "") {
       session.modelProfileValue = data.modelProfile;
     }
+    if (data.workspace !== undefined && data.workspace !== "") {
+      session.workspaceValue = data.workspace;
+    }
+    if (data.approvalMode === "ask" || data.approvalMode === "edits") {
+      session.approvalModeValue = data.approvalMode;
+    }
     return session;
   }
 }
@@ -171,6 +202,10 @@ export interface SessionData {
   readonly calibration?: number;
   /** 本会话选择的模型配置 id */
   readonly modelProfile?: string;
+  /** 本会话的工作区目录（绝对路径） */
+  readonly workspace?: string;
+  /** 审批模式（trust 不持久化，仅 ask/edits 落盘） */
+  readonly approvalMode?: "ask" | "edits";
 }
 
 function defaultSessionId(): string {

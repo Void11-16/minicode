@@ -8,7 +8,7 @@ import { JsonFileSessionStore } from "../src/storage/session-store.ts";
 import { ContextEpochManager, estimateHistoryTokens } from "../src/context/epoch.ts";
 import type { Message } from "../src/core/message.ts";
 
-test("resume 场景: 长会话保存后恢复并自动压缩，压缩结果持久化", async () => {
+test("压缩机制: 长会话压缩为摘要+最近消息，压缩结果可持久化（运行时路径）", async () => {
   const dir = await mkdtemp(join(tmpdir(), "minicode-resume-"));
   const store = new JsonFileSessionStore(dir);
 
@@ -20,7 +20,7 @@ test("resume 场景: 长会话保存后恢复并自动压缩，压缩结果持�
   }
   await store.save(session);
 
-  // —— 模拟 /resume 流程 ——
+  // —— 模拟运行时轮次开始前的压缩流程 ——
   const restored = await store.load("sess_resume_test");
   assert.ok(restored !== null);
   const resumeMaxTokens = 800;
@@ -49,7 +49,7 @@ test("resume 场景: 长会话保存后恢复并自动压缩，压缩结果持�
   assert.match(restored.history[0].content, /用户讨论了杭州和上海的多轮旅行规划/);
   assert.equal(restored.epoch, 1);
 
-  // CLI 压缩后写回存储：下次恢复直接是压缩后的版本
+  // 压缩后写回存储：下次加载直接是压缩后的版本
   await store.save(restored);
   const reloaded = await store.load("sess_resume_test");
   assert.ok(reloaded !== null);

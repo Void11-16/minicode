@@ -114,11 +114,15 @@ test("通知与非对象消息不产生响应", async () => {
   assert.equal(await handleMcpMessage([1, 2, 3], registry, SERVER), null);
 });
 
-test("createDefaultRegistry 支持自定义 write_document 根目录", async () => {
+test("createDefaultRegistry 支持自定义工作区（文件工具根目录）", async () => {
   const root = await mkdtemp(join(tmpdir(), "minicode-mcp-"));
-  const registry = createDefaultRegistry({ writeRoot: root });
-  const tool = registry.get("write_document");
+  const registry = createDefaultRegistry({ writeRoot: root, workspace: root });
+
+  const tool = registry.get("write_file");
   assert.notEqual(tool, undefined);
   const output = await tool!.execute({ path: "trip.md", content: "# 行程" });
-  assert.match(output, new RegExp(root));
+  assert.match(output, /已写入 trip\.md/);
+  // 无 ctx 时走装配默认工作区（MCP 场景不需要线程化 ctx）
+  const read = await registry.execute("read_file", JSON.stringify({ path: "trip.md" }));
+  assert.match(read, /# 行程/);
 });

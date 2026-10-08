@@ -1,0 +1,48 @@
+[
+  {
+    "id": "quzhou-3d-couple",
+    "title": "衢州三日游",
+    "days": 3,
+    "budget_per_person_yuan": 1500,
+    "taste": "不吃辣、人均60左右、想尝试本地特色",
+    "request": "和女朋友去衢州玩三天，从杭州出发，喜欢古建筑和人文街区，节奏适中，不吃辣"
+  },
+  {
+    "id": "hangzhou-2d-classic",
+    "title": "杭州两日游",
+    "days": 2,
+    "budget_per_person_yuan": 1200,
+    "taste": "清淡为主、想尝本地菜",
+    "request": "周末去杭州玩两天，想看西湖和灵隐寺，喜欢自然风光，节奏轻松一点"
+  },
+  {
+    "id": "beijing-3d-museum",
+    "title": "北京三日游",
+    "days": 3,
+    "budget_per_person_yuan": 2500,
+    "request": "去北京玩三天，对历史博物馆特别感兴趣，想去故宫和国家博物馆，注意闭馆日和预约要求"
+  },
+  {
+    "id": "chengdu-3d-food",
+    "title": "成都三日游",
+    "days": 3,
+    "budget_per_person_yuan": 1800,
+    "taste": "能吃辣、火锅必吃、想多尝试本地小吃",
+    "request": "去成都吃三天，美食优先，顺便逛一两个景点，能吃辣"
+  },
+  {
+    "id": "xian-3d-history",
+    "title": "西安三日游",
+    "days": 3,
+    "budget_per_person_yuan": 2000,
+    "request": "西安玩三天，兵马俑必去，其他想安排城墙和大雁塔周边，行程不要赶"
+  },
+  {
+    "id": "fuzhou-4d-couple",
+    "title": "福州四日游",
+    "days": 4,
+    "budget_per_person_yuan": 2600,
+    "taste": "喜欢甜品小吃、不忌口",
+    "request": "和女朋友去福州玩四天，三坊七巷和烟台山想慢慢细逛，喜欢慢节奏和甜品小吃"
+  }
+]

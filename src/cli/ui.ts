@@ -42,8 +42,10 @@ export class StreamPrinter {
   }
 }
 
-export function printBanner(providerName: string, toolCount: number, sessionId: string, configFile: string, debug: boolean): void {
-  console.log(`minicode 旅行规划助手 (provider: ${providerName}, 工具: ${toolCount} 个, session: ${sessionId})`);
+export function printBanner(providerName: string, toolCount: number, sessionId: string, workspace: string, approvalLabel: string, configFile: string, debug: boolean): void {
+  console.log(`minicode (provider: ${providerName}, 工具: ${toolCount} 个, session: ${sessionId})`);
+  console.log(`工作区: ${workspace}`);
+  console.log(`审批模式: ${approvalLabel}（/approval 调整）`);
   console.log(`配置文件: ${configFile}`);
   if (debug) {
     console.log("调试日志: .minicode/debug.log");
@@ -64,15 +66,17 @@ export function printHelp(toolCount: number): void {
     "    /rename <新标题>          重命名当前会话",
     "    /delete <序号|关键词|id>  删除会话（二次确认，连带归档）",
     "    /history                 查看当前会话完整历史",
+    "    /workspace <目录>        切换当前会话工作区（reset 恢复默认）",
     "",
   "  需求:",
   "    /brief                   交互式填写旅行需求单（逐项输入，填完自动发送）",
   "    /travel on|off           旅行规划模式开关（off = 通用助手）",
     "",
-    "  执行控制:",
-    "    /stop                    中断当前正在执行的轮次（保留会话状态）",
-    "    /queue <内容>             排队到当前轮结束后执行",
-    "    （执行期间直接输入 = steer 实时注入当前轮）",
+  "  执行控制:",
+  "    /stop                    中断当前正在执行的轮次（保留会话状态）",
+  "    /queue <内容>             排队到当前轮结束后执行",
+  "    （执行期间直接输入 = steer 实时注入当前轮）",
+  "    /approval ask|edits|trust  切换审批模式（edits=文件写入免确认；trust=全部免确认，仅本会话）",
     "",
   "  配置:",
   "    /config                  查看配置",
@@ -128,7 +132,6 @@ export function formatConfig(config: AppConfig): string {
     `llm_model:       ${config.llmModel ?? "(默认 gpt-4o-mini)"}`,
     `price_in:        ${config.priceIn ?? "2"} 元/百万tokens (估算用)`,
     `price_out:       ${config.priceOut ?? "3"} 元/百万tokens (估算用)`,
-    `resume_max_tokens: ${config.resumeMaxTokens ?? "8000"} (恢复时超过则自动压缩，0=关闭)`,
     `system_prompt:    ${config.systemPrompt === undefined ? "(默认旅行规划助手)" : `${config.systemPrompt.slice(0, 30)}…`}`,
     `taste_preferences: ${config.tastePreferences === undefined ? "(未设置，规划餐饮时会询问)" : `${config.tastePreferences.slice(0, 30)}…`}`,
     `budget_yuan:      ${config.budgetYuan ?? "0"} (单会话花费上限，0=不限制)`,
@@ -146,7 +149,6 @@ export const CONFIG_HELP = [
   "  /config set llm_base_url http://localhost:11434/v1   # Ollama 等本地服务",
   "  /config set provider mock|deepseek|openai|auto       强制指定",
   "  /config set price_in 2                   输入单价（元/百万 tokens）",
-  "  /config set resume_max_tokens 8000       恢复时压缩阈值（0=关闭）",
   "  /config set system_prompt 你是...        自定义助手人设",
   "  /config set taste_preferences 不吃辣、人均100内、爱本地特色   口味偏好（餐饮推荐参考）",
   "  /config set budget_yuan 5               单会话花费上限（元，0=不限）",

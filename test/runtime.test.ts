@@ -243,3 +243,23 @@ test("/stop 中断: 挂起的 LLM 请求被中止，回调触发且 steer 残留
   // 没有活动轮次时 abort 返回 false
   assert.equal(runtime.abortActiveTurn("sess_stop"), false);
 });
+
+test("checkpoint: 运行时向 Agent 透传安全边界回调（带 sessionId）", async () => {
+  const provider = new ManualProvider();
+  const checkpoints: string[] = [];
+  const runtime = new AgentRuntime({
+    summarize: async () => "摘要",
+    onCheckpoint: (sessionId) => {
+      checkpoints.push(sessionId);
+    },
+  });
+  runtime.registerAgent("sess_cp", new ChatAgent(new Session("sess_cp"), provider, echoRegistry()));
+
+  const turn = runtime.send("sess_cp", "你好", "queue");
+  await waitFor(() => provider.pending.length === 1);
+  provider.complete(0, { type: "text", content: "直接回答" });
+  await turn;
+
+  // 用户消息后 + 最终回答后
+  assert.deepEqual(checkpoints, ["sess_cp", "sess_cp"]);
+});

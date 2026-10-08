@@ -21,9 +21,6 @@ test("ConfigStore set/clear 往返", async () => {
   const saved = await store.set("deepseek_api_key", "sk-test-1234567890");
   assert.equal(saved.deepseekApiKey, "sk-test-1234567890");
   assert.equal(saved.provider, "auto");
-  const withResume = await store.set("resume_max_tokens", "5000");
-  assert.equal(withResume.resumeMaxTokens, "5000");
-
   // 别名 + 磁盘持久化
   const store2 = new ConfigStore((store as unknown as { file: string }).file);
   const saved2 = await store2.set("ds_model", "deepseek-reasoner");
@@ -153,4 +150,26 @@ test("/model 与 /travel 命令：按会话切换模型与旅行模式开关", a
 
   // 用法提示
   assert.equal(await handleCommand(app, "/travel"), true);
+});
+
+test("/approval 命令：切换与查询审批模式", async () => {
+  const state = { mode: "edits" as "ask" | "edits" | "trust" };
+  const app = {
+    currentApprovalMode: () => state.mode,
+    setApprovalMode: async (mode: "ask" | "edits" | "trust") => {
+      state.mode = mode;
+      return mode;
+    },
+  } as unknown as CliApp;
+
+  assert.equal(await handleCommand(app, "/approval trust"), true);
+  assert.equal(state.mode, "trust");
+  assert.equal(await handleCommand(app, "/approval ask"), true);
+  assert.equal(state.mode, "ask");
+  // 查询用法不改变模式
+  assert.equal(await handleCommand(app, "/approval"), true);
+  assert.equal(state.mode, "ask");
+  // 非法参数不改变模式
+  assert.equal(await handleCommand(app, "/approval yolo"), true);
+  assert.equal(state.mode, "ask");
 });

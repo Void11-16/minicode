@@ -281,14 +281,31 @@ export class OpenAICompatProvider implements ChatProvider {
     if (this.systemPrompt !== undefined) {
       messages.push({ role: "system", content: this.systemPrompt });
     }
-    for (const message of history) {
-      if (message.role === "tool") {
+    // OpenAI 兼容协议要求 tool 消息必须逐一回应前面 assistant 的 tool_calls；
+    // 历史压缩、会话中断都可能留下孤儿 tool 或未回应的 tool_calls，原样发送会被 API 以
+    // "Messages with role 'tool' must be a response to a preceding message with 'tool_calls'" 拒绝。
+    // 统一修复：孤儿 tool 丢弃；未回应的 tool_calls 补占位结果，保证消息配对合法。
+    const pending = new Set<string>();
+    const flushPending = () => {
+      for (const id of pending) {
         messages.push({
           role: "tool",
-          tool_call_id: message.toolCallId ?? "",
-          content: message.content,
+          tool_call_id: id,
+          content: "（该工具调用的结果缺失：会话中断或历史已压缩）",
         });
-      } else if (message.role === "assistant" && message.toolCalls !== undefined) {
+      }
+      pending.clear();
+    };
+    for (const message of history) {
+      if (message.role === "tool") {
+        if (message.toolCallId !== undefined && pending.has(message.toolCallId)) {
+          pending.delete(message.toolCallId);
+          messages.push({ role: "tool", tool_call_id: message.toolCallId, content: message.content });
+        }
+        continue;
+      }
+      flushPending();
+      if (message.role === "assistant" && message.toolCalls !== undefined && message.toolCalls.length > 0) {
         messages.push({
           role: "assistant",
           content: message.content === "" ? null : message.content,
@@ -298,10 +315,12 @@ export class OpenAICompatProvider implements ChatProvider {
             function: { name: call.name, arguments: call.arguments },
           })),
         });
-      } else {
-        messages.push({ role: message.role, content: message.content });
+        for (const call of message.toolCalls) pending.add(call.id);
+        continue;
       }
+      messages.push({ role: message.role, content: message.content });
     }
+    flushPending();
     return messages;
   }
 

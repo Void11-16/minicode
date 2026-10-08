@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Session } from "../src/core/session.ts";
@@ -37,6 +37,41 @@ test("JsonFileSessionStore 保存并加载会话", async () => {
   assert.equal(loaded.id, "sess_save_test");
   assert.equal(loaded.history.length, 2);
   // 注意：遵循项目规则不批量删除目录，临时目录交由系统清理
+});
+
+test("save/archive 原子写：覆盖旧文件、不残留临时文件", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "minicode-atomic-"));
+  const store = new JsonFileSessionStore(dir);
+  const session = new Session("sess_atomic");
+  session.add("user", "第一版");
+  await store.save(session);
+  session.add("assistant", "第二版");
+  await store.save(session);
+
+  const names = await readdir(dir);
+  assert.ok(names.includes("sess_atomic.json"));
+  assert.equal(names.filter((name) => name.endsWith(".tmp")).length, 0);
+  assert.equal((await store.load("sess_atomic"))?.history.length, 2);
+
+  await store.archive(session, 1);
+  const archiveNames = await readdir(join(dir, "archive"));
+  assert.deepEqual(archiveNames, ["sess_atomic_epoch1.json"]);
+});
+
+test("崩溃残留的 .tmp 文件不影响 list/load", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "minicode-tmp-"));
+  const store = new JsonFileSessionStore(dir);
+  const session = new Session("sess_ok");
+  session.add("user", "正常会话");
+  await store.save(session);
+
+  // 模拟写入中途崩溃留下的半截临时文件
+  await writeFile(join(dir, "sess_ok.json.abc123.tmp"), '{"id":"sess_ok","messa', "utf8");
+
+  const list = await store.list();
+  assert.equal(list.length, 1);
+  assert.equal(list[0].id, "sess_ok");
+  assert.equal((await store.load("sess_ok"))?.history.length, 1);
 });
 
 test("load 返回 null: 不存在的会话", async () => {

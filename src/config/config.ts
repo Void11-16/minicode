@@ -14,8 +14,6 @@ export interface AppConfig {
   readonly priceIn?: string;
   /** 估算成本用：输出单价（元/百万 tokens） */
   readonly priceOut?: string;
-  /** resume 时历史超过该估算 token 数则自动压缩为摘要+近期消息；0 = 永不压缩 */
-  readonly resumeMaxTokens?: string;
   /** 自定义系统提示词（助手人设）；未设置时用旅行规划默认值 */
   readonly systemPrompt?: string;
   /** 口味偏好（忌口/辣度/预算/偏好），注入提示词供餐饮推荐参考 */
@@ -46,7 +44,6 @@ export const CONFIG_KEY_ALIASES: Record<string, keyof AppConfig> = {
   model: "llmModel",
   price_in: "priceIn",
   price_out: "priceOut",
-  resume_max_tokens: "resumeMaxTokens",
   system_prompt: "systemPrompt",
   taste_preferences: "tastePreferences",
   taste: "tastePreferences",
@@ -116,7 +113,7 @@ function validateConfig(raw: unknown): AppConfig {
   const config: Partial<AppConfig> = { provider };
   for (const key of [
     "deepseekApiKey", "amapApiKey", "deepseekModel", "llmApiKey", "llmBaseUrl", "llmModel",
-    "priceIn", "priceOut", "resumeMaxTokens", "systemPrompt", "budgetYuan",
+    "priceIn", "priceOut", "systemPrompt", "budgetYuan",
     "tastePreferences",
   ]) {
     if (typeof source[key] === "string" && source[key] !== "") {

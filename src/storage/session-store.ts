@@ -1,6 +1,20 @@
-import { mkdir, readdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { Session, type SessionData } from "../core/session.ts";
+
+/**
+ * 原子写：先写同目录唯一临时文件，再 rename 覆盖目标。
+ * rename 在同一文件系统内是原子操作 —— 崩溃/断电时目标文件要么保持旧内容、
+ * 要么已是新内容，不会留下写了一半的损坏 JSON。
+ * 临时文件名带 pid + 随机后缀：多进程（Web + CLI）并发写互不干扰；
+ * 崩溃残留的 .tmp 文件不会被 list()/load() 匹配（它们只认 *.json）。
+ */
+async function writeFileAtomic(file: string, data: string): Promise<void> {
+  const tmp = `${file}.${process.pid.toString(36)}${randomBytes(4).toString("hex")}.tmp`;
+  await writeFile(tmp, data, "utf8");
+  await rename(tmp, file);
+}
 
 export interface SessionMeta {
   readonly id: string;
@@ -33,15 +47,16 @@ export class JsonFileSessionStore implements SessionStore {
 
   async save(session: Session): Promise<void> {
     await mkdir(this.dir, { recursive: true });
-    const file = this.fileFor(session.id);
-    await writeFile(file, JSON.stringify(session.toData(), null, 2), "utf8");
+    await writeFileAtomic(this.fileFor(session.id), JSON.stringify(session.toData(), null, 2));
   }
 
   async archive(session: Session, epoch: number): Promise<void> {
     const archiveDir = join(this.dir, "archive");
     await mkdir(archiveDir, { recursive: true });
-    const file = join(archiveDir, `${session.id}_epoch${epoch}.json`);
-    await writeFile(file, JSON.stringify(session.toData(), null, 2), "utf8");
+    await writeFileAtomic(
+      join(archiveDir, `${session.id}_epoch${epoch}.json`),
+      JSON.stringify(session.toData(), null, 2),
+    );
   }
 
   async delete(id: string): Promise<boolean> {

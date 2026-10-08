@@ -14,9 +14,9 @@
           "location": {
             "name": "衢州水亭门鹿鸣文院漫心府",
             "address": "鹿鸣山文化院街6号楼",
-            "latitude": 28.9702,
-            "longitude": 118.8472,
-            "source": "amap"
+            "latitude": 28.964455,
+            "longitude": 118.855141,
+            "source": "amap-resolved"
           },
           "planned_duration_min": 60,
           "cost_per_person": 200,
@@ -34,9 +34,9 @@
           "location": {
             "name": "钱江源味道(衢州水亭门店)",
             "address": "水亭门宁绍巷18-20号",
-            "latitude": 28.9683,
-            "longitude": 118.8503,
-            "source": "amap"
+            "latitude": 28.961272,
+            "longitude": 118.867255,
+            "source": "amap-resolved"
           },
           "planned_duration_min": 60,
           "cost_per_person": 65,
@@ -68,9 +68,9 @@
           "location": {
             "name": "孔氏南宗家庙",
             "address": "柯城区新桥街96号",
-            "latitude": 28.9637,
-            "longitude": 118.8698,
-            "source": "amap"
+            "latitude": 28.960366,
+            "longitude": 118.876804,
+            "source": "amap-resolved"
           },
           "planned_duration_min": 120,
           "ticket_price_per_person": 20,
@@ -92,9 +92,9 @@
           "location": {
             "name": "鹿鸣山文化院街",
             "address": "白云中大道与芹江东路交汇处",
-            "latitude": 28.9724,
-            "longitude": 118.8492,
-            "source": "amap"
+            "latitude": 28.963901,
+            "longitude": 118.85198,
+            "source": "amap-resolved"
           },
           "planned_duration_min": 100,
           "ticket_price_per_person": 0,
@@ -117,9 +117,9 @@
           "location": {
             "name": "衢湘记特色餐饮(芹江东路店)",
             "address": "芹江东路323、325号",
-            "latitude": 28.9718,
-            "longitude": 118.8438,
-            "source": "amap"
+            "latitude": 28.960937,
+            "longitude": 118.848594,
+            "source": "amap-resolved"
           },
           "planned_duration_min": 60,
           "cost_per_person": 29,
@@ -137,9 +137,9 @@
           "location": {
             "name": "水亭门历史文化街区",
             "address": "柯城区水亭街",
-            "latitude": 28.9656,
-            "longitude": 118.8588,
-            "source": "amap"
+            "latitude": 28.962062,
+            "longitude": 118.867315,
+            "source": "amap-resolved"
           },
           "planned_duration_min": 90,
           "ticket_price_per_person": 0,
@@ -168,9 +168,9 @@
           "location": {
             "name": "王阿盖手工小吃(衢州水亭门店)",
             "address": "县西街141号",
-            "latitude": 28.9661,
-            "longitude": 118.8591,
-            "source": "amap"
+            "latitude": 28.96246,
+            "longitude": 118.868897,
+            "source": "amap-resolved"
           },
           "planned_duration_min": 45,
           "cost_per_person": 39,
@@ -204,9 +204,9 @@
           "location": {
             "name": "江郎山",
             "address": "江山市石门镇",
-            "latitude": 28.5285,
-            "longitude": 118.5692,
-            "source": "amap"
+            "latitude": 28.553412,
+            "longitude": 118.563311,
+            "source": "amap-resolved"
           },
           "planned_duration_min": 270,
           "ticket_price_per_person": 90,
@@ -245,9 +245,9 @@
           "location": {
             "name": "衢州水亭门鹿鸣文院漫心府",
             "address": "鹿鸣山文化院街6号楼",
-            "latitude": 28.9702,
-            "longitude": 118.8472,
-            "source": "amap"
+            "latitude": 28.964455,
+            "longitude": 118.855141,
+            "source": "amap-resolved"
           },
           "planned_duration_min": 45,
           "source": "search",
@@ -263,9 +263,9 @@
           "location": {
             "name": "古铺良食(柯城店)",
             "address": "水亭街朝京门进士巷16号",
-            "latitude": 28.9652,
-            "longitude": 118.8585,
-            "source": "amap"
+            "latitude": 28.961809,
+            "longitude": 118.86692,
+            "source": "amap-resolved"
           },
           "planned_duration_min": 60,
           "cost_per_person": 43,
@@ -282,9 +282,9 @@
           "name": "信安湖夜景 / 水亭门散步",
           "location": {
             "name": "信安湖国家水利风景区",
-            "latitude": 28.9603,
-            "longitude": 118.8561,
-            "source": "amap"
+            "latitude": 28.955043,
+            "longitude": 118.863489,
+            "source": "amap-resolved"
           },
           "planned_duration_min": 90,
           "ticket_price_per_person": 0,
@@ -308,9 +308,9 @@
           "location": {
             "name": "水亭门街区早点摊",
             "address": "柯城区水亭街周边",
-            "latitude": 28.9656,
-            "longitude": 118.8588,
-            "source": "search"
+            "latitude": 28.962828,
+            "longitude": 118.868825,
+            "source": "amap-resolved"
           },
           "planned_duration_min": 45,
           "cost_per_person": 15,
@@ -328,9 +328,9 @@
           "location": {
             "name": "衢州古城文化旅游区衢州诗词公园",
             "address": "花园东大道199号",
-            "latitude": 28.9688,
-            "longitude": 118.8608,
-            "source": "amap"
+            "latitude": 28.968305,
+            "longitude": 118.858719,
+            "source": "amap-resolved"
           },
           "planned_duration_min": 120,
           "ticket_price_per_person": 0,
@@ -353,9 +353,9 @@
           "location": {
             "name": "聚牛轩",
             "address": "上营街16号",
-            "latitude": 28.9664,
-            "longitude": 118.8582,
-            "source": "amap"
+            "latitude": 28.961513,
+            "longitude": 118.866947,
+            "source": "amap-resolved"
           },
           "planned_duration_min": 60,
           "cost_per_person": 62,
@@ -373,9 +373,9 @@
           "location": {
             "name": "衢州古城文化旅游区鹿鸣大草坪",
             "address": "紫薇南路",
-            "latitude": 28.9701,
-            "longitude": 118.8509,
-            "source": "amap"
+            "latitude": 28.963069,
+            "longitude": 118.85933,
+            "source": "amap-resolved"
           },
           "planned_duration_min": 120,
           "ticket_price_per_person": 0,
@@ -397,9 +397,9 @@
           "location": {
             "name": "鹿鸣山文化院街·鹿舍",
             "address": "鹿鸣山文化院街内",
-            "latitude": 28.9719,
-            "longitude": 118.8489,
-            "source": "amap"
+            "latitude": 28.964908,
+            "longitude": 118.854768,
+            "source": "amap-resolved"
           },
           "planned_duration_min": 90,
           "ticket_price_per_person": 0,
@@ -422,9 +422,9 @@
           "location": {
             "name": "水亭门街区本地菜馆",
             "address": "柯城区水亭街周边",
-            "latitude": 28.9654,
-            "longitude": 118.8586,
-            "source": "search"
+            "latitude": 28.962043,
+            "longitude": 118.866886,
+            "source": "amap-resolved"
           },
           "planned_duration_min": 60,
           "cost_per_person": 55,
@@ -441,9 +441,9 @@
           "name": "水亭门夜市 / 信安湖喷泉",
           "location": {
             "name": "信安湖喷泉",
-            "latitude": 28.9603,
-            "longitude": 118.8561,
-            "source": "amap"
+            "latitude": 28.964767,
+            "longitude": 118.863316,
+            "source": "amap-resolved"
           },
           "planned_duration_min": 90,
           "cost_per_person": 20,
@@ -467,9 +467,9 @@
           "location": {
             "name": "水亭门街区早点摊",
             "address": "柯城区水亭街周边",
-            "latitude": 28.9656,
-            "longitude": 118.8588,
-            "source": "search"
+            "latitude": 28.962828,
+            "longitude": 118.868825,
+            "source": "amap-resolved"
           },
           "planned_duration_min": 60,
           "cost_per_person": 20,
@@ -485,9 +485,9 @@
           "location": {
             "name": "衢州水亭门鹿鸣文院漫心府",
             "address": "鹿鸣山文化院街6号楼",
-            "latitude": 28.9702,
-            "longitude": 118.8472,
-            "source": "amap"
+            "latitude": 28.964455,
+            "longitude": 118.855141,
+            "source": "amap-resolved"
           },
           "planned_duration_min": 60,
           "source": "search",
@@ -503,9 +503,9 @@
           "location": {
             "name": "古铺良食(柯城店)",
             "address": "水亭街朝京门进士巷16号",
-            "latitude": 28.9652,
-            "longitude": 118.8585,
-            "source": "amap"
+            "latitude": 28.961809,
+            "longitude": 118.86692,
+            "source": "amap-resolved"
           },
           "planned_duration_min": 60,
           "cost_per_person": 43,
@@ -524,9 +524,9 @@
           "location": {
             "name": "水亭门街区本地菜馆",
             "address": "柯城区水亭街周边",
-            "latitude": 28.9656,
-            "longitude": 118.8588,
-            "source": "search"
+            "latitude": 28.962043,
+            "longitude": 118.866886,
+            "source": "amap-resolved"
           },
           "planned_duration_min": 60,
           "cost_per_person": 60,

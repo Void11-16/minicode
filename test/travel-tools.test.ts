@@ -3,7 +3,6 @@ import { test } from "node:test";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createWriteDocumentTool } from "../src/tools/markdown.ts";
 import { createAttractionsTool } from "../src/tools/attractions.ts";
 import { setAmapKey } from "../src/tools/amap-access.ts";
 import { createReviewsTool } from "../src/tools/reviews.ts";
@@ -17,50 +16,6 @@ function jsonResponse(body: unknown, status = 200): Response {
 function amapResponse(body: Record<string, unknown>): Response {
   return jsonResponse({ status: "1", infocode: "10000", ...body });
 }
-
-test("write_document: 写入并创建多级目录", async () => {
-  const root = await mkdtemp(join(tmpdir(), "minicode-write-"));
-  const tool = createWriteDocumentTool(root);
-
-  const output = await tool.execute({
-    path: "plans/hangzhou.md",
-    content: "# 杭州行程\n\n- 西湖",
-  });
-
-  assert.match(output, /已保存到/);
-  const saved = await readFile(join(root, "plans", "hangzhou.md"), "utf8");
-  assert.equal(saved, "# 杭州行程\n\n- 西湖");
-});
-
-test("write_document: 拒绝越出根目录的路径", async () => {
-  const root = await mkdtemp(join(tmpdir(), "minicode-write-"));
-  const tool = createWriteDocumentTool(root);
-
-  await assert.rejects(
-    () => tool.execute({ path: "../escape.md", content: "x" }),
-    /安全限制/,
-  );
-  await assert.rejects(
-    () => tool.execute({ path: join(tmpdir(), "outside.md"), content: "x" }),
-    /安全限制/,
-  );
-  // 同前缀目录（/root-evil vs /root）：startsWith 式检查会放行，必须拒绝
-  await assert.rejects(
-    () => tool.execute({ path: `${root}-evil/escape.md`, content: "x" }),
-    /安全限制/,
-  );
-  // 根目录内的绝对路径、以 ".." 开头的文件名都是合法写入
-  assert.match(await tool.execute({ path: join(root, "inside.md"), content: "x" }), /已保存到/);
-  assert.match(await tool.execute({ path: "..dots.md", content: "x" }), /已保存到/);
-});
-
-test("write_document: 拒绝不支持的扩展名与缺失内容", async () => {
-  const root = await mkdtemp(join(tmpdir(), "minicode-write-"));
-  const tool = createWriteDocumentTool(root);
-
-  await assert.rejects(() => tool.execute({ path: "a.exe", content: "x" }), /不支持的文件类型/);
-  await assert.rejects(() => tool.execute({ path: "a.md", content: "" }), /非法参数/);
-});
 
 test("search_attractions: 解析 OSM 数据并按距离排序去重", async () => {
   const fetchFn = (async (url: string | URL, init?: RequestInit) => {
@@ -111,8 +66,10 @@ test("search_attractions: 找不到地点 / 无结果", async () => {
 });
 
 test("get_place_reviews: 解析 Bing 结果标题与摘要", async () => {
+  const requests: string[] = [];
   const fetchFn = (async (url: string | URL, init?: RequestInit) => {
     assert.match(String(url), /bing\.com\/search\?q=/);
+    requests.push(String(url));
     const headers = init?.headers as Record<string, string>;
     assert.match(headers["User-Agent"], /Mozilla/);
     return new Response(
@@ -139,6 +96,8 @@ test("get_place_reviews: 解析 Bing 结果标题与摘要", async () => {
   assert.match(output, /非官方评分/);
   assert.match(output, /口碑热度: 评价数约 23000 条/);
   assert.match(output, /第三方评分样本 4\.7/);
+  // 第一个查询变体用引号做精确匹配
+  assert.match(decodeURIComponent(requests[0]), /q="灵隐寺" 杭州 点评/);
 });
 
 test("get_place_reviews: Bing 不可用时降级到 DuckDuckGo", async () => {
@@ -167,11 +126,12 @@ test("get_place_reviews: aspect 参数调整查询词", async () => {
   const fetchFn = (async (url: string | URL) => {
     const u = String(url);
     const match = u.match(/[?&]q=([^&]+)/);
-    if (match !== null) {
-      queries.push(decodeURIComponent(match[1]));
-    }
+    const query = match === null ? "" : decodeURIComponent(match[1]);
+    if (query !== "") queries.push(query);
+    // 返回含地点名的相关结果（查询首词即地点名）
+    const place = query.replace(/^"/, "").split(/[\s"]/)[0];
     return new Response(
-      `<html><li class="b_algo"><h2><a href="#">x</a></h2><p>人均¥80</p></li></html>`,
+      `<html><li class="b_algo"><h2><a href="#">${place} 攻略</a></h2><p>人均¥80，评价不错</p></li></html>`,
       { status: 200, headers: { "Content-Type": "text/html" } },
     );
   }) as typeof fetch;
@@ -181,9 +141,109 @@ test("get_place_reviews: aspect 参数调整查询词", async () => {
   await tool.execute({ place: "楼外楼", city: "杭州", aspect: "招牌菜" });
   await tool.execute({ place: "灵隐寺", city: "杭州" });
 
-  assert.match(queries[0], /新白鹿 杭州 人均 价格 多少钱/);
-  assert.match(queries[1], /楼外楼 杭州 招牌菜 必点 推荐/);
-  assert.match(queries[2], /灵隐寺 杭州 点评 评价 值得去吗/);
+  // 首个变体用引号精确匹配，aspect 词进入查询
+  assert.match(queries[0], /^"新白鹿" 杭州 人均 价格 多少钱$/);
+  assert.ok(queries.some((q) => q.includes("楼外楼") && q.includes("招牌菜 必点 推荐")));
+  assert.ok(queries.some((q) => q.includes("灵隐寺") && q.includes("点评 评价 值得去吗")));
+});
+
+test("get_place_reviews: 百科/词典噪声被过滤，全无关时明确返回无数据", async () => {
+  const fetchFn = (async () => {
+    return new Response(
+      `<html><body>
+        <li class="b_algo"><h2><a href="#">姑_百度百科</a></h2><p>姑，汉语常用字，读作 gū，称父亲的姐妹</p></li>
+        <li class="b_algo"><h2><a href="#">姑的意思,姑的解释-汉语国学</a></h2><p>姑字的意思、读音、部首、笔画</p></li>
+      </body></html>`,
+      { status: 200, headers: { "Content-Type": "text/html" } },
+    );
+  }) as typeof fetch;
+
+  const tool = createReviewsTool(fetchFn);
+  const output = await tool.execute({ place: "姑蔑博物馆", city: "衢州" });
+
+  assert.match(output, /没有搜到「姑蔑博物馆」的相关评价内容/);
+  assert.ok(!output.includes("百度百科"), "噪声结果不应出现在输出里");
+  assert.match(output, /不要臆测好坏/);
+});
+
+test("get_place_reviews: 360 搜索作为引擎之一（res-list 标题+摘要）", async () => {
+  const fetchFn = (async (url: string | URL) => {
+    if (!String(url).includes("so.com")) throw new Error("network blocked");
+    return new Response(
+      `<html><ul>
+        <li class="res-list">
+          <h3 class="res-title"><a href="#">【携程美食林】衢州周叔烤饼(原大叔烤饼)餐馆,超好吃</a></h3>
+          <p class="res-desc">周叔烤饼(原大叔烤饼)点评(5条点评)，人均23元</p>
+        </li>
+        <li class="res-list">
+          <h3><a href="#">衢州衢周叔烤饼(水亭门店)好吃吗,味道怎么样</a></h3>
+          <p class="res-desc">水亭门必吃小吃，酥香外皮</p>
+        </li>
+      </ul></html>`,
+      { status: 200, headers: { "Content-Type": "text/html" } },
+    );
+  }) as typeof fetch;
+
+  const tool = createReviewsTool(fetchFn);
+  const output = await tool.execute({ place: "周叔烤饼", city: "衢州" });
+
+  assert.match(output, /携程美食林/);
+  assert.match(output, /水亭门必吃小吃/);
+});
+
+test("get_place_reviews: Bing/DDG 不可用时降级到百度（本地小店能被搜到）", async () => {
+  const fetchFn = (async (url: string | URL) => {
+    const u = String(url);
+    if (!u.includes("baidu.com/s?wd=")) {
+      throw new Error("network blocked");
+    }
+    return new Response(
+      `<html><div class="result">
+        <h3 class="t"><a href="#">衢周叔烤饼(水亭门店)-地址,电话,价格,营业时间</a></h3>
+        <div class="c-abstract">酥香外皮、饱满肉馅，衢州本地人常吃的烤饼小吃</div>
+      </div></html>`,
+      { status: 200, headers: { "Content-Type": "text/html" } },
+    );
+  }) as typeof fetch;
+
+  const tool = createReviewsTool(fetchFn);
+  const output = await tool.execute({ place: "周叔烤饼", city: "衢州" });
+
+  assert.match(output, /衢周叔烤饼\(水亭门店\)/);
+  assert.match(output, /本地人常吃的烤饼小吃/);
+});
+
+test("get_place_reviews: 摘要中的 HTML 实体被解码", async () => {
+  const fetchFn = (async () =>
+    new Response(
+      `<html><li class="b_algo"><h2><a href="#">龙游石窟评价</a></h2><p>4.8分&#0183;风景&ensp;很好&mdash;值得去</p></li></html>`,
+      { status: 200, headers: { "Content-Type": "text/html" } },
+    )) as typeof fetch;
+  const tool = createReviewsTool(fetchFn);
+  const output = await tool.execute({ place: "龙游石窟", city: "衢州" });
+  assert.match(output, /4\.8分·风景 很好—值得去/);
+});
+
+test("get_place_reviews: 保留相关结果并优先本城市（排除同名异地）", async () => {
+  const fetchFn = (async () => {
+    return new Response(
+      `<html><body>
+        <li class="b_algo"><h2><a href="#">灵隐寺游玩攻略（杭州）</a></h2><p>香火鼎盛，早点去人少</p></li>
+        <li class="b_algo"><h2><a href="#">灵隐寺点评：杭州必去</a></h2><p>4.7分，值得一游</p></li>
+        <li class="b_algo"><h2><a href="#">灵隐寺_百度百科</a></h2><p>词条介绍</p></li>
+        <li class="b_algo"><h2><a href="#">灵隐寺（深圳同名寺庙介绍）</a></h2><p>位于南方某地</p></li>
+      </body></html>`,
+      { status: 200, headers: { "Content-Type": "text/html" } },
+    );
+  }) as typeof fetch;
+
+  const tool = createReviewsTool(fetchFn);
+  const output = await tool.execute({ place: "灵隐寺", city: "杭州" });
+
+  assert.match(output, /灵隐寺游玩攻略（杭州）/);
+  assert.match(output, /灵隐寺点评：杭州必去/);
+  assert.ok(!output.includes("百度百科"), "百科噪声应被剔除");
+  assert.ok(!output.includes("深圳"), "有足够本城市结果时，同名异地的结果应被排除");
 });
 
 test("get_place_reviews: 无结果时返回提示", async () => {

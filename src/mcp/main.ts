@@ -14,15 +14,15 @@ async function main(): Promise<void> {
   const config = await new ConfigStore(join(projectRoot, ".minicode", "config.json")).load();
   setAmapKey(config.amapApiKey);
 
-  // readRoot: MCP 无人工确认环节，read_document 限制在项目目录内防任意路径读取
-  const registry = createDefaultRegistry({ writeRoot: plansDir, readRoot: projectRoot });
+  // workspace: MCP 无人工确认环节，文件类工具与 bash 限制在项目目录内
+  const registry = createDefaultRegistry({ writeRoot: plansDir, workspace: projectRoot });
   await runStdioMcp(registry, {
     name: "minicode",
     version: serverVersion(),
     instructions:
-      "通用 AI 助手工具集（旅行规划为特长）：文档读写、天气、地理编码、路线距离、景点/住宿/餐厅搜索、网络口碑。" +
+      "通用 AI 助手工具集（旅行规划为特长）：文件读写编辑、命令执行、天气、地理编码、路线距离、景点/住宿/餐厅搜索、网络口碑。" +
       "生成或修改行程后必须调用 validate_itinerary；strict 模式未通过时先修正行程再交付。" +
-      `write_document 生成的行程单会保存到 ${plansDir} 目录。` +
+      `save_itinerary 生成的行程单会保存到 ${plansDir} 目录。` +
       (config.tastePreferences !== undefined ? `用户口味偏好：${config.tastePreferences}。` : ""),
   });
 }

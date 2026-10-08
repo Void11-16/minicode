@@ -153,3 +153,37 @@ test("chatStreamWithTools: 流式文本回答逐字回调", async () => {
   }
   assert.deepEqual(deltas, ["今天", "晴。"]);
 });
+
+test("buildMessages: 孤儿 tool 丢弃、未回应的 tool_calls 补占位结果（历史压缩后仍可续聊）", async () => {
+  const requests: Array<Record<string, unknown>> = [];
+  const fetchFn = (async (_url: string | URL, init?: RequestInit) => {
+    requests.push(JSON.parse(String(init?.body)));
+    return jsonResponse({ choices: [{ message: { content: "好的" } }] });
+  }) as typeof fetch;
+
+  const provider = new OpenAICompatProvider({ apiKey: "sk-t", model: "deepseek-chat", fetchFn });
+  await provider.chatWithTools(
+    [
+      // 孤儿 tool：配对的 assistant(tool_calls) 已被历史摘要替换 → 必须丢弃
+      createMessage("tool", "孤儿结果", { toolCallId: "gone", toolName: "search" }),
+      createMessage("assistant", "", { toolCalls: [{ id: "call_1", name: "get_weather", arguments: "{}" }] }),
+      createMessage("tool", "晴 25°C", { toolCallId: "call_1", toolName: "get_weather" }),
+      // 未回应的 tool_calls：会话中断，缺结果 → 补占位 tool 消息
+      createMessage("assistant", "", { toolCalls: [{ id: "call_2", name: "geocode", arguments: "{}" }] }),
+      createMessage("user", "继续"),
+    ],
+    [],
+  );
+
+  const messages = (requests[0].messages as Array<Record<string, unknown>>);
+  assert.deepEqual(
+    messages.map((message) => message.role),
+    ["assistant", "tool", "assistant", "tool", "user"],
+  );
+  assert.equal(messages[1].tool_call_id, "call_1");
+  assert.equal(messages[1].content, "晴 25°C");
+  assert.equal(messages[3].tool_call_id, "call_2");
+  assert.match(String(messages[3].content), /结果缺失/);
+  // 孤儿 tool 没有进入请求
+  assert.ok(!messages.some((message) => message.tool_call_id === "gone"));
+});

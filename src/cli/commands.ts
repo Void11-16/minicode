@@ -2,6 +2,8 @@ import type { CliApp } from "./app.ts";
 import { printSessionMatches, printSessions, formatConfig, printHelp, CONFIG_HELP } from "./ui.ts";
 import { Session } from "../core/session.ts";
 import { findSessions } from "../storage/session-store.ts";
+import { stat } from "node:fs/promises";
+import { resolve } from "node:path";
 import { newProfileId } from "../config/models.ts";
 
 /** 命令处理器：返回 true 表示这行是命令并已处理 */
@@ -23,7 +25,60 @@ export async function handleCommand(app: CliApp, line: string): Promise<boolean>
   }
   if (line === "/models" || line === "/model" || line.startsWith("/model ")) return modelCommand(app, line);
   if (line === "/travel" || line.startsWith("/travel ")) return travelCommand(app, line);
+  if (line === "/workspace" || line.startsWith("/workspace ")) return workspaceCommand(app, line);
+  if (line === "/approval" || line.startsWith("/approval ")) return approvalCommand(app, line);
   return false;
+}
+
+const APPROVAL_LABELS: Record<string, string> = {
+  ask: "🔒 逐条确认（文件与命令都需批准）",
+  edits: "✏️ 自动编辑（工作区文件写入免确认，命令带记忆）",
+  trust: "⚡ 信任会话（全部免确认，仅本会话有效）",
+};
+
+async function approvalCommand(app: CliApp, line: string): Promise<boolean> {
+  const arg = line.slice("/approval".length).trim().toLowerCase();
+  if (arg !== "ask" && arg !== "edits" && arg !== "trust") {
+    console.log(`当前审批模式: ${APPROVAL_LABELS[app.currentApprovalMode()]}`);
+    console.log("用法: /approval ask|edits|trust");
+    console.log("  ask   = 逐条确认（文件与命令都需批准）");
+    console.log("  edits = 自动编辑（工作区文件写入免确认；命令批准过一次即按前缀记忆）");
+    console.log("  trust = 信任会话（全部免确认，仅本会话有效，重启重置）\n");
+    return true;
+  }
+  const applied = await app.setApprovalMode(arg);
+  console.log(`(审批模式已切换: ${APPROVAL_LABELS[applied]})\n`);
+  return true;
+}
+
+async function workspaceCommand(app: CliApp, line: string): Promise<boolean> {
+  const query = line.slice("/workspace".length).trim();
+  const session = app.currentAgent().session;
+  if (query === "") {
+    console.log(`当前工作区: ${session.workspace ?? process.cwd()}`);
+    console.log("用法: /workspace <目录路径> 切换当前会话的工作区（/workspace reset 恢复默认；文件读写与 bash 以此为根）\n");
+    return true;
+  }
+  if (query === "reset") {
+    session.setWorkspace(undefined);
+    app.switchSession(session);
+    await app.sessionService.persist(session);
+    console.log(`(已恢复默认工作区: ${process.cwd()})\n`);
+    return true;
+  }
+  const resolved = resolve(query);
+  try {
+    const info = await stat(resolved);
+    if (!info.isDirectory()) throw new Error("不是目录");
+  } catch {
+    console.log(`切换失败: 目录不存在或不是目录 ${resolved}\n`);
+    return true;
+  }
+  session.setWorkspace(resolved);
+  app.switchSession(session);
+  await app.sessionService.persist(session);
+  console.log(`(当前会话工作区已切换到 ${resolved}；文件读写与 bash 以此为根)\n`);
+  return true;
 }
 
 async function modelCommand(app: CliApp, line: string): Promise<boolean> {
@@ -390,21 +445,11 @@ async function resumeCommand(app: CliApp, line: string): Promise<boolean> {
     return true;
   }
 
-  const result = await app.sessionService.loadWithPrepare(matches[0].id);
-  if (result === null) {
+  // 纯加载快速路径：恢复不做同步压缩（压缩由运行时在轮次开始时按需执行）
+  const restored = await app.store.load(matches[0].id);
+  if (restored === null) {
     console.log(`会话文件读取失败: ${matches[0].id}\n`);
     return true;
-  }
-
-  const restored = result.session;
-  if (result.compactionError !== undefined) {
-    console.log(`⚠️ 自动压缩失败（${result.compactionError}），已全量恢复`);
-  }
-  if (result.compacted !== undefined) {
-    console.log(
-      `♻️ 历史较长（估算 ${result.compacted.tokensBefore} tokens），已压缩为摘要 + 最近 8 条` +
-      `（估算 ${result.compacted.tokensAfter} tokens，进入第 ${result.compacted.epoch} 纪元）`,
-    );
   }
 
   app.switchSession(restored);

@@ -10,7 +10,6 @@ import {
 import { geocodeLocation } from "../src/tools/geocoding.ts";
 import { createWeatherTool } from "../src/tools/weather.ts";
 import { createStayTool } from "../src/tools/stay.ts";
-import { createDocumentTool } from "../src/tools/docs.ts";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -217,55 +216,4 @@ test("search_stays 工具: 无结果时提示扩大半径", async () => {
   const output = await tool.execute({ city: "测试城" });
   assert.match(output, /没有找到有名称的住宿/);
   assert.match(output, /扩大 radius_km/);
-});
-
-test("read_document 工具: txt / csv / json 解析", async () => {
-  const tool = createDocumentTool();
-  const dir = await mkdtemp(join(tmpdir(), "minicode-doc-"));
-
-  const txt = join(dir, "行程.txt");
-  await writeFile(txt, "10-01 到达杭州", "utf8");
-  assert.equal(await tool.execute({ path: txt }), "10-01 到达杭州");
-
-  const csv = join(dir, "行程.csv");
-  await writeFile(csv, 'date,city,note\n2026-10-01,杭州,"高铁, 下午到"', "utf8");
-  const csvOut = await tool.execute({ path: csv });
-  assert.match(csvOut, /date, city, note/);
-  assert.match(csvOut, /"高铁, 下午到"/);
-
-  const json = join(dir, "data.json");
-  await writeFile(json, '{"a":1}', "utf8");
-  assert.equal(await tool.execute({ path: json }), '{\n  "a": 1\n}');
-});
-
-test("read_document 工具: 文件不存在抛错", async () => {
-  const tool = createDocumentTool();
-  await assert.rejects(() => tool.execute({ path: "Z:/不存在.txt" }));
-});
-
-test("read_document 工具: 超过 2MB 的文件拒绝读取（防 OOM）", async () => {
-  const tool = createDocumentTool();
-  const dir = await mkdtemp(join(tmpdir(), "minicode-doc-"));
-  const big = join(dir, "big.txt");
-  await writeFile(big, Buffer.alloc(3 * 1024 * 1024, "a"), "utf8");
-
-  await assert.rejects(
-    () => tool.execute({ path: big }),
-    /文件过大.*3145728 字节/,
-  );
-});
-
-test("read_document 工具: 传入 readRoot 时限制在根内", async () => {
-  const root = await mkdtemp(join(tmpdir(), "minicode-readroot-"));
-  const outside = await mkdtemp(join(tmpdir(), "minicode-outside-"));
-  const insideFile = join(root, "ok.txt");
-  const outsideFile = join(outside, "secret.txt");
-  await writeFile(insideFile, "inside", "utf8");
-  await writeFile(outsideFile, "secret", "utf8");
-  const tool = createDocumentTool({ readRoot: root });
-
-  assert.equal(await tool.execute({ path: insideFile }), "inside");
-  await assert.rejects(() => tool.execute({ path: outsideFile }), /安全限制/);
-  // 不传 readRoot = 任意路径可读（CLI/Web 有人工确认门槛）
-  assert.equal(await createDocumentTool().execute({ path: outsideFile }), "secret");
 });

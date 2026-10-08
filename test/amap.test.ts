@@ -31,6 +31,13 @@ test("AmapClient: 错误 infocode 转可读信息", async () => {
   const client = new AmapClient({ apiKey: "k", fetchFn });
 
   await assert.rejects(() => client.geocode("杭州"), /日配额已用完/);
+
+  // 10021 是并发/QPS 超限（不是 IP 白名单），文案必须能引导"稍后重试"
+  const concurrent = new AmapClient({
+    apiKey: "k",
+    fetchFn: amapOnlyFetch(() => amapResponse({ status: "0", infocode: "10021", info: "CUQPS_HAS_EXCEEDED_THE_LIMIT" })),
+  });
+  await assert.rejects(() => concurrent.geocode("杭州"), /并发\/QPS 超限/);
 });
 
 test("AmapClient: geocode 解析坐标", async () => {
@@ -68,6 +75,43 @@ test("AmapClient: POI 搜索带 biz_ext", async () => {
   assert.equal(requests[0].searchParams.get("types"), "110000");
   assert.match(requests[0].pathname, /\/v3\/place\/text/);
   assert.equal(requests[0].searchParams.get("extensions"), "all");
+});
+
+test("AmapClient: poiPhotos 提取名称匹配 POI 的照片", async () => {
+  const requests: URL[] = [];
+  const fetchFn = amapOnlyFetch((url) => {
+    requests.push(url);
+    return amapResponse({
+      pois: [
+        { id: "p1", name: "水亭门城墙", location: "118.8668,28.9621", photos: [{ title: "夜景", url: "https://img.example/1.jpg" }, { title: "城门", url: "https://img.example/2.jpg" }, { title: "空图", url: "" }] },
+        { id: "p2", name: "别的店", location: "118.85,28.96", photos: [{ url: "https://img.example/x.jpg" }] },
+      ],
+    });
+  });
+  const client = new AmapClient({ apiKey: "k", fetchFn });
+
+  const photos = await client.poiPhotos("水亭门城墙", { latitude: 28.962, longitude: 118.867 });
+
+  assert.deepEqual(photos, ["https://img.example/1.jpg", "https://img.example/2.jpg"]);
+  assert.match(requests[0].pathname, /\/v3\/place\/text/);
+});
+
+test("AmapClient: poiPhotos 名称不匹配或无照片时返回空数组", async () => {
+  const noMatch = new AmapClient({
+    apiKey: "k",
+    fetchFn: amapOnlyFetch(() =>
+      amapResponse({ pois: [{ id: "p2", name: "别的店", location: "118.8,28.9", photos: [{ url: "https://img.example/x.jpg" }] }] }),
+    ),
+  });
+  assert.deepEqual(await noMatch.poiPhotos("水亭门城墙", { latitude: 28.96, longitude: 118.87 }), []);
+
+  const noPhotos = new AmapClient({
+    apiKey: "k",
+    fetchFn: amapOnlyFetch(() =>
+      amapResponse({ pois: [{ id: "p3", name: "水亭门城墙", location: "118.8668,28.9621" }] }),
+    ),
+  });
+  assert.deepEqual(await noPhotos.poiPhotos("水亭门城墙", { latitude: 28.96, longitude: 118.87 }), []);
 });
 
 test("AmapClient: 公交路径规划解析推荐方案", async () => {
@@ -254,4 +298,46 @@ test("search_stays: 高德结果按评分降序，无评分沉底", async () => 
   assert.ok(output.indexOf("普通连锁酒店") < output.indexOf("无评分宾馆"));
 
   setAmapKey(undefined);
+});
+
+test("AmapClient: 方向 API 解析路径几何点串", async () => {
+  const requests: URL[] = [];
+  const fetchFn = amapOnlyFetch((url) => {
+    requests.push(url);
+    return amapResponse({
+      route: {
+        paths: [{
+          distance: "1850",
+          duration: "900",
+          steps: [
+            { polyline: "118.860000,28.960000;118.862000,28.961000" },
+            { polyline: "118.865000,28.962000;118.868000,28.963000" },
+          ],
+        }],
+      },
+    });
+  });
+  const client = new AmapClient({ apiKey: "k", fetchFn });
+
+  const route = await client.directionRoute(
+    "walking",
+    { latitude: 28.96, longitude: 118.86 },
+    { latitude: 28.963, longitude: 118.868 },
+  );
+
+  assert.ok(route !== null);
+  assert.equal(route.distanceM, 1850);
+  assert.equal(route.durationSec, 900);
+  // 两段 step 拼接 + lng,lat 转 lat,lng
+  assert.deepEqual(route.points, [
+    [28.96, 118.86],
+    [28.961, 118.862],
+    [28.962, 118.865],
+    [28.963, 118.868],
+  ]);
+  assert.match(requests[0].pathname, /\/v3\/direction\/walking/);
+
+  // 无方案 → null
+  const empty = new AmapClient({ apiKey: "k", fetchFn: amapOnlyFetch(() => amapResponse({ route: { paths: [] } })) });
+  assert.equal(await empty.directionRoute("driving", { latitude: 1, longitude: 1 }, { latitude: 2, longitude: 2 }), null);
 });

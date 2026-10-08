@@ -31,16 +31,36 @@ export function assertInsideRoot(rootDir: string, absolute: string): void {
   }
 }
 
+/** 单次工具调用的运行上下文：工作区（文件/命令的根）与中断信号 */
+export interface ToolContext {
+  /** 本次调用所属会话的工作区；文件类工具与 bash 以此为根 */
+  readonly workspace: string;
+  /** 中断信号（/stop）：长任务（如 bash）应立即终止 */
+  readonly signal?: AbortSignal;
+}
+
 export interface Tool {
   readonly name: string;
   /** 给 LLM 看的描述：决定模型何时、如何使用这个工具 */
   readonly description: string;
   readonly parameters: ToolParameters;
   /** 执行工具，返回 LLM 可读的文本结果（出错时 throw，由 Agent 捕获回传） */
-  execute(args: Record<string, unknown>): Promise<string>;
+  execute(args: Record<string, unknown>, ctx?: ToolContext): Promise<string>;
 
   /** 执行前需要用户确认（写文件、读敏感文件等有副作用的操作） */
   readonly requiresConfirmation?: boolean;
+
+  /**
+   * 动态确认判断（按参数决定，如 bash 只读命令免确认）。
+   * 存在时优先于 requiresConfirmation；返回 true 表示需要用户确认。
+   */
+  needsConfirmation?(args: Record<string, unknown>): boolean;
+
+  /** 是否允许「本次会话总是允许」选项（bash 等高风险工具应设 false，保持逐条确认） */
+  readonly sessionAlwaysAllowed?: boolean;
+
+  /** 工作区内文件写入类工具：审批模式为「自动编辑」时免确认 */
+  readonly workspaceEdit?: boolean;
 
   /** 确认时展示给用户看的人类可读描述 */
   confirmationMessage?(args: Record<string, unknown>): string;
@@ -78,7 +98,7 @@ export class ToolRegistry {
    * 按名称执行工具。参数是 LLM 给的原始 JSON 字符串。
    * 工具不存在或参数非法都会抛错——Agent 会把错误文本回传给模型。
    */
-  async execute(name: string, argsJson: string): Promise<string> {
+  async execute(name: string, argsJson: string, ctx?: ToolContext): Promise<string> {
     const tool = this.tools.get(name);
     if (tool === undefined) {
       throw new Error(`工具不存在: ${name}（可用: ${[...this.tools.keys()].join(", ")}）`);
@@ -94,6 +114,6 @@ export class ToolRegistry {
       throw new Error("参数必须是 JSON 对象");
     }
 
-    return tool.execute(args);
+    return tool.execute(args, ctx);
   }
 }

@@ -3,8 +3,14 @@ import { createWeatherTool } from "./weather.ts";
 import { createGeocodeTool, createReverseGeocodeTool, createDistanceTool } from "./geo.ts";
 import { createRouteTool } from "./route.ts";
 import { createStayTool } from "./stay.ts";
-import { createDocumentTool } from "./docs.ts";
-import { createWriteDocumentTool } from "./markdown.ts";
+import {
+  createEditFileTool,
+  createGrepTool,
+  createListFilesTool,
+  createReadFileTool,
+  createWriteFileTool,
+} from "./files.ts";
+import { createBashTool } from "./bash.ts";
 import { createAttractionsTool } from "./attractions.ts";
 import { createReviewsTool } from "./reviews.ts";
 import { createFoodTool } from "./food.ts";
@@ -22,23 +28,28 @@ import { createSaveTravelBriefTool, createLoadTravelBriefTool } from "./brief.ts
  * 之前在无参调用时 setAmapKey(undefined) 会覆盖已配置的 Key（真实 bug）。
  */
 export interface DefaultRegistryOptions {
-  /** write_document 的可写根目录；MCP 等场景固定到项目目录，不依赖启动 cwd */
+  /** itinerary/brief 等产物目录（plans/）的根；MCP 等场景固定到项目目录，不依赖启动 cwd */
   readonly writeRoot?: string;
-  /** read_document 的可读根目录；MCP 等无人工确认的场景必须传入 */
-  readonly readRoot?: string;
+  /** 文件类工具与 bash 的默认工作区（运行时 ctx.workspace 优先）；默认 cwd */
+  readonly workspace?: string;
 }
 
 export function createDefaultRegistry(options: DefaultRegistryOptions = {}): ToolRegistry {
+  const workspace = options.workspace ?? process.cwd();
   const registry = new ToolRegistry();
   registry
+    .register(createReadFileTool(workspace))
+    .register(createWriteFileTool(workspace))
+    .register(createEditFileTool(workspace))
+    .register(createListFilesTool(workspace))
+    .register(createGrepTool(workspace))
+    .register(createBashTool(workspace))
     .register(createWeatherTool())
     .register(createGeocodeTool())
     .register(createReverseGeocodeTool())
     .register(createDistanceTool())
     .register(createRouteTool())
     .register(createStayTool())
-    .register(createDocumentTool(options.readRoot === undefined ? {} : { readRoot: options.readRoot }))
-    .register(createWriteDocumentTool(options.writeRoot ?? process.cwd()))
     .register(createAttractionsTool())
     .register(createReviewsTool())
     .register(createFoodTool())

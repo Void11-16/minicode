@@ -1,7 +1,8 @@
 import type { Session } from "../core/session.ts";
 import type { ChatProvider } from "../llm/provider.ts";
-import type { ToolCall } from "../core/message.ts";
-import type { ToolRegistry } from "../tools/tool.ts";
+import type { PromptMessage, ToolCall } from "../core/message.ts";
+import type { ToolContext, ToolRegistry } from "../tools/tool.ts";
+import { debugLog } from "../util/logger.ts";
 
 export interface AgentEvent {
   readonly type: "tool_start" | "tool_end" | "tool_error" | "tool_denied";
@@ -24,6 +25,12 @@ export interface RunOptions {
    * 返回的消息会作为 user 消息追加进历史，模型在下一轮就能看到。
    */
   readonly takeSteeredMessages?: () => string[];
+
+  /**
+   * 持久化检查点：在安全边界调用（用户消息入库后、每批工具结果写完后、最终回答写入后）。
+   * 崩溃时最多丢失进行中的半步，而不是整轮。回调失败不打断对话（只记调试日志）。
+   */
+  readonly onCheckpoint?: () => void | Promise<void>;
 }
 
 export interface PermissionRequest {
@@ -34,6 +41,9 @@ export interface PermissionRequest {
 }
 
 export type PermissionHandler = (request: PermissionRequest) => Promise<boolean>;
+
+/** 剩余轮数少于该值时，每次请求注入收尾提醒（不写入会话历史） */
+const WRAP_UP_HINT_ROUNDS = 3;
 
 /** 用户主动中断当前轮（/stop）时抛出 */
 export class TurnAbortedError extends Error {
@@ -52,13 +62,21 @@ export class ChatAgent {
   private readonly sessionValue: Session;
   private readonly provider: ChatProvider;
   private readonly tools: ToolRegistry | undefined;
+  /** 装配默认工作区（会话未单独指定时用）；文件类工具与 bash 以此为根 */
+  private readonly defaultWorkspace: string;
   /** 当前执行轮的中断控制器（/stop 用） */
   private currentController: AbortController | undefined;
 
-  constructor(session: Session, provider: ChatProvider, tools?: ToolRegistry) {
+  constructor(session: Session, provider: ChatProvider, tools?: ToolRegistry, defaultWorkspace: string = process.cwd()) {
     this.sessionValue = session;
     this.provider = provider;
     this.tools = tools;
+    this.defaultWorkspace = defaultWorkspace;
+  }
+
+  /** 本 agent 当前生效的工作区：会话指定 > 装配默认 */
+  get workspace(): string {
+    return this.sessionValue.workspace ?? this.defaultWorkspace;
   }
 
   get history() {
@@ -134,7 +152,10 @@ export class ChatAgent {
     const tools = this.tools;
     const chatWithTools = this.provider.chatWithTools;
     if (tools === undefined || tools.size === 0 || chatWithTools === undefined) {
-      return this.send(userInput); // 不支持工具 → 降级纯对话
+      // 不支持工具 → 降级纯对话
+      const reply = await this.send(userInput);
+      await this.checkpoint(options);
+      return reply;
     }
 
     const maxToolRounds = options.maxToolRounds ?? 5;
@@ -147,6 +168,7 @@ export class ChatAgent {
 
     try {
       this.sessionValue.add("user", trimmed);
+      await this.checkpoint(options);
 
       for (let round = 0; round < maxToolRounds; round++) {
         if (controller.signal.aborted) throw new TurnAbortedError();
@@ -163,19 +185,25 @@ export class ChatAgent {
           0,
         );
 
+        // 剩余轮数不足时注入收尾提醒（仅本次请求可见，不进入会话历史，避免污染后续轮次）
+        const remaining = maxToolRounds - round - 1;
+        const requestHistory = remaining < WRAP_UP_HINT_ROUNDS
+          ? [...this.sessionValue.history, wrapUpHint(remaining)]
+          : this.sessionValue.history;
+
         // 优先流式（最终回答逐字输出），Provider 不支持时降级
         let result;
         try {
           if (streamWithTools !== undefined) {
             result = await streamWithTools.call(
               this.provider,
-              this.sessionValue.history,
+              requestHistory,
               definitions,
               options.onTextDelta ?? (() => {}),
               controller.signal,
             );
           } else {
-            result = await chatWithTools.call(this.provider, this.sessionValue.history, definitions, controller.signal);
+            result = await chatWithTools.call(this.provider, requestHistory, definitions, controller.signal);
           }
         } catch (error) {
           // 中断信号导致的任何失败统一转为 TurnAbortedError
@@ -194,6 +222,7 @@ export class ChatAgent {
 
         if (result.type === "text") {
           this.sessionValue.add("assistant", result.content);
+          await this.checkpoint(options);
           return result.content;
         }
 
@@ -212,13 +241,55 @@ export class ChatAgent {
             continue;
           }
 
-          const output = await this.executeTool(call, tools, onEvent);
+          const output = await this.executeTool(call, tools, { workspace: this.workspace, signal: controller.signal }, onEvent);
           this.sessionValue.add("tool", output, { toolCallId: call.id, toolName: call.name });
         }
+        // 一批工具结果全部回填完毕 = 历史一致的安全边界，落盘
+        await this.checkpoint(options);
+      }
+      // 轮次用尽：再做一次"禁用工具"的收尾请求，保证用户拿到最终产出而不是硬报错
+      const wrapUp = await this.forceFinalAnswer(options.onTextDelta);
+      if (wrapUp !== undefined && wrapUp.trim() !== "") {
+        if (controller.signal.aborted) throw new TurnAbortedError();
+        this.sessionValue.add("assistant", wrapUp);
+        await this.checkpoint(options);
+        return wrapUp;
       }
       throw new Error(`工具调用超过 ${maxToolRounds} 轮上限，模型未能给出最终回答`);
     } finally {
       this.currentController = undefined;
+    }
+  }
+
+  /** 安全边界快照：落盘失败只是丢快照，不该打断对话 */
+  private async checkpoint(options: RunOptions): Promise<void> {
+    if (options.onCheckpoint === undefined) return;
+    try {
+      await options.onCheckpoint();
+    } catch (error) {
+      debugLog("agent", `checkpoint 失败: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  /**
+   * 收尾兜底：工具已被禁用，要求模型基于已有信息直接给出最终回答。
+   * 失败（网络/脚本耗尽）返回 undefined，由调用方回落到原始报错。
+   */
+  private async forceFinalAnswer(onTextDelta?: (delta: string) => void): Promise<string | undefined> {
+    const instruction: PromptMessage = {
+      role: "system",
+      content:
+        "工具调用轮次已全部用尽，工具已被禁用。请基于以上已获得的信息直接给出最终回答：" +
+        "保留关键结论与数据；未查到的部分明确说明，不要再请求调用工具。",
+    };
+    const history = [...this.sessionValue.history, instruction];
+    try {
+      if (this.provider.chatStream !== undefined) {
+        return await this.provider.chatStream.call(this.provider, history, onTextDelta ?? (() => {}));
+      }
+      return await this.provider.chat(history);
+    } catch {
+      return undefined;
     }
   }
 
@@ -228,22 +299,26 @@ export class ChatAgent {
     options: RunOptions,
   ): Promise<boolean> {
     const tool = tools.get(call.name);
-    if (tool?.requiresConfirmation !== true) {
-      return true;
+    if (tool === undefined) return true;
+
+    // 参数先解析（动态确认与确认文案共用；解析失败交给 execute 阶段报错）
+    let args: Record<string, unknown> = {};
+    try {
+      args = JSON.parse(call.arguments === "" ? "{}" : call.arguments) as Record<string, unknown>;
+    } catch {
+      // ignore —— 参数非法时按静态标记处理
     }
+
+    const needsConfirm = tool.needsConfirmation !== undefined
+      ? tool.needsConfirmation(args)
+      : tool.requiresConfirmation === true;
+    if (!needsConfirm) return true;
     if (options.onPermission === undefined) {
       // 非交互场景（脚本/测试）默认放行，由调用方决定是否传入回调
       return true;
     }
 
-    let message = `执行工具 ${call.name}`;
-    try {
-      const args = JSON.parse(call.arguments === "" ? "{}" : call.arguments) as Record<string, unknown>;
-      message = tool.confirmationMessage?.(args) ?? message;
-    } catch {
-      // 参数解析失败就用默认描述，具体错误由 execute 阶段处理
-    }
-
+    const message = tool.confirmationMessage?.(args) ?? `执行工具 ${call.name}`;
     return options.onPermission({
       tool: call.name,
       arguments: call.arguments,
@@ -254,13 +329,14 @@ export class ChatAgent {
   private async executeTool(
     call: ToolCall,
     tools: ToolRegistry,
+    ctx: ToolContext,
     onEvent?: (event: AgentEvent) => void,
   ): Promise<string> {
     onEvent?.({ type: "tool_start", name: call.name, arguments: call.arguments });
 
     let output: string;
     try {
-      output = await tools.execute(call.name, call.arguments);
+      output = await tools.execute(call.name, call.arguments, ctx);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       onEvent?.({ type: "tool_error", name: call.name, error: message });
@@ -272,4 +348,17 @@ export class ChatAgent {
     onEvent?.({ type: "tool_end", name: call.name, output });
     return output;
   }
+}
+
+/** 剩余轮数不足时的收尾提醒（作为请求尾部的临时 system 消息，不写入会话历史） */
+function wrapUpHint(remaining: number): PromptMessage {
+  const budget = remaining === 0
+    ? "这是本轮最后一次工具调用机会"
+    : `本轮之后还剩 ${remaining} 轮工具调用预算`;
+  return {
+    role: "system",
+    content:
+      `【轮次提醒】${budget}。请避免重复查询，优先补齐关键信息并尽快收敛；` +
+      "如果现有数据已足够，请立即用文字给出最终回答。",
+  };
 }

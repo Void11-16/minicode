@@ -52,6 +52,39 @@ const COMPLETE_DAYS = [
         confidence: "high",
       },
       {
+        id: "lunch-2",
+        type: "meal",
+        subtype: "lunch",
+        name: "绿茶餐厅",
+        location: { latitude: 30.245, longitude: 120.145, source: "amap" },
+        cost_per_person: 45,
+        cuisine: "融合菜",
+        source: "amap",
+        confidence: "medium",
+      },
+      {
+        id: "lunch-3",
+        type: "meal",
+        subtype: "lunch",
+        name: "外婆家",
+        location: { latitude: 30.25, longitude: 120.155, source: "amap" },
+        cost_per_person: 60,
+        cuisine: "杭帮菜",
+        source: "amap",
+        confidence: "medium",
+      },
+      {
+        id: "lunch-4",
+        type: "meal",
+        subtype: "lunch",
+        name: "楼外楼",
+        location: { latitude: 30.247, longitude: 120.14, source: "amap" },
+        cost_per_person: 150,
+        cuisine: "杭帮菜",
+        source: "amap",
+        confidence: "medium",
+      },
+      {
         id: "transport-1",
         time: "13:30",
         end_time: "14:00",
@@ -67,7 +100,7 @@ const COMPLETE_DAYS = [
       {
         id: "visit-2",
         time: "14:00",
-        end_time: "16:00",
+        end_time: "16:30",
         type: "visit",
         name: "河坊街",
         location: { latitude: 30.243, longitude: 120.166, source: "amap" },
@@ -77,8 +110,8 @@ const COMPLETE_DAYS = [
       },
       {
         id: "dinner-1",
-        time: "18:00",
-        end_time: "19:00",
+        time: "17:30",
+        end_time: "18:30",
         type: "meal",
         subtype: "dinner",
         name: "新白鹿",
@@ -87,6 +120,39 @@ const COMPLETE_DAYS = [
         cuisine: "杭帮菜",
         source: "amap",
         confidence: "high",
+      },
+      {
+        id: "dinner-2",
+        type: "meal",
+        subtype: "dinner",
+        name: "弄堂里",
+        location: { latitude: 30.252, longitude: 120.158, source: "amap" },
+        cost_per_person: 65,
+        cuisine: "杭帮菜",
+        source: "amap",
+        confidence: "medium",
+      },
+      {
+        id: "dinner-3",
+        type: "meal",
+        subtype: "dinner",
+        name: "奎元馆",
+        location: { latitude: 30.248, longitude: 120.162, source: "amap" },
+        cost_per_person: 55,
+        cuisine: "面食",
+        source: "amap",
+        confidence: "medium",
+      },
+      {
+        id: "dinner-4",
+        type: "meal",
+        subtype: "dinner",
+        name: "西湖春天",
+        location: { latitude: 30.253, longitude: 120.165, source: "amap" },
+        cost_per_person: 110,
+        cuisine: "粤菜",
+        source: "amap",
+        confidence: "medium",
       },
     ],
   },
@@ -129,6 +195,52 @@ test("save/load/list 往返：增量修改的基础", async () => {
 
   const listed = await list.execute({});
   assert.match(listed, /上海一日（1 天 \/ 2 项）/);
+});
+
+test("save_itinerary: merge=true 按 date 合并（分天保存，其余天保留）", async () => {
+  const root = await mkdtemp(join(tmpdir(), "minicode-itin-merge-"));
+  const save = createSaveItineraryTool(root);
+  const load = createLoadItineraryTool(root);
+
+  await save.execute({
+    title: "合并测试",
+    days: [
+      { date: "2026-10-10", items: [{ type: "visit", name: "旧A" }] },
+      { date: "2026-10-11", items: [{ type: "visit", name: "旧B" }] },
+    ],
+  });
+
+  // 只更新第 2 天：第 1 天保持原样
+  const output = await save.execute({
+    title: "合并测试",
+    merge: true,
+    days: [{ date: "2026-10-11", items: [{ type: "visit", name: "新B" }] }],
+  });
+  assert.match(output, /合并保存/);
+  const merged = JSON.parse(await load.execute({ title: "合并测试" }) as string);
+  assert.equal(merged.days.length, 2);
+  assert.equal(merged.days[0].items[0].name, "旧A");
+  assert.equal(merged.days[1].items[0].name, "新B");
+
+  // date 不存在 → 追加为新的一天
+  await save.execute({
+    title: "合并测试",
+    merge: true,
+    days: [{ date: "2026-10-12", items: [{ type: "visit", name: "新C" }] }],
+  });
+  const appended = JSON.parse(await load.execute({ title: "合并测试" }) as string);
+  assert.equal(appended.days.length, 3);
+  assert.equal(appended.days[2].items[0].name, "新C");
+
+  // merge 但文件不存在 → 等价全新保存
+  await save.execute({
+    title: "全新合并",
+    merge: true,
+    days: [{ date: "2026-10-10", items: [{ type: "visit", name: "X" }] }],
+  });
+  const fresh = JSON.parse(await load.execute({ title: "全新合并" }) as string);
+  assert.equal(fresh.days.length, 1);
+  assert.equal(fresh.days[0].items[0].name, "X");
 });
 
 test("save_itinerary: 保存质量报告，strict 拦截 P1 问题", async () => {

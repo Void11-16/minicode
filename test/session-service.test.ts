@@ -7,77 +7,39 @@ import { Session } from "../src/core/session.ts";
 import { JsonFileSessionStore } from "../src/storage/session-store.ts";
 import { SessionService } from "../src/service/session-service.ts";
 
-async function makeService(resumeMaxTokens: number, summarizeError = false) {
+test("SessionService: persist 写入可被 store.load 完整读回", async () => {
   const dir = await mkdtemp(join(tmpdir(), "minicode-service-"));
   const store = new JsonFileSessionStore(dir);
-  const service = new SessionService(store, {
-    resumeMaxTokens,
-    summarize: async () => {
-      if (summarizeError) throw new Error("摘要服务不可用");
-      return "会话摘要：讨论了旅行规划。";
-    },
-  });
-  return { store, service };
-}
+  const service = new SessionService(store);
 
-test("SessionService: 短会话直接加载不压缩", async () => {
-  const { store, service } = await makeService(8000);
-  const session = new Session("svc_short");
+  const session = new Session("svc_roundtrip");
   session.add("user", "你好");
-  await store.save(session);
+  session.add("assistant", "你好！");
+  session.setWorkspace("/tmp/ws");
+  await service.persist(session);
 
-  const result = await service.loadWithPrepare("svc_short");
-  assert.ok(result !== null);
-  assert.equal(result.compacted, undefined);
-  assert.equal(result.session.history.length, 1);
-});
-
-test("SessionService: 长会话自动压缩 + 归档 + 回写", async () => {
-  const { store, service } = await makeService(800);
-  const session = new Session("svc_long");
-  for (let i = 0; i < 8; i++) {
-    session.add("user", `问题${i} ${"细节".repeat(60)}`);
-    session.add("assistant", `回答${i} ${"内容".repeat(60)}`);
-  }
-  await store.save(session);
-
-  const result = await service.loadWithPrepare("svc_long");
-  assert.ok(result !== null);
-  assert.ok(result.compacted !== undefined);
-  assert.equal(result.compacted.epoch, 1);
-
-  // 回写后的主文件是轻量版
-  const reloaded = await store.load("svc_long");
+  const reloaded = await store.load("svc_roundtrip");
   assert.ok(reloaded !== null);
-  assert.ok(reloaded.history.length < 16);
+  assert.equal(reloaded.history.length, 2);
+  assert.equal(reloaded.workspace, "/tmp/ws");
 });
 
-test("SessionService: 压缩失败时回退全量恢复（不丢数据）", async () => {
-  const { store, service } = await makeService(800, true);
-  const session = new Session("svc_fail");
-  for (let i = 0; i < 8; i++) {
-    session.add("user", `问题${i} ${"细节".repeat(60)}`);
-    session.add("assistant", `回答${i} ${"内容".repeat(60)}`);
+test("SessionService: 恢复路径是纯加载（不触发任何摘要/网络调用）", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "minicode-service-"));
+  const store = new JsonFileSessionStore(dir);
+  const service = new SessionService(store);
+
+  // 构造一个"超长"会话（若走旧的 resume 压缩逻辑会调用 LLM 摘要）
+  const session = new Session("svc_fast");
+  for (let i = 0; i < 12; i++) {
+    session.add("user", `问题${i} ${"细节".repeat(80)}`);
+    session.add("assistant", `回答${i} ${"内容".repeat(80)}`);
   }
-  await store.save(session);
+  await service.persist(session);
 
-  const result = await service.loadWithPrepare("svc_fail");
-  assert.ok(result !== null);
-  assert.match(result.compactionError ?? "", /摘要服务不可用/);
-  // 全量历史完好
-  assert.equal(result.session.history.length, 16);
-  assert.equal(result.session.epoch, 0);
-});
-
-test("SessionService: 阈值为 0 时永不压缩", async () => {
-  const { store, service } = await makeService(0);
-  const session = new Session("svc_disabled");
-  for (let i = 0; i < 10; i++) {
-    session.add("user", `问题${i} ${"细节".repeat(60)}`);
-  }
-  await store.save(session);
-
-  const result = await service.loadWithPrepare("svc_disabled");
-  assert.ok(result !== null);
-  assert.equal(result.compacted, undefined);
+  // 纯加载：无 summarize 回调可调，加载后历史完整未压缩
+  const loaded = await store.load("svc_fast");
+  assert.ok(loaded !== null);
+  assert.equal(loaded.history.length, 24);
+  assert.equal(loaded.epoch, 0);
 });

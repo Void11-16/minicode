@@ -84,3 +84,63 @@ test("历史条数不足 keepRecent 时不压缩（即使 token 超限）", asyn
 
   assert.equal(await manager.maybeCompact(session), null);
 });
+
+test("压缩时截断超长的工具消息（否则保留的最近窗口仍超阈值，导致每轮重复压缩）", async () => {
+  const session = new Session("sess_tool_trim");
+  session.add("user", "查一下杭州的景点");
+  session.add("assistant", "好的");
+  // 最近窗口里塞入超大工具结果（模拟搜索结果每次 16KB 一条）
+  for (let i = 0; i < 4; i++) {
+    session.add("assistant", `第${i}轮查询`);
+    session.add("tool", "搜索结果：" + "数据".repeat(8000), { toolCallId: `c${i}`, toolName: "search_attractions" });
+  }
+
+  const manager = new ContextEpochManager({
+    maxPromptTokens: 100,
+    keepRecent: 8,
+    summarize: async () => "摘要",
+  });
+
+  assert.equal(session.history.length, 10); // 超过 keepRecent 才会触发压缩
+  const info = await manager.maybeCompact(session);
+  assert.ok(info !== null);
+
+  // 保留窗口内的工具消息已被截断到上限
+  const keptTools = session.history.filter((message) => message.role === "tool");
+  assert.equal(keptTools.length, 4);
+  for (const message of keptTools) {
+    assert.match(message.content, /已截断/);
+    assert.ok(message.content.length < 3200, "截断后单条应接近上限");
+  }
+  // 截断生效后窗口显著变小（防止下轮再触发压缩）
+  assert.ok(info!.tokensAfter < info!.tokensBefore);
+  assert.ok(info!.tokensAfter < info!.tokensBefore / 3, "压缩后估算应大幅低于压缩前");
+});
+
+test("压缩边界不拆散工具调用组（保留窗口不以孤儿 tool 开头）", async () => {
+  const session = new Session("sess_boundary");
+  session.add("user", "帮我规划");
+  session.add("assistant", "好的");
+  session.add("assistant", "", { toolCalls: [{ id: "c1", name: "search", arguments: "{}" }] });
+  session.add("tool", "结果1", { toolCallId: "c1", toolName: "search" });
+  session.add("assistant", "", { toolCalls: [{ id: "c2", name: "search", arguments: "{}" }] });
+  session.add("tool", "结果2", { toolCallId: "c2", toolName: "search" });
+  session.add("user", "继续");
+  session.add("assistant", "好");
+
+  const manager = new ContextEpochManager({
+    maxPromptTokens: 10,
+    keepRecent: 3,
+    summarize: async () => "摘要",
+  });
+  const info = await manager.maybeCompact(session);
+  assert.ok(info !== null);
+  // 边界原落在 tool(c2)（index 5），应回退到助手调用（index 4），整组保留
+  assert.equal(info!.removedMessages, 4);
+  const kept = session.history.slice(1); // 跳过摘要
+  assert.notEqual(kept[0].role, "tool", "保留窗口不能以孤儿 tool 开头");
+  assert.equal(kept[0].role, "assistant");
+  assert.equal(kept[0].toolCalls?.[0].id, "c2");
+  assert.equal(kept[1].role, "tool");
+  assert.equal(kept[1].toolCallId, "c2");
+});

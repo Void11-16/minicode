@@ -42,6 +42,28 @@ function echoTool() {
   };
 }
 
+/** 永远请求工具调用的 Provider；chat（收尾请求）返回预设总结 */
+class EndlessToolProvider implements ChatProvider {
+  readonly name = "endless";
+  readonly chatHistories: PromptMessage[][] = [];
+  private readonly wrapUpReply: string;
+  private toolCalls = 0;
+
+  constructor(wrapUpReply: string) {
+    this.wrapUpReply = wrapUpReply;
+  }
+
+  async chat(history: readonly PromptMessage[]): Promise<string> {
+    this.chatHistories.push([...history]);
+    return this.wrapUpReply;
+  }
+
+  async chatWithTools(): Promise<LLMResult> {
+    this.toolCalls += 1;
+    return { type: "tool_calls", toolCalls: [{ id: `c${this.toolCalls}`, name: "echo", arguments: "{}" }] };
+  }
+}
+
 test("Agent 工具循环: 调用工具 → 结果回传 → 最终回答", async () => {
   const provider = new ScriptedProvider([
     { type: "tool_calls", toolCalls: [{ id: "call_1", name: "echo", arguments: '{"text":"你好"}' }] },
@@ -74,6 +96,45 @@ test("Agent 工具循环: 调用工具 → 结果回传 → 最终回答", async
   );
 });
 
+test("Agent 安全检查点：用户消息后、工具批次后、最终回答后各触发一次", async () => {
+  const provider = new ScriptedProvider([
+    { type: "tool_calls", toolCalls: [{ id: "call_1", name: "echo", arguments: '{"text":"你好"}' }] },
+    { type: "text", content: "完成" },
+  ]);
+  const registry = new ToolRegistry();
+  registry.register(echoTool());
+  const agent = new ChatAgent(new Session(), provider, registry);
+
+  const snapshots: number[] = [];
+  const reply = await agent.run("测试", {
+    onCheckpoint: () => {
+      snapshots.push(agent.history.length);
+    },
+  });
+
+  assert.equal(reply, "完成");
+  // 落盘时机：仅用户消息 → 工具结果全部回填 → 最终回答入库
+  assert.deepEqual(snapshots, [1, 3, 4]);
+});
+
+test("Agent 检查点失败不打断对话，后续边界仍会尝试", async () => {
+  const provider = new ScriptedProvider([{ type: "text", content: "照常回答" }]);
+  const registry = new ToolRegistry();
+  registry.register(echoTool());
+  const agent = new ChatAgent(new Session(), provider, registry);
+
+  let calls = 0;
+  const reply = await agent.run("测试", {
+    onCheckpoint: () => {
+      calls += 1;
+      throw new Error("磁盘已满");
+    },
+  });
+
+  assert.equal(reply, "照常回答");
+  assert.equal(calls, 2);
+});
+
 test("Agent 工具循环: 工具出错时错误回传给模型", async () => {
   const provider = new ScriptedProvider([
     { type: "tool_calls", toolCalls: [{ id: "call_1", name: "no_such_tool", arguments: "{}" }] },
@@ -91,14 +152,59 @@ test("Agent 工具循环: 工具出错时错误回传给模型", async () => {
   assert.equal(events[1].type, "tool_error");
 });
 
-test("Agent 工具循环: 超过最大轮数抛错", async () => {
+test("Agent 工具循环: 超过最大轮数且收尾失败时抛错（兜底路径）", async () => {
   const endless: LLMResponse = { type: "tool_calls", toolCalls: [{ id: "c", name: "echo", arguments: "{}" }] };
   const provider = new ScriptedProvider([endless, endless, endless]);
   const registry = new ToolRegistry();
   registry.register(echoTool());
   const agent = new ChatAgent(new Session(), provider, registry);
 
+  // ScriptedProvider 的 chat 会抛错 → 收尾请求失败 → 回落到原始错误
   await assert.rejects(() => agent.run("测试", { maxToolRounds: 3 }), /超过 3 轮上限/);
+});
+
+test("Agent 工具循环: 打满轮次后自动收尾给出最终回答", async () => {
+  const provider = new EndlessToolProvider("收尾总结：整合已获得的数据如下…");
+  const registry = new ToolRegistry();
+  registry.register(echoTool());
+  const agent = new ChatAgent(new Session(), provider, registry);
+
+  const deltas: string[] = [];
+  const reply = await agent.run("测试", { maxToolRounds: 2, onTextDelta: (delta) => deltas.push(delta) });
+
+  assert.equal(reply, "收尾总结：整合已获得的数据如下…");
+  // 收尾请求的历史以「禁用工具」系统指令结尾
+  assert.equal(provider.chatHistories.length, 1);
+  const wrapHistory = provider.chatHistories[0];
+  assert.equal(wrapHistory[wrapHistory.length - 1].role, "system");
+  assert.match(wrapHistory[wrapHistory.length - 1].content, /用尽|禁用/);
+  // 收尾回答写入会话，成为最终产出
+  assert.equal(agent.history.at(-1)?.content, "收尾总结：整合已获得的数据如下…");
+});
+
+test("Agent 工具循环: 剩余轮数不足时注入收尾提醒（不写入会话历史）", async () => {
+  const endless: LLMResponse = { type: "tool_calls", toolCalls: [{ id: "c", name: "echo", arguments: "{}" }] };
+  const provider = new ScriptedProvider([
+    endless,
+    endless,
+    { type: "text", content: "最终回答" },
+  ]);
+  const registry = new ToolRegistry();
+  registry.register(echoTool());
+  const agent = new ChatAgent(new Session(), provider, registry);
+
+  // maxToolRounds=5：前 2 轮剩余 ≥3 不提醒；第 3 轮剩余 2 起开始提醒
+  const reply = await agent.run("测试", { maxToolRounds: 5 });
+  assert.equal(reply, "最终回答");
+
+  const hasHint = (history: PromptMessage[]) => history.some((message) => message.content.includes("轮次提醒"));
+  assert.equal(hasHint(provider.seenHistories[0]), false);
+  assert.equal(hasHint(provider.seenHistories[1]), false);
+  const third = provider.seenHistories[2];
+  assert.equal(third.at(-1)?.role, "system");
+  assert.match(third.at(-1)?.content ?? "", /轮次提醒|还剩 2 轮/);
+  // 提醒是请求级的临时消息，不持久化进会话历史
+  assert.equal(agent.history.some((message) => message.content.includes("轮次提醒")), false);
 });
 
 test("Agent: 无工具注册表时 supportsTools 为 false 并降级", async () => {

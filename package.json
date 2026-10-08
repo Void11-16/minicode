@@ -6,6 +6,8 @@
   "scripts": {
     "chat": "node src/cli/chat.ts",
     "web": "node src/web/main.ts",
+    "eval": "node src/eval/main.ts",
+    "eval:live": "node src/eval/main.ts --live",
     "test": "node --test \"test/*.test.ts\"",
     "typecheck": "tsc --noEmit",
     "lint": "oxlint src test"

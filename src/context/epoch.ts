@@ -43,6 +43,9 @@ export function estimateHistoryTokens(
  *   （DeepSeek 自动缓存相同前缀，命中部分计费大幅下降）
  * - 旧消息不再随每次请求重复发送，防止 token 随对话变长而暴涨
  */
+/** 压缩后保留的工具消息单条上限（字符） */
+const KEPT_TOOL_MAX_CHARS = 3000;
+
 export class ContextEpochManager {
   private readonly maxPromptTokens: number;
   private readonly keepRecent: number;
@@ -66,8 +69,22 @@ export class ContextEpochManager {
       return null; // 历史太短，压缩无意义
     }
 
-    const oldMessages = session.history.slice(0, -this.keepRecent);
-    const recent = session.history.slice(-this.keepRecent);
+    // 压缩边界不能拆散"工具调用组"：若保留窗口以 tool 消息开头，其配对的
+    // assistant(tool_calls) 已被摘要替换，续聊时该 tool 会被 API 判为孤儿而整轮 400。
+    // 边界前移到组起点，把整组工具调用完整保留。
+    let keepFrom = session.history.length - this.keepRecent;
+    while (keepFrom > 0 && session.history[keepFrom].role === "tool") {
+      keepFrom -= 1;
+    }
+    if (keepFrom === 0) return null; // 边界一直退到起点，没有可压缩的历史
+    const oldMessages = session.history.slice(0, keepFrom);
+    // 保留的最近消息里，超长工具结果截断（搜索结果动辄数 KB，不截断会导致
+    // 压缩后仍超阈值 → 每轮重复压缩，白烧 LLM 调用）
+    const recent = session.history.slice(keepFrom).map((message) =>
+      message.role === "tool" && message.content.length > KEPT_TOOL_MAX_CHARS
+        ? { ...message, content: `${message.content.slice(0, KEPT_TOOL_MAX_CHARS)}\n…（历史工具结果过长，已截断）` }
+        : message,
+    );
 
     const nextEpoch = session.epoch + 1;
     // 先归档原始历史（失败则中止，宁可不做压缩也不丢数据），再花 LLM 调用做摘要

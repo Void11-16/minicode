@@ -2,7 +2,7 @@ import * as readline from "node:readline";
 import { join } from "node:path";
 import { Session } from "../core/session.ts";
 import { ChatAgent, type AgentEvent } from "../agent/agent.ts";
-import { BASE_SYSTEM_PROMPT, TRAVEL_SYSTEM_PROMPT } from "../agent/prompt.ts";
+import { composeSystemPrompt, readWorkspaceRules } from "../agent/prompt.ts";
 import { createProvider, createProviderFromProfile } from "../llm/factory.ts";
 import type { ChatProvider } from "../llm/provider.ts";
 import { JsonFileSessionStore } from "../storage/session-store.ts";
@@ -19,6 +19,8 @@ import { handleCommand, executeSimpleCommand } from "./commands.ts";
 import { SessionService } from "../service/session-service.ts";
 import { debugLog } from "../util/logger.ts";
 import { setAmapKey } from "../tools/amap-access.ts";
+import { createPermissionMemory, decidePermission, permissionModeOf } from "../service/permission-policy.ts";
+import type { ApprovalMode, PermissionMemory } from "../service/permission-policy.ts";
 import { appendFile, mkdir } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 
@@ -48,7 +50,10 @@ export class CliApp {
   currentSessionId = "";
   running = true;
   private readonly streamPrinter = new StreamPrinter((sessionId) => sessionId === this.currentSessionId);
-  private readonly sessionAllowedTools = new Set<string>();
+  /** 会话级审批记忆（总是允许的工具 / bash 命令前缀）——策略见 service/permission-policy */
+  private readonly permissionMemories = new Map<string, PermissionMemory>();
+  /** 信任会话（仅内存）：本进程内该会话全部确认放行 */
+  private readonly trustedSessions = new Set<string>();
   private rl: readline.Interface;
   private readonly historyFile = join(process.cwd(), ".minicode", "history.txt");
 
@@ -79,15 +84,16 @@ export class CliApp {
     return Number.parseFloat(this.config.priceOut ?? "3");
   }
 
-  /** 当前生效的系统提示词（配置覆盖 > 模式组合；口味偏好仅旅行模式注入） */
-  get systemPrompt(): string {
-    const modeBase = this.travelMode
-      ? `${BASE_SYSTEM_PROMPT}\n${TRAVEL_SYSTEM_PROMPT}`
-      : BASE_SYSTEM_PROMPT;
-    const base = this.config.systemPrompt ?? modeBase;
-    return this.config.tastePreferences === undefined || !this.travelMode
-      ? base
-      : `${base}\n用户口味偏好（长期保存，直接遵循，不要重复询问）：${this.config.tastePreferences}`;
+  /** 会话级系统提示词：模式基线 + 日期/工作区 + 规则文件 + 口味偏好 */
+  systemPromptFor(session: Session): string {
+    const workspace = session.workspace ?? process.cwd();
+    return composeSystemPrompt({
+      travelMode: this.travelMode,
+      workspace,
+      customPrompt: this.config.systemPrompt,
+      tastePreferences: this.config.tastePreferences,
+      rulesContent: readWorkspaceRules(workspace),
+    });
   }
 
   get budgetYuan(): number {
@@ -106,7 +112,7 @@ export class CliApp {
   providerForSession(session: Session): ChatProvider {
     const profile = this.profiles.find((p) => p.id === (session.modelProfile ?? this.defaultProfileId));
     if (profile === undefined) return this.provider;
-    return createProviderFromProfile(profile, this.systemPrompt);
+    return createProviderFromProfile(profile, this.systemPromptFor(session));
   }
 
   /** 新增/更新模型配置（models.json 与 Web 共享）；当前会话若受影响立即换 Provider */
@@ -158,21 +164,40 @@ export class CliApp {
 
   switchSession(session: Session): ChatAgent {
     this.currentSessionId = session.id;
-    this.sessionAllowedTools.clear();
-    const agent = new ChatAgent(session, this.providerForSession(session), this.registry);
+    const agent = new ChatAgent(session, this.providerForSession(session), this.registry, process.cwd());
     this.runtime.registerAgent(session.id, agent);
     return agent;
   }
 
+  /** 当前会话生效的审批模式：trust（内存）> 会话持久值 > 默认 edits */
+  currentApprovalMode(): "ask" | "edits" | "trust" {
+    return permissionModeOf(this.currentAgent().session, this.trustedSessions.has(this.currentSessionId));
+  }
+
+  /** 切换审批模式；trust 仅本进程有效，ask/edits 随会话持久化 */
+  async setApprovalMode(mode: "ask" | "edits" | "trust"): Promise<"ask" | "edits" | "trust"> {
+    if (mode === "trust") {
+      this.trustedSessions.add(this.currentSessionId);
+      return "trust";
+    }
+    this.trustedSessions.delete(this.currentSessionId);
+    const session = this.currentAgent().session;
+    session.setApprovalMode(mode);
+    await this.sessionService.persist(session);
+    return mode;
+  }
+
   rebuildRuntime(currentSession: Session): void {
-    this.provider = createProvider({ config: this.config, systemPrompt: this.systemPrompt });
-    this.sessionService = new SessionService(this.store, {
-      summarize: this.summarizeForCompact,
-      resumeMaxTokens: Number.parseInt(this.config.resumeMaxTokens ?? "8000", 10),
-    });
+    this.provider = createProvider({ config: this.config, systemPrompt: this.systemPromptFor(currentSession) });
+    this.sessionService = new SessionService(this.store);
     this.runtime = new AgentRuntime({
       summarize: this.summarizeForCompact,
       archive: (session, epoch) => this.store.archive(session, epoch),
+      onCheckpoint: (sessionId) => {
+        const checkpointAgent = this.runtime.getAgent(sessionId);
+        if (checkpointAgent === undefined) return;
+        return this.sessionService.persist(checkpointAgent.session);
+      },
       onEvent: (_sessionId, event) => this.printEvent(event),
       onPermission: async (sessionId, request) => this.askPermission(sessionId, request),
       onTextDelta: (sessionId, delta) => this.printDelta(sessionId, delta),
@@ -194,7 +219,7 @@ export class CliApp {
         console.error(`错误: ${error instanceof Error ? error.message : String(error)}\n`);
       },
     });
-    const agent = new ChatAgent(currentSession, this.providerForSession(currentSession), this.registry);
+    const agent = new ChatAgent(currentSession, this.providerForSession(currentSession), this.registry, process.cwd());
     this.runtime.registerAgent(this.currentSessionId, agent);
   }
 
@@ -209,7 +234,8 @@ export class CliApp {
     this.rebuildRuntime(initialSession);
     this.switchSession(initialSession);
 
-    printBanner(this.provider.name, this.registry.size, this.currentSessionId, this.configFile, this.debug);
+    const approvalLabels: Record<string, string> = { ask: "🔒 逐条确认", edits: "✏️ 自动编辑", trust: "⚡ 信任会话" };
+    printBanner(this.provider.name, this.registry.size, this.currentSessionId, this.currentAgent().workspace, approvalLabels[this.currentApprovalMode()], this.configFile, this.debug);
 
     while (this.running) {
       const prompt = this.runtime.hasActiveTurn(this.currentSessionId) ? "steer> " : "you> ";
@@ -303,18 +329,44 @@ export class CliApp {
     }
   }
 
-  private async askPermission(sessionId: string, request: { tool: string; message: string }): Promise<boolean> {
+  private async askPermission(sessionId: string, request: { tool: string; message: string; arguments?: string }): Promise<boolean> {
+    // CLI 只有一个前台会话：后台会话的请求无法交互，直接拒绝（Web 端支持多会话并发审批）
     if (sessionId !== this.currentSessionId) return false;
-    if (this.sessionAllowedTools.has(request.tool)) return true;
+    const memory = this.permissionMemoryFor(sessionId);
+    const decision = decidePermission({
+      toolName: request.tool,
+      tool: this.registry.get(request.tool),
+      arguments: request.arguments,
+      mode: this.currentApprovalMode(),
+      memory,
+    });
+    if (decision.kind === "allow") return true;
+
     this.streamPrinter.endLine();
     console.log(`\n🔒 权限请求: ${request.tool} —— ${request.message}`);
-    process.stdout.write("允许执行? (y=本次 / a=本次会话总是 / n=拒绝) ");
+    const hint = decision.commandKey !== ""
+      ? `允许执行? (y=本次 / a=总是允许「${decision.commandKey}」 / n=拒绝) `
+      : decision.canAlways
+        ? "允许执行? (y=本次 / a=本次会话总是 / n=拒绝) "
+        : "允许执行? (y=本次 / n=拒绝) ";
+    process.stdout.write(hint);
     const answer = (await this.lines.next()) ?? "n";
     const choice = answer.trim().toLowerCase();
     console.log("");
-    if (choice === "a") {
-      this.sessionAllowedTools.add(request.tool);
+    if (choice === "a" && decision.commandKey !== "") {
+      memory.bashKeys.add(decision.commandKey);
+    } else if (choice === "a" && decision.canAlways) {
+      memory.alwaysTools.add(request.tool);
     }
-    return choice === "y" || choice === "a";
+    return choice === "y" || (choice === "a" && (decision.commandKey !== "" || decision.canAlways));
+  }
+
+  private permissionMemoryFor(sessionId: string): PermissionMemory {
+    let memory = this.permissionMemories.get(sessionId);
+    if (memory === undefined) {
+      memory = createPermissionMemory();
+      this.permissionMemories.set(sessionId, memory);
+    }
+    return memory;
   }
 }

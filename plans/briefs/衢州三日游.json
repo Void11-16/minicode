@@ -1,10 +1,12 @@
 {
   "title": "衢州三日游",
   "destination": "衢州",
-  "startDate": "2026-10-05",
-  "endDate": "2026-10-08",
+  "startDate": "2026-10-10",
+  "endDate": "2026-10-12",
   "travelers": 2,
-  "budgetTotalYuan": 2000,
-  "tastePreferences": "本地特色",
-  "notes": "情侣出行"
+  "budgetPerMealYuan": 80,
+  "accommodation": "衢州市区柯城/古城一带舒适型酒店",
+  "pace": "适中",
+  "tastePreferences": "江浙本地特色（衢州偏辣、三头一掌）",
+  "notes": "定稿行程：Day1 市区古城（水亭门/城墙/天王塔/信安湖日落），Day2 南孔家庙+衢州博物馆+鹿鸣山文化院街，Day3 龙游石窟+龙游老街（包车/自驾，单项远）。已放弃江郎山与廿八都（3 天太赶）。早餐候选取住处 1 公里内；餐厅每餐 4-6 家独立候选。"
 }

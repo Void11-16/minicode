@@ -9,7 +9,7 @@ const ERROR_MESSAGES: Record<string, string> = {
   "10001": "Key 不正确",
   "10003": "日配额已用完",
   "10019": "Key 类型错误（需要 Web 服务类型）",
-  "10021": "IP 不在白名单（如有 IP 限制需检查）",
+  "10021": "并发/QPS 超限（短时间请求过多，稍后会自动重试）",
   "10044": "日调用量超限",
 };
 
@@ -39,6 +39,7 @@ export interface AmapPoi {
   readonly distance?: string;
   readonly tel?: string;
   readonly biz_ext?: { rating?: string; cost?: string; open_time?: string };
+  readonly photos?: ReadonlyArray<{ title?: string; url?: string }>;
 }
 
 export interface TransitRouteResult {
@@ -48,6 +49,24 @@ export interface TransitRouteResult {
   readonly walkingDistanceM: number;
   /** 分段描述，如 ["地铁1号线", "步行 660 米", "7路"] */
   readonly segments: string[];
+}
+
+/** 路径几何：沿真实道路的点串 + 距离/耗时 */
+export interface RouteGeometry {
+  readonly distanceM: number;
+  readonly durationSec: number;
+  /** [lat, lng] 点串（已从高德 "lng,lat" 转换） */
+  readonly points: ReadonlyArray<readonly [number, number]>;
+}
+
+interface AmapDirectionResponse {
+  route?: {
+    paths?: Array<{
+      distance?: string;
+      duration?: string;
+      steps?: Array<{ polyline?: string }>;
+    }>;
+  };
 }
 
 interface AmapTransitOption {
@@ -189,6 +208,30 @@ export class AmapClient {
   }
 
   /**
+   * 按名称取 POI 照片（place/text + extensions=all 的 photos 字段）。
+   * 只在名称匹配的 POI 上取图，避免展示到附近其他地点的照片；没有照片返回空数组。
+   */
+  async poiPhotos(
+    keywords: string,
+    center: { latitude: number; longitude: number },
+    radiusMeters = 3000,
+    limit = 4,
+  ): Promise<string[]> {
+    const pois = await this.poiSearch(keywords, center, radiusMeters);
+    const normalize = (text: string) => text.replace(/[（）()·\s]/g, "");
+    const key = normalize(keywords);
+    const matched = pois.find((poi) => {
+      const name = normalize(poi.name);
+      return (name.includes(key) || key.includes(name)) && (poi.photos ?? []).length > 0;
+    });
+    if (matched === undefined) return [];
+    return (matched.photos ?? [])
+      .map((photo) => photo.url)
+      .filter((url): url is string => url !== undefined && url !== "")
+      .slice(0, limit);
+  }
+
+  /**
    * 按名称在城市内搜 POI，返回首个结果。
    * 解析地标名（灵隐寺/西湖）的坐标比地理编码准确——geocode 经常命中外地同名地点。
    */
@@ -209,6 +252,42 @@ export class AmapClient {
     if (poi === undefined) return null;
     const [longitude, latitude] = poi.location.split(",").map(Number);
     return { name: poi.name ?? keywords, latitude, longitude };
+  }
+
+  /**
+   * 步行/驾车路径规划（v3 direction/walking | direction/driving），
+   * 返回沿真实道路的几何点串。无方案或失败返回 null。
+   */
+  async directionRoute(
+    mode: "walking" | "driving",
+    origin: { latitude: number; longitude: number },
+    destination: { latitude: number; longitude: number },
+  ): Promise<RouteGeometry | null> {
+    const data = await this.getJson<AmapDirectionResponse>(
+      this.buildUrl(`/v3/direction/${mode}`, {
+        origin: `${origin.longitude},${origin.latitude}`,
+        destination: `${destination.longitude},${destination.latitude}`,
+      }),
+    );
+    const path = data.route?.paths?.[0];
+    if (path === undefined) return null;
+
+    // 几何按 step 分段给出（"lng,lat;lng,lat"），逐段拼接为完整路径
+    const points: Array<[number, number]> = [];
+    for (const step of path.steps ?? []) {
+      if (typeof step.polyline !== "string" || step.polyline === "") continue;
+      for (const pair of step.polyline.split(";")) {
+        const [lng, lat] = pair.split(",").map(Number);
+        if (Number.isNaN(lng) || Number.isNaN(lat)) continue;
+        points.push([lat, lng]);
+      }
+    }
+    if (points.length < 2) return null;
+    return {
+      distanceM: Number(path.distance ?? "0"),
+      durationSec: Number(path.duration ?? "0"),
+      points,
+    };
   }
 }
 
