@@ -112,6 +112,44 @@ test("search_restaurants: 多因子综合分排序，默认剔除低分与无评
   setAmapKey(undefined);
 });
 
+test("search_restaurants: 徽菜/赣菜等短名菜系能被正确标记本地特色（补全省份别名）", async () => {
+  setAmapKey("test-key", amapOnlyFetch((url) => {
+    if (url.pathname.includes("geocode")) {
+      const address = url.searchParams.get("address") ?? "";
+      if (address.includes("南昌")) {
+        return amapResponse({ geocodes: [{ formatted_address: "江西省南昌市", province: "江西省", city: "南昌市", location: "115.858,28.682" }] });
+      }
+      return amapResponse({ geocodes: [{ formatted_address: "安徽省黄山市屯溪区", province: "安徽省", city: "黄山市", location: "118.337,29.714" }] });
+    }
+    if (url.pathname.includes("place")) {
+      const center = url.searchParams.get("location") ?? "";
+      if (center.startsWith("115.858")) {
+        return amapResponse({ pois: [
+          { id: "j1", name: "老表瓦罐汤", type: "餐饮服务;中餐厅;赣菜", location: "115.8600,28.6830", address: "民德路", biz_ext: { rating: "4.6", cost: "30" } },
+        ] });
+      }
+      return amapResponse({ pois: [
+        { id: "a1", name: "老街第一楼", type: "餐饮服务;中餐厅;徽菜", location: "118.3370,29.7150", address: "屯溪老街", biz_ext: { rating: "4.6", cost: "80" } },
+        { id: "a2", name: "徽州味道", type: "餐饮服务;中餐厅;安徽菜", location: "118.3390,29.7130", address: "老街", biz_ext: { rating: "4.5", cost: "60" } },
+        { id: "a3", name: "川西坝子火锅", type: "餐饮服务;中餐厅;川菜", location: "118.3400,29.7120", address: "新街", biz_ext: { rating: "4.7", cost: "90" } },
+      ] });
+    }
+    return amapResponse({});
+  }));
+
+  const tool = createFoodTool(amapOnlyFetch(() => amapResponse({})));
+
+  const huangshan = await tool.execute({ city: "黄山" });
+  assert.match(huangshan, /徽菜·本地特色/);
+  assert.match(huangshan, /安徽菜·本地特色/);
+  assert.doesNotMatch(huangshan, /川菜·本地特色/);
+
+  const nanchang = await tool.execute({ city: "南昌" });
+  assert.match(nanchang, /赣菜·本地特色/);
+
+  setAmapKey(undefined);
+});
+
 test("search_restaurants: avoid_cuisines 排除已安排菜系", async () => {
   setAmapKey("test-key", amapOnlyFetch((url) => {
     if (url.pathname.includes("geocode")) return amapResponse(GEO);
