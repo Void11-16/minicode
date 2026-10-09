@@ -446,6 +446,86 @@ test("web: 重命名 / 删除会话（连带归档）", async () => {
   }
 });
 
+test("web: 未落盘空白草稿不再产生'打不开也删不掉'的幽灵会话", async () => {
+  const { port, close } = await withMockServer();
+  const base = `http://127.0.0.1:${port}`;
+
+  const post = (path: string, body: unknown) =>
+    fetch(`${base}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+  try {
+    // 会话 A 落盘 → 新建空白草稿 B（还没发消息）
+    await (await fetch(`${base}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "任务A" }),
+    })).text();
+    const draft = await (await fetch(`${base}/api/new`, { method: "POST" })).json();
+
+    // 切回 A 后：空白草稿 B 未落盘，不应出现在列表里（否则点了只会"切换会话失败"）
+    const sessions = (await (await fetch(`${base}/api/sessions`)).json()).sessions;
+    const sessionA = sessions.find((s: { id: string }) => s.id !== draft.id);
+    await post("/api/resume", { id: sessionA.id });
+    const listAway = await (await fetch(`${base}/api/sessions`)).json();
+    assert.ok(
+      !listAway.sessions.some((s: { id: string }) => s.id === draft.id),
+      "切走后空白草稿不再展示",
+    );
+
+    // 同进程内仍可切回来（内存草稿直接恢复，而不是 404"未找到会话"）
+    const back = await post("/api/resume", { id: draft.id });
+    assert.equal(back.status, 200);
+    assert.deepEqual((await back.json()).messages, []);
+
+    // 切回 A 后删除草稿：未落盘没有文件可删，但注册要被清掉 —— 再恢复就是真的 404
+    await post("/api/resume", { id: sessionA.id });
+    const del = await (await post("/api/delete", { id: draft.id })).json();
+    assert.equal(del.deleted, false, "草稿未落盘，没有文件可删");
+    assert.equal((await post("/api/resume", { id: draft.id })).status, 404, "删除后草稿从内存注销");
+  } finally {
+    await close();
+  }
+});
+
+test("web: 重启后自动恢复最近的会话（不再从空白新会话开始）", async () => {
+  const root = await mkdtemp(join(tmpdir(), "minicode-web-restore-"));
+  const chat = (base: string, message: string) =>
+    fetch(`${base}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message }),
+    }).then((res) => res.text());
+
+  const first = await startWebServer({ rootDir: root, port: 0, configOverrides: { provider: "mock" } });
+  const base1 = `http://127.0.0.1:${first.port}`;
+  let recentId = "";
+  try {
+    await chat(base1, "第一个会话");
+    // 让两个会话的 updatedAt 明确分先后，避免同毫秒并列导致"最近会话"不稳定
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await fetch(`${base1}/api/new`, { method: "POST" });
+    await chat(base1, "第二个会话");
+    recentId = (await (await fetch(`${base1}/api/sessions`)).json()).currentId;
+  } finally {
+    await first.close();
+  }
+
+  const second = await startWebServer({ rootDir: root, port: 0, configOverrides: { provider: "mock" } });
+  const base2 = `http://127.0.0.1:${second.port}`;
+  try {
+    const sessions = await (await fetch(`${base2}/api/sessions`)).json();
+    assert.equal(sessions.currentId, recentId, "重启后当前会话 = 最近使用的会话");
+    const history = await (await fetch(`${base2}/api/history`)).json();
+    assert.ok(history.messages.some((m: { content: string }) => m.content === "第二个会话"));
+  } finally {
+    await second.close();
+  }
+});
+
 test("web: 执行中 steer 注入 + 排队，输出进入同一条流", async () => {
   const provider = new ControlledProvider();
   const root = await mkdtemp(join(tmpdir(), "minicode-web-"));

@@ -67,6 +67,12 @@ export class AgentRuntime {
     return this.agents.get(sessionId);
   }
 
+  /** 会话被删除时移除其 Agent 与 steer 缓冲（删除前调用方已拦截执行中的会话） */
+  unregisterAgent(sessionId: string): void {
+    this.agents.delete(sessionId);
+    this.steerBuffers.delete(sessionId);
+  }
+
   hasActiveTurn(sessionId: string): boolean {
     return this.activeTurns.has(sessionId);
   }

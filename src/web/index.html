@@ -369,6 +369,22 @@
     let lastTravelMode = null;
     let activeSessionId = null;
     const sessionViews = new Map(); // id -> 会话视图元素
+    // 删除确认状态放模块级：侧栏 3 秒轮询会重建列表 DOM，挂在按钮元素上的状态会被冲掉，
+    // 表现为第二次点击"确认"经常落空（感觉删不掉）
+    let armedDeleteId = null;
+    let armedDeleteTimer = 0;
+    // 状态栏提示：错误提示自动淡出，避免"切换会话失败"之类消息永远停在底部
+    let statusTimer = 0;
+    function setStatus(text, isError = false) {
+      statusEl.textContent = text;
+      statusEl.className = isError ? "status error" : "status";
+      clearTimeout(statusTimer);
+      if (isError) {
+        statusTimer = setTimeout(() => {
+          if (statusEl.textContent === text) statusEl.textContent = "";
+        }, 6000);
+      }
+    }
 
     if (location.protocol === "file:") {
       const banner = document.createElement("div");
@@ -714,7 +730,12 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id }),
       });
-      if (!res.ok) { statusEl.textContent = "切换会话失败"; return; }
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        setStatus(`切换会话失败：${err.error ?? `HTTP ${res.status}`}`, true);
+        await refreshSidebar(); // 列表可能已过期（会话被删 / 草稿未落盘）
+        return;
+      }
       const data = await res.json();
       let view = sessionViews.get(id);
       if (view === undefined) {
@@ -818,28 +839,31 @@
         item.dataset.sessionId = session.id;
         if (session.id !== activeSessionId) {
           const del = document.createElement("span");
-          del.className = "s-del";
-          del.textContent = "🗑";
+          del.className = `s-del${armedDeleteId === session.id ? " armed" : ""}`;
+          del.textContent = armedDeleteId === session.id ? "确认" : "🗑";
           del.title = "删除该会话（连带归档）";
-          let armed = false;
-          let timer = 0;
           del.onclick = async (e) => {
             e.stopPropagation();
-            if (!armed) {
-              armed = true;
+            if (armedDeleteId !== session.id) {
+              armedDeleteId = session.id;
+              clearTimeout(armedDeleteTimer);
+              armedDeleteTimer = setTimeout(() => {
+                if (armedDeleteId === session.id) armedDeleteId = null;
+                void refreshSidebar();
+              }, 4000);
               del.textContent = "确认";
               del.classList.add("armed");
-              timer = setTimeout(() => { armed = false; del.textContent = "🗑"; del.classList.remove("armed"); }, 3000);
               return;
             }
-            clearTimeout(timer);
+            clearTimeout(armedDeleteTimer);
+            armedDeleteId = null;
             const res = await fetch(`${API_BASE}/api/delete`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ id: session.id }),
             });
-            const result = await res.json();
-            if (!res.ok) { statusEl.textContent = result.error ?? "删除失败"; return; }
+            const result = await res.json().catch(() => ({}));
+            if (!res.ok) { setStatus(result.error ?? "删除失败", true); return; }
             sessionViews.delete(session.id);
             await refreshSidebar();
           };

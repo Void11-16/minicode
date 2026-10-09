@@ -143,7 +143,10 @@ export async function startWebServer(options: WebServerOptions = {}): Promise<Ru
     ]);
   const sessionService = new SessionService(store);
 
-  let currentSession = new Session();
+  // 启动时恢复最近更新的已落盘会话：否则每次重启当前位都是全新空白会话，
+  // 用户切走后它就成了"打不开也删不掉"的空会话幽灵（从未落盘，无法恢复）
+  const latestMeta = (await store.list())[0];
+  let currentSession = latestMeta === undefined ? new Session() : ((await store.load(latestMeta.id)) ?? new Session());
   let indexHtml = await readFile(join(import.meta.dirname, "index.html"), "utf8");
 
   // 每个会话独立的 SSE 输出流：多会话可并行执行，切换查看不打断后台任务
@@ -681,6 +684,15 @@ export async function startWebServer(options: WebServerOptions = {}): Promise<Ru
         .filter((id) => !persistedIds.has(id))
         .map((id) => runtime.getAgent(id)?.session)
         .filter((session): session is Session => session !== undefined)
+        // 未落盘的空白草稿（重启时的当前位、新建后没发消息就切走）：不是当前会话时
+        // 点击只会"切换会话失败"，还常被当成删不掉空会话 —— 不展示
+        .filter(
+          (session) =>
+            session.history.length > 0 ||
+            session.id === currentSession.id ||
+            runtime.hasActiveTurn(session.id) ||
+            streams.has(session.id),
+        )
         .map((session) => ({
           id: session.id,
           messageCount: session.history.length,
@@ -728,17 +740,20 @@ export async function startWebServer(options: WebServerOptions = {}): Promise<Ru
       }
       // 纯加载快速路径：切换不做压缩（压缩会调 LLM、耗时数秒，由运行时在轮次开始时处理）
       const loaded = await store.load(body.id);
-      if (loaded === null) {
+      // 未落盘的内存草稿（新建后没发消息就切走）：同进程内直接切回来，而不是假装"未找到"
+      const session = loaded ?? runtime.getAgent(body.id)?.session;
+      if (session === undefined) {
         res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
         res.end(JSON.stringify({ error: `未找到会话 ${body.id}` }));
         return;
       }
-      currentSession = loaded;
+      currentSession = session;
       registerSessionAgent(currentSession);
       stateJson(res, {
         title: currentSession.title,
         id: currentSession.id,
         messages: currentSession.history,
+        running: runtime.hasActiveTurn(currentSession.id),
       });
       return;
     }
@@ -825,6 +840,9 @@ export async function startWebServer(options: WebServerOptions = {}): Promise<Ru
       const deleted = await store.delete(id);
       const archives = await store.deleteArchives(id);
       registeredSessions.delete(id);
+      runtime.unregisterAgent(id);
+      permissionMemories.delete(id);
+      trustedSessions.delete(id);
       stateJson(res, { deleted, archives });
       return;
     }
