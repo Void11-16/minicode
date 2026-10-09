@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { startWebServer } from "../src/web/server.ts";
 import { JsonFileSessionStore } from "../src/storage/session-store.ts";
 import { Session } from "../src/core/session.ts";
@@ -486,6 +486,55 @@ test("web: 未落盘空白草稿不再产生'打不开也删不掉'的幽灵会�
     const del = await (await post("/api/delete", { id: draft.id })).json();
     assert.equal(del.deleted, false, "草稿未落盘，没有文件可删");
     assert.equal((await post("/api/resume", { id: draft.id })).status, 404, "删除后草稿从内存注销");
+  } finally {
+    await close();
+  }
+});
+
+test("web: 工作区文件夹浏览接口（只列目录、支持 ~ 展开）", async () => {
+  const { port, close } = await withMockServer();
+  const base = `http://127.0.0.1:${port}`;
+  const sandbox = await mkdtemp(join(tmpdir(), "minicode-fs-"));
+  await mkdir(join(sandbox, "alpha"));
+  await mkdir(join(sandbox, "Beta"));
+  await mkdir(join(sandbox, ".hidden"));
+  await writeFile(join(sandbox, "note.txt"), "x");
+
+  const dirsOf = async (path?: string) => {
+    const res = await fetch(`${base}/api/fs/dirs${path === undefined ? "" : `?path=${encodeURIComponent(path)}`}`);
+    return { status: res.status, data: await res.json() };
+  };
+
+  try {
+    const list = await dirsOf(sandbox);
+    assert.equal(list.status, 200);
+    assert.equal(list.data.path, sandbox);
+    assert.equal(list.data.parent, dirname(sandbox));
+    const names = list.data.dirs.map((dir: { name: string }) => dir.name);
+    assert.ok(names.includes("alpha") && names.includes("Beta") && names.includes(".hidden"));
+    assert.ok(!names.includes("note.txt"), "只列目录不列文件");
+    assert.equal(names.at(-1), ".hidden", "隐藏目录排在最后");
+    assert.equal(list.data.dirs.find((dir: { name: string }) => dir.name === ".hidden").hidden, true);
+
+    // 不存在的文件夹 / 文件都不可浏览
+    assert.equal((await dirsOf(join(sandbox, "nope"))).status, 404);
+    assert.equal((await dirsOf(join(sandbox, "note.txt"))).status, 400);
+    // 默认起点 = 主目录；~ 展开后同样是主目录
+    assert.equal((await dirsOf()).data.path, homedir());
+    assert.equal((await dirsOf("~")).data.path, homedir());
+
+    // /api/workspace 也支持 ~（省去手输完整路径）
+    const ws = await (await fetch(`${base}/api/workspace`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: "~" }),
+    })).json();
+    assert.equal(ws.workspace, homedir());
+    await fetch(`${base}/api/workspace`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: "" }),
+    });
   } finally {
     await close();
   }

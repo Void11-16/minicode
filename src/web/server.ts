@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { homedir } from "node:os";
+import { dirname, join, parse, resolve } from "node:path";
 import { Session } from "../core/session.ts";
 import { ChatAgent, TurnAbortedError } from "../agent/agent.ts";
 import { composeSystemPrompt, readWorkspaceRules } from "../agent/prompt.ts";
@@ -366,7 +367,7 @@ export async function startWebServer(options: WebServerOptions = {}): Promise<Ru
         stateJson(res, { workspace: workspaceOf(currentSession) });
         return;
       }
-      const resolved = resolve(rawPath);
+      const resolved = resolveUserPath(rawPath);
       let info;
       try {
         info = await stat(resolved);
@@ -384,6 +385,31 @@ export async function startWebServer(options: WebServerOptions = {}): Promise<Ru
       registerSessionAgent(currentSession);
       await sessionService.persist(currentSession);
       stateJson(res, { workspace: workspaceOf(currentSession) });
+      return;
+    }
+    // 工作区文件夹浏览器：列出子目录（只读；只列目录不列文件），默认从主目录开始
+    if (req.method === "GET" && url.pathname === "/api/fs/dirs") {
+      const raw = (url.searchParams.get("path") ?? "").trim();
+      const target = raw === "" ? homedir() : resolveUserPath(raw);
+      try {
+        const info = await stat(target);
+        if (!info.isDirectory()) {
+          res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ error: `不是文件夹：${target}` }));
+          return;
+        }
+        const parent = dirname(target);
+        stateJson(res, {
+          path: target,
+          parent: parent === target ? null : parent, // 根目录没有上级
+          home: homedir(),
+          root: parse(target).root,
+          dirs: await listSubdirs(target),
+        });
+      } catch {
+        res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: `文件夹不存在或没有权限：${target}` }));
+      }
       return;
     }
     if (req.method === "GET" && url.pathname === "/api/models") {
@@ -909,6 +935,34 @@ export async function startWebServer(options: WebServerOptions = {}): Promise<Ru
         server.close(() => resolve());
       }),
   };
+}
+
+/** 支持 ~ 展开：手输 "~/Documents" 之类路径也能直接用 */
+function resolveUserPath(raw: string): string {
+  if (raw === "~") return homedir();
+  if (raw.startsWith("~/")) return resolve(homedir(), raw.slice(2));
+  return resolve(raw);
+}
+
+/** 目录浏览：列出子目录（含指向目录的符号链接；隐藏目录带标记排最后） */
+async function listSubdirs(target: string): Promise<Array<{ name: string; path: string; hidden: boolean }>> {
+  const entries = await readdir(target, { withFileTypes: true });
+  const dirs = await Promise.all(
+    entries.map(async (entry) => {
+      if (!entry.isDirectory()) {
+        if (!entry.isSymbolicLink()) return null;
+        const ok = await stat(join(target, entry.name)).then(
+          (info) => info.isDirectory(),
+          () => false,
+        );
+        if (!ok) return null;
+      }
+      return { name: entry.name, path: join(target, entry.name), hidden: entry.name.startsWith(".") };
+    }),
+  );
+  return dirs
+    .filter((dir): dir is { name: string; path: string; hidden: boolean } => dir !== null)
+    .sort((a, b) => Number(a.hidden) - Number(b.hidden) || a.name.localeCompare(b.name, "zh"));
 }
 
 /** 路段几何内存缓存：道路不随时间变化，避免每次打开地图重复消耗高德方向 API 配额 */

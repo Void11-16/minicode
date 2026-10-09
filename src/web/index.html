@@ -70,6 +70,21 @@
     #rename-bar input, #workspace-bar input { flex: 1; max-width: 420px; border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px; font-size: 13px; font-family: inherit; }
     #rename-bar input:focus, #workspace-bar input:focus { outline: none; border-color: var(--primary); }
     #workspace-chip { max-width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #workspace-picker { display: none; padding: 10px 18px 12px; background: var(--card); border-bottom: 1px solid var(--border); }
+    #workspace-picker.show { display: block; }
+    .wp-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+    .wp-head .btn { padding: 4px 10px; font-size: 12px; }
+    .wp-head .btn:disabled { opacity: .45; cursor: default; }
+    .wp-head .btn:disabled:hover { border-color: var(--border); color: var(--text); }
+    .wp-path { flex: 1; font-size: 12.5px; color: var(--muted); font-family: ui-monospace, SFMono-Regular, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .wp-list { max-height: 260px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); }
+    .wp-item { display: flex; align-items: center; gap: 8px; padding: 6px 12px; font-size: 13px; cursor: pointer; border-bottom: 1px solid var(--border); }
+    .wp-item:last-child { border-bottom: none; }
+    .wp-item:hover { background: var(--primary-light); }
+    .wp-item.hidden-dir { color: var(--muted); }
+    .wp-note { padding: 10px 12px; font-size: 12.5px; color: var(--muted); }
+    .wp-foot { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+    .wp-tip { flex: 1; font-size: 12px; color: var(--muted); }
 
     main { flex: 1; overflow-y: auto; padding: 18px; }
     .container { max-width: 860px; margin: 0 auto; display: flex; flex-direction: column; gap: 14px; }
@@ -268,8 +283,23 @@
         <span style="font-size:12.5px;color:var(--muted)">工作区:</span>
         <input id="workspace-input" list="workspace-recents" placeholder="绝对路径，例如 /Users/me/project（回车=默认工作区）">
         <datalist id="workspace-recents"></datalist>
+        <button class="btn" id="workspace-browse" title="浏览文件夹（不用手输路径）">📂 浏览…</button>
         <button class="btn primary" id="workspace-save">切换</button>
         <button class="btn" id="workspace-cancel">取消</button>
+      </div>
+
+      <div id="workspace-picker">
+        <div class="wp-head">
+          <button class="btn" id="wp-up" title="上一级目录">⬆ 上级</button>
+          <button class="btn" id="wp-home" title="主目录">🏠 主目录</button>
+          <button class="btn" id="wp-root" title="根目录">🖥️ 根目录</button>
+          <span class="wp-path" id="wp-path"></span>
+        </div>
+        <div class="wp-list" id="wp-list"></div>
+        <div class="wp-foot">
+          <span class="wp-tip" id="wp-tip">点击文件夹进入，选好后点右侧按钮</span>
+          <button class="btn primary" id="wp-pick">✓ 选择此文件夹</button>
+        </div>
       </div>
 
       <main>
@@ -1112,35 +1142,104 @@
     }
     $("btn-workspace-chip").onclick = () => {
       const bar = $("workspace-bar");
-      if (bar.classList.contains("show")) { bar.classList.remove("show"); return; }
+      if (bar.classList.contains("show")) { bar.classList.remove("show"); $("workspace-picker").classList.remove("show"); return; }
       renderWorkspaceRecents();
       $("workspace-input").value = $("btn-workspace-chip").title.replace(/^当前会话工作区：/, "").replace(/（点击切换）$/, "");
       bar.classList.add("show");
       $("workspace-input").focus();
       $("workspace-input").select();
     };
-    $("workspace-cancel").onclick = () => $("workspace-bar").classList.remove("show");
-    $("workspace-save").onclick = async () => {
-      const path = $("workspace-input").value.trim();
+    $("workspace-cancel").onclick = () => {
+      $("workspace-bar").classList.remove("show");
+      $("workspace-picker").classList.remove("show");
+    };
+    async function applyWorkspacePath(path) {
       const res = await fetch(`${API_BASE}/api/workspace`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ path }),
       });
-      const data = await res.json();
-      if (!res.ok) { statusEl.textContent = data.error ?? "切换工作区失败"; return; }
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) { setStatus(data.error ?? "切换工作区失败", true); return; }
       $("workspace-bar").classList.remove("show");
+      $("workspace-picker").classList.remove("show");
       if (path !== "") pushWorkspaceRecent(data.workspace);
       await refreshState();
-      statusEl.textContent = `工作区已切换到 ${data.workspace}`;
+      setStatus(`工作区已切换到 ${data.workspace}`);
       setTimeout(() => { if (!busy) statusEl.textContent = ""; }, 2500);
       // 工作区变化影响系统提示词与文件根，刷新会话视图保持一致
       addNote(activeView(), `📁 工作区已切换：${data.workspace}`);
-    };
+    }
+    $("workspace-save").onclick = () => { void applyWorkspacePath($("workspace-input").value.trim()); };
     $("workspace-input").addEventListener("keydown", (e) => {
       if (e.key === "Enter") $("workspace-save").click();
-      if (e.key === "Escape") $("workspace-bar").classList.remove("show");
+      if (e.key === "Escape") {
+        $("workspace-bar").classList.remove("show");
+        $("workspace-picker").classList.remove("show");
+      }
     });
+
+    // ===== 工作区文件夹浏览器（点选代替手输路径） =====
+    let browsePath = null;    // 当前浏览到的目录
+    let browseParent = null;  // 上级目录（根目录时为 null）
+    let browseHome = null;    // 主目录快捷入口
+    let browseRoot = null;    // 根目录快捷入口
+    async function browseTo(path) {
+      $("wp-tip").textContent = "加载中…";
+      const res = await fetch(`${API_BASE}/api/fs/dirs?path=${encodeURIComponent(path ?? "")}`);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) { $("wp-tip").textContent = data.error ?? "无法打开该文件夹"; return; }
+      browsePath = data.path;
+      browseParent = data.parent ?? null;
+      browseHome = data.home ?? browseHome;
+      browseRoot = data.root ?? browseRoot;
+      $("wp-path").textContent = data.path;
+      $("wp-path").title = data.path;
+      $("wp-up").disabled = browseParent === null;
+      $("wp-pick").disabled = false;
+      const list = $("wp-list");
+      list.textContent = "";
+      if (data.dirs.length === 0) {
+        const note = document.createElement("div");
+        note.className = "wp-note";
+        note.textContent = "（没有子文件夹，可直接点右侧按钮选择此文件夹）";
+        list.appendChild(note);
+      }
+      for (const dir of data.dirs.slice(0, 500)) {
+        const row = document.createElement("div");
+        row.className = `wp-item${dir.hidden ? " hidden-dir" : ""}`;
+        row.textContent = `📁 ${dir.name}`;
+        row.title = dir.path;
+        row.onclick = () => void browseTo(dir.path);
+        list.appendChild(row);
+      }
+      if (data.dirs.length > 500) {
+        const note = document.createElement("div");
+        note.className = "wp-note";
+        note.textContent = `（共 ${data.dirs.length} 个子文件夹，仅显示前 500 个）`;
+        list.appendChild(note);
+      }
+      $("wp-tip").textContent = `共 ${data.dirs.length} 个子文件夹 · 点击进入`;
+      list.scrollTop = 0;
+    }
+    $("workspace-browse").onclick = () => {
+      const picker = $("workspace-picker");
+      if (picker.classList.contains("show")) { picker.classList.remove("show"); return; }
+      const bar = $("workspace-bar");
+      if (!bar.classList.contains("show")) {
+        renderWorkspaceRecents();
+        $("workspace-input").value = $("btn-workspace-chip").title.replace(/^当前会话工作区：/, "").replace(/（点击切换）$/, "");
+        bar.classList.add("show");
+      }
+      picker.classList.add("show");
+      $("wp-pick").disabled = true; // 首次加载完成前不可选，避免选中旧路径
+      // 从输入框里的路径（通常是当前工作区）开始浏览；为空则从服务端主目录开始
+      void browseTo($("workspace-input").value.trim());
+    };
+    $("wp-up").onclick = () => { if (browseParent !== null) void browseTo(browseParent); };
+    $("wp-home").onclick = () => void browseTo(browseHome ?? "");
+    $("wp-root").onclick = () => void browseTo(browseRoot ?? "/");
+    $("wp-pick").onclick = () => { if (browsePath !== null) void applyWorkspacePath(browsePath); };
 
     $("approval-select").onchange = async (e) => {
       const res = await fetch(`${API_BASE}/api/approval`, {
