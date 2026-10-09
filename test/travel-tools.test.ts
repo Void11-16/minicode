@@ -147,6 +147,31 @@ test("get_place_reviews: aspect 参数调整查询词", async () => {
   assert.ok(queries.some((q) => q.includes("灵隐寺") && q.includes("点评 评价 值得去吗")));
 });
 
+test("get_place_reviews: 提取游玩时长参考（含噪声过滤与来源标注）", async () => {
+  const fetchFn = (async (url: string | URL) => {
+    if (String(url).includes("bing.com")) {
+      return new Response(
+        `<html><body>
+          <li class="b_algo"><h2><a href="#">三坊七巷游玩攻略</a></h2><p>福州三坊七巷怎么玩，看这篇就够了</p></li>
+          <div>三坊七巷一般游玩 2 到 4 小时，如果只逛主街和拍照 2 小时左右。
+          停车场收费 24 小时内 30 元，建议错峰出行。</div>
+        </body></html>`,
+        { status: 200, headers: { "Content-Type": "text/html" } },
+      );
+    }
+    return new Response("<html><body>没有结果</body></html>", { status: 200, headers: { "Content-Type": "text/html" } });
+  }) as typeof fetch;
+
+  const tool = createReviewsTool(fetchFn);
+  const output = await tool.execute({ place: "三坊七巷", city: "福州", aspect: "游玩时长" });
+
+  assert.match(output, /游玩时长参考/);
+  assert.match(output, /一般游玩 2 到 4 小时/);
+  assert.match(output, /只逛主街和拍照 2 小时左右/);
+  assert.match(output, /来源: 必应/);
+  assert.doesNotMatch(output, /24 小时内/, "停车/营业类时间段不应被当成游玩时长");
+});
+
 test("get_place_reviews: 百科/词典噪声被过滤，全无关时明确返回无数据", async () => {
   const fetchFn = (async () => {
     return new Response(

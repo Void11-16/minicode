@@ -9,6 +9,8 @@ const USER_AGENT =
 interface SearchResult {
   readonly title: string;
   readonly snippet: string;
+  /** 命中的搜索引擎（提取游玩时长时标注来源用） */
+  readonly engine?: string;
 }
 
 /**
@@ -25,6 +27,8 @@ export function createReviewsTool(fetchFn: FetchLike = fetch): Tool {
       "根据摘要中提到的评价关键词（好评/差评/人多/坑/值得等）给出筛选建议。" +
       "同时解析评价数量与第三方评分（口碑热度）——终选时评分相近优先评价数多的，" +
       "评价数过少（<50）的高分不可信。摘要不代表官方评分，不要编造具体分数。" +
+      "输出中可能包含『游玩时长参考』（从摘要提取的建议游玩时长，如\"一般游玩 2-4 小时\"）——" +
+      "给景点安排时长时优先采用，可用 aspect=游玩时长 专门查询。" +
       "结果已做相关性过滤（剔除百科/词典等无关词条）；返回「没有搜到相关评价内容」时说明该地点网上口碑数据不足，" +
       "不要据此推断好坏，改用高德评分/人均等结构化数据决策。",
     parameters: {
@@ -32,7 +36,7 @@ export function createReviewsTool(fetchFn: FetchLike = fetch): Tool {
       properties: {
         place: { type: "string", description: "景点名，例如：灵隐寺" },
         city: { type: "string", description: "所在城市，提高搜索准确性，例如：杭州" },
-        aspect: { type: "string", description: "关注侧面：口碑(默认)/人均价格/招牌菜/排队。餐厅查价格用 人均价格" },
+        aspect: { type: "string", description: "关注侧面：口碑(默认)/人均价格/招牌菜/排队/游玩时长（建议游玩时间，用于排行程定时长）" },
       },
       required: ["place"],
     },
@@ -44,11 +48,13 @@ export function createReviewsTool(fetchFn: FetchLike = fetch): Tool {
         aspect === "人均价格" ? "人均 价格 多少钱"
         : aspect === "招牌菜" ? "招牌菜 必点 推荐"
         : aspect === "排队" ? "排队 等位 攻略"
+        : aspect === "游玩时长" ? "建议游玩时长"
         : "点评 评价 值得去吗";
 
       const errors: string[] = [];
       let searchSucceeded = false; // 至少一个引擎成功返回过页面（用于区分"没搜到相关"与"搜索失败"）
       const collected: SearchResult[] = [];
+      const durationHints: Array<{ text: string; source: string }> = [];
       for (const engine of SEARCH_ENGINES) {
         for (const searchQuery of queryVariants(place, city, suffix)) {
           try {
@@ -61,7 +67,15 @@ export function createReviewsTool(fetchFn: FetchLike = fetch): Tool {
               break; // 引擎不可用 → 换下一个引擎
             }
             searchSucceeded = true;
-            collected.push(...engine.parse(await response.text()));
+            const html = await response.text();
+            collected.push(...engine.parse(html).map((result) => ({ ...result, engine: engine.name })));
+            // 顺手提取"建议游玩时长"类句子（百度 AI 摘要/攻略页面里常直接给时长）
+            for (const hint of extractDurationHints(pageText(html), MAX_DURATION_HINTS, placeTokens(place))) {
+              if (durationHints.length >= MAX_DURATION_HINTS) break;
+              const key = hint.replace(/\s+/g, "").slice(0, 26);
+              if (durationHints.some((entry) => entry.text.replace(/\s+/g, "").slice(0, 26) === key)) continue;
+              durationHints.push({ text: hint, source: engine.name });
+            }
           } catch (error) {
             // 例如 DuckDuckGo 在部分网络环境不可达，降级到下一个引擎
             errors.push(`${engine.name}: ${error instanceof Error ? error.message : String(error)}`);
@@ -76,7 +90,14 @@ export function createReviewsTool(fetchFn: FetchLike = fetch): Tool {
 
       const relevant = filterRelevant(collected, place, city);
       if (relevant.length > 0) {
-        return formatResults(place, relevant);
+        return formatResults(place, relevant) + renderDurationHints(durationHints);
+      }
+      if (durationHints.length > 0) {
+        return (
+          `「${place}」没有足够的评价摘要（已过滤百科/词典等无关结果），但提取到游玩时长参考：` +
+          renderDurationHints(durationHints) +
+          "\n口碑数据不足，请以高德评分、人均等结构化数据为准。"
+        );
       }
       if (!searchSucceeded && errors.length > 0) {
         return `「${place}」的评价搜索失败（${errors.join("; ")}），建议参考其他来源判断。`;
@@ -145,6 +166,77 @@ function formatResults(place: string, results: SearchResult[]): string {
     `「${place}」的网络评价摘要（搜索引擎结果，非官方评分，仅供参考）:\n` +
     lines.join("\n") +
     popularityNote(popularity)
+  );
+}
+
+const MAX_DURATION_HINTS = 3;
+const ENGINE_LABELS: Record<string, string> = {
+  bing: "必应",
+  baidu: "百度",
+  "360": "360搜索",
+  duckduckgo: "DuckDuckGo",
+};
+
+/** 页面全文（去脚本/样式与标签）——在结果摘要之外对整页提取游玩时长句子 */
+function pageText(html: string): string {
+  return cleanHtml(html.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " "));
+}
+
+/** 时长句子需同时含"游玩语义"与时间数值；排队/交通/营业时间等噪声剔除 */
+const PLAY_SIGNAL = /(游玩|游览|逛|玩)/;
+const TIME_VALUE = /[0-9一二两三四五六七八九十]+(?:\s*[-–—~～至到]\s*[0-9一二两三四五六七八九十]+)?\s*个?\s*半?\s*(?:小时|钟头|分钟)|半\s*个?\s*小时|半天|大半天|一整天/;
+const DURATION_NOISE = /(排队|等位|车程|开车|驾车|地铁|公交|打车|步行|营业|开放)/;
+
+/**
+ * 从搜索摘要/页面文本提取"建议游玩时长"类句子（供给景点定时长参考）。
+ * 例："三坊七巷一般游玩 2 到 4 小时"、"只逛主街和拍照 2 小时左右"。
+ * preferTokens 为地点名：命中地点名的句子排前面（避免搜 A 时混入相关地点 B 的时长）。
+ */
+export function extractDurationHints(
+  text: string,
+  limit = MAX_DURATION_HINTS,
+  preferTokens: readonly string[] = [],
+): string[] {
+  const scored: Array<{ clause: string; score: number }> = [];
+  const seen = new Set<string>();
+  for (const raw of text.split(/[。！？!?;；，,\n]/)) {
+    const clause = raw
+      .replace(/[\s\S]*?-->/, " ") // HTML 注释残留（如百度页内联脚本注释）
+      .replace(/"[a-zA-Z_$][\w$]*"\s*:\s*"[^"]*"/g, " ") // JSON 片段残留
+      .replace(/\s+/g, " ")
+      .trim();
+    if (clause.length < 6 || clause.length > 90) continue;
+    if (!PLAY_SIGNAL.test(clause)) continue;
+    const timeMatch = TIME_VALUE.exec(clause);
+    if (timeMatch === null) continue;
+    if (DURATION_NOISE.test(clause) && !/游玩|游览/.test(clause)) continue;
+    const key = clause.replace(/[\s，,。\-–—~～]/g, "").slice(0, 30);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const score =
+      (preferTokens.some((token) => clause.includes(token)) ? 2 : 0) +
+      (/(建议|一般|通常|大概|左右|足够|合适)/.test(clause) ? 1 : 0);
+    // 超长句只截取时长数值附近的片段，避免把表格/导航文字整段带出
+    const display =
+      clause.length > 64
+        ? `${timeMatch.index > 16 ? "…" : ""}${clause.slice(Math.max(0, timeMatch.index - 16), timeMatch.index + 48).trim()}${
+            timeMatch.index + 48 < clause.length ? "…" : ""
+          }`
+        : clause;
+    scored.push({ clause: display, score });
+    if (scored.length >= limit * 2) break;
+  }
+  return scored
+    .sort((a, b) => b.score - a.score) // 稳定排序：同分保持出现顺序
+    .slice(0, limit)
+    .map((entry) => entry.clause);
+}
+
+function renderDurationHints(hints: ReadonlyArray<{ text: string; source: string }>): string {
+  if (hints.length === 0) return "";
+  return (
+    "\n⏱ 游玩时长参考（摘自搜索摘要，非官方数据；给景点定时长时优先参考）:\n" +
+    hints.map((hint) => `  - ${hint.text}（来源: ${ENGINE_LABELS[hint.source] ?? hint.source}）`).join("\n")
   );
 }
 
