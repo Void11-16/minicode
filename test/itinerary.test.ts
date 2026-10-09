@@ -243,7 +243,7 @@ test("save_itinerary: merge=true 按 date 合并（分天保存，其余天保�
   assert.equal(fresh.days[0].items[0].name, "X");
 });
 
-test("save_itinerary: 保存质量报告，strict 拦截 P1 问题", async () => {
+test("save_itinerary: 保存质量报告，strict 只拦截行程类 P1（餐饮建议不拦截）", async () => {
   const root = await mkdtemp(join(tmpdir(), "minicode-itin-quality-"));
   const save = createSaveItineraryTool(root);
   const validate = createValidateItineraryTool(root);
@@ -254,10 +254,44 @@ test("save_itinerary: 保存质量报告，strict 拦截 P1 问题", async () =>
   assert.match(await readFile(join(root, "plans", "杭州一日.quality.md"), "utf8"), /状态: 通过/);
   assert.match(await validate.execute({ title: "杭州一日", strict: true, budget_per_person_yuan: 200 }), /状态: 通过/);
 
-  await save.execute({ title: "缺晚餐", days: [{ items: [{ name: "外滩" }] }] });
+  // 只有餐饮问题（没有午餐/晚餐推荐）：strict 不拦截，单列"餐饮参考"
+  const mealOnly = {
+    days: [{
+      date: "2026-10-10",
+      items: [
+        {
+          time: "09:00", end_time: "11:00", type: "visit", name: "西湖公园",
+          location: { latitude: 26.091, longitude: 119.2901 },
+          opening_hours: { opens: "05:00", closes: "22:00" },
+          source: "amap", confidence: "high",
+        },
+        {
+          time: "12:00", end_time: "13:00", type: "rest", name: "午餐休整 · 候选餐厅自选",
+          source: "amap", confidence: "high",
+        },
+        {
+          time: "13:00", end_time: "15:00", type: "visit", name: "福建博物院",
+          location: { latitude: 26.0945, longitude: 119.2897 },
+          opening_hours: { opens: "09:00", closes: "17:00" },
+          source: "amap", confidence: "high",
+        },
+      ],
+    }],
+  };
+  const softOutput = await save.execute({ title: "餐饮提醒", ...mealOnly });
+  assert.match(softOutput, /质量: 100 \/ 100/);
+  assert.match(softOutput, /餐饮建议 2 条/);
+  const soft = await validate.execute({ title: "餐饮提醒", strict: true });
+  assert.match(soft, /状态: 通过/);
+  assert.match(soft, /餐饮参考（不参与评分）/);
+  assert.match(soft, /没有午餐推荐/);
+  assert.match(soft, /没有晚餐推荐/);
+
+  // 行程类 P1（景点缺游玩时长）：strict 仍然拦截
+  await save.execute({ title: "行程硬伤", days: [{ items: [{ time: "09:00", type: "visit", name: "西湖公园" }] }] });
   await assert.rejects(
-    () => validate.execute({ title: "缺晚餐", strict: true }),
-    /行程质量校验未通过（strict）[\s\S]*没有安排晚餐/,
+    () => validate.execute({ title: "行程硬伤", strict: true }),
+    /行程质量校验未通过（strict）[\s\S]*缺少游玩时长/,
   );
 });
 

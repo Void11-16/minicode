@@ -19,14 +19,22 @@ export interface QualityIssue {
 export interface ItineraryQualityReport {
   readonly title: string;
   readonly generated_at: string;
+  /** 行程质量状态：只由行程类问题决定（餐饮建议不参与） */
   readonly status: ItineraryQualityStatus;
   readonly score: number;
+  /** 行程类问题计数（决定状态与评分，不含餐饮建议） */
   readonly issue_count: {
     readonly P0: number;
     readonly P1: number;
     readonly P2: number;
   };
+  /** 行程类问题：时间线/路线/闭馆/重复等（决定状态与评分） */
   readonly issues: readonly QualityIssue[];
+  /**
+   * 餐饮参考建议（不参与状态/评分）：餐厅只是沿途候选，选哪家看当天想法；
+   * 这里只做提示性检查（如某餐段没有推荐、候选合并成一条等），不拦截交付
+   */
+  readonly meal_notes: readonly QualityIssue[];
 }
 
 export interface ValidateItineraryOptions {
@@ -59,7 +67,8 @@ export function validateItinerary(
     issues.push(...breakfastAnchorIssues(itinerary.days, index, index + 1));
   });
 
-  // 跨天重复：同一景点出现在多天（可能是有意重游，P2 提示确认）
+  // 跨天重复：同一景点出现在多天——典型是分天调整时没有去重（如 D3、D4 都有市博物馆），
+  // 需要修正到其中一天；确为有意重游的在 note 说明
   const visitDays = new Map<string, number[]>();
   itinerary.days.forEach((day, index) => {
     for (const item of day.items) {
@@ -72,7 +81,11 @@ export function validateItinerary(
   for (const [name, days] of visitDays) {
     if (days.length > 1) {
       issues.push(
-        issue("P2", "cross-day-duplicate", `${name} 在第 ${days.join("、")} 天重复安排（若为有意重游请确认）`),
+        issue(
+          "P1",
+          "cross-day-duplicate",
+          `${name} 在第 ${days.join("、")} 天重复安排：请调整到其中一天（若确为有意重游，请在 note 说明理由）`,
+        ),
       );
     }
   }
@@ -94,7 +107,10 @@ export function validateItinerary(
     );
   }
 
-  const counts = countIssues(issues);
+  // 餐饮与行程分开校验：餐饮建议仅供参考，不参与状态与评分
+  const itineraryIssues = issues.filter((item) => !isMealNote(item)).map(plainIssue);
+  const mealNotes = issues.filter(isMealNote).map(plainIssue);
+  const counts = countIssues(itineraryIssues);
   const score = Math.max(0, 100 - counts.P0 * 20 - counts.P1 * 7 - counts.P2 * 2);
   return {
     title: itinerary.title,
@@ -106,7 +122,8 @@ export function validateItinerary(
       : "ok",
     score,
     issue_count: counts,
-    issues,
+    issues: itineraryIssues,
+    meal_notes: mealNotes,
   };
 }
 
@@ -127,7 +144,11 @@ function validateDay(
   dayNumber: number,
 ): QualityIssue[] {
   const weekday = weekdayOf(day.date);
-  const timedItems = day.items.filter((item): item is ItineraryItem & { time: string } => item.time !== undefined);
+  // 餐饮候选不参与时间线核验：它们是"沿途参考"而非日程条目（同一餐段多个候选本就同时存在，
+  // 若把候选的 time 混入时间线会产生"时间重叠/时间倒序"的误报）
+  const timedItems = day.items.filter(
+    (item): item is ItineraryItem & { time: string } => item.time !== undefined && item.type !== "meal",
+  );
   const issues = timedItems.flatMap((item, index) => {
     if (index === 0) return [];
     const previous = timedItems[index - 1];
@@ -166,7 +187,9 @@ function validateDay(
 
   for (const subtype of ["lunch", "dinner"] as const) {
     if (!day.items.some((item) => item.type === "meal" && item.subtype === subtype)) {
-      issues.push(issue("P1", `missing-${subtype}`, `当天没有安排${subtype === "lunch" ? "午餐" : "晚餐"}`, dayNumber));
+      issues.push(
+        issue("P1", `missing-${subtype}`, `当天没有${subtype === "lunch" ? "午餐" : "晚餐"}推荐（餐饮仅供参考，不参与评分）`, dayNumber, undefined, true),
+      );
     }
   }
 
@@ -180,6 +203,8 @@ function validateDay(
           "few-meal-options",
           `${subtype === "lunch" ? "午餐" : "晚餐"}候选只有 ${count} 个，建议提供 4-6 个供用户挑选`,
           dayNumber,
+          undefined,
+          true,
         ),
       );
     }
@@ -205,12 +230,15 @@ function validateDay(
   issues.push(...routeEfficiencyIssues(day, dayNumber));
   issues.push(...mergedMealCandidateIssues(day.items, dayNumber));
   issues.push(...mealMarkerOverlapIssues(day.items, dayNumber));
-  issues.push(...timelineGapIssues(timedItems, dayNumber));
+  issues.push(...timelineGapIssues(timedItems, day.items, dayNumber));
   issues.push(...transferTimeIssues(day.items, dayNumber));
   issues.push(...lowRatingVisitIssues(day.items, dayNumber));
 
   const activeMinutes = day.items
-    .filter((item) => item.type !== "rest" && item.type !== "accommodation" && item.type !== "note")
+    .filter(
+      (item) =>
+        item.type !== "rest" && item.type !== "accommodation" && item.type !== "note" && item.type !== "meal",
+    )
     .reduce((sum, item) => sum + itemDurationMinutes(item), 0);
   if (activeMinutes > MAX_ACTIVE_MINUTES) {
     issues.push(
@@ -237,23 +265,25 @@ function parseDaysInTitle(title: string): number | undefined {
 
 function validateItem(item: ItineraryItem, dayNumber: number, weekday: string | undefined): QualityIssue[] {
   const issues: QualityIssue[] = [];
+  // 餐饮条目的问题进"餐饮建议"（不参与状态/评分）；行程条目的问题进正式校验
+  const meal = item.type === "meal";
   if (weekday !== undefined && item.closed_on?.includes(weekday)) {
-    issues.push(issue("P0", "closed-on-date", `${item.name} 在${weekdayLabel(weekday)}闭馆/闭店`, dayNumber, item.id));
+    issues.push(issue("P0", "closed-on-date", `${item.name} 在${weekdayLabel(weekday)}闭馆/闭店`, dayNumber, item.id, meal));
   }
   if ((item.type === "visit" || item.type === "meal") && item.location === undefined) {
-    issues.push(issue("P2", "missing-location", `${item.name} 缺少 location，无法做空间核验`, dayNumber, item.id));
+    issues.push(issue("P2", "missing-location", `${item.name} 缺少 location，无法做空间核验`, dayNumber, item.id, meal));
   }
   if (item.location !== undefined && (item.location.latitude === undefined || item.location.longitude === undefined)) {
-    issues.push(issue("P2", "missing-coordinates", `${item.name} 缺少经纬度，无法计算顺路程度`, dayNumber, item.id));
+    issues.push(issue("P2", "missing-coordinates", `${item.name} 缺少经纬度，无法计算顺路程度`, dayNumber, item.id, meal));
   }
   if (item.source === undefined) {
-    issues.push(issue("P2", "missing-source", `${item.name} 缺少数据来源`, dayNumber, item.id));
+    issues.push(issue("P2", "missing-source", `${item.name} 缺少数据来源`, dayNumber, item.id, meal));
   }
   if (item.confidence === undefined) {
-    issues.push(issue("P2", "missing-confidence", `${item.name} 缺少置信度`, dayNumber, item.id));
+    issues.push(issue("P2", "missing-confidence", `${item.name} 缺少置信度`, dayNumber, item.id, meal));
   }
   if (item.type === "meal" && item.subtype === undefined) {
-    issues.push(issue("P2", "missing-meal-subtype", `${item.name} 缺少 meal subtype`, dayNumber, item.id));
+    issues.push(issue("P2", "missing-meal-subtype", `${item.name} 缺少 meal subtype`, dayNumber, item.id, true));
   }
   if (item.type === "visit" && item.opening_hours === undefined) {
     issues.push(issue("P2", "missing-opening-hours", `${item.name} 缺少开放时间`, dayNumber, item.id));
@@ -270,7 +300,7 @@ function validateItem(item: ItineraryItem, dayNumber: number, weekday: string | 
     );
   }
   if (item.reservation_required === true) {
-    issues.push(issue("P2", "reservation-required", `${item.name} 需要预约，出发前应确认`, dayNumber, item.id));
+    issues.push(issue("P2", "reservation-required", `${item.name} 需要预约，出发前应确认`, dayNumber, item.id, meal));
   }
   if (item.type === "transport") {
     if (item.from === undefined || item.to === undefined) {
@@ -300,6 +330,7 @@ function validateItem(item: ItineraryItem, dayNumber: number, weekday: string | 
           : `${item.name} 缺少 end_time 或 planned_duration_min`,
         dayNumber,
         item.id,
+        meal,
       ),
     );
   }
@@ -308,7 +339,7 @@ function validateItem(item: ItineraryItem, dayNumber: number, weekday: string | 
     if (window !== undefined) {
       const minutes = timeToMinutes(item.time);
       if (minutes < window[0] || minutes > window[1]) {
-        issues.push(issue("P1", "meal-outside-window", `${item.name} 的时间不在常规${mealSubtypeLabel(item.subtype)}时段`, dayNumber, item.id));
+        issues.push(issue("P1", "meal-outside-window", `${item.name} 的时间不在常规${mealSubtypeLabel(item.subtype)}时段`, dayNumber, item.id, true));
       }
     }
   }
@@ -325,7 +356,7 @@ function duplicateIssues(items: readonly ItineraryItem[], dayNumber: number): Qu
         seen.add(key);
         return [];
       }
-      return [issue("P1", "duplicate-place", `当天重复安排 ${item.name}`, dayNumber, item.id)];
+      return [issue("P1", "duplicate-place", `当天重复安排 ${item.name}`, dayNumber, item.id, item.type === "meal")];
     });
 }
 
@@ -433,6 +464,7 @@ function mergedMealCandidateIssues(items: readonly ItineraryItem[], dayNumber: n
           `否则地图上只有一个餐标记且位置不符，用户无法按位置挑选`,
           dayNumber,
           item.id,
+          true,
         ),
       ];
     });
@@ -486,6 +518,7 @@ function mealMarkerOverlapIssues(items: readonly ItineraryItem[], dayNumber: num
             `请改用餐厅自身真实坐标（search_restaurants 的返回值）`,
             dayNumber,
             meal.id,
+            true,
           ),
         ];
       }
@@ -499,6 +532,7 @@ function mealMarkerOverlapIssues(items: readonly ItineraryItem[], dayNumber: num
           `若非同一地点请改用餐厅自身坐标`,
           dayNumber,
           meal.id,
+          true,
         ),
       ];
     });
@@ -507,9 +541,13 @@ function mealMarkerOverlapIssues(items: readonly ItineraryItem[], dayNumber: num
 /**
  * 时间线空档：相邻定时条目之间超过阈值且没有任何条目填充 →
  * 用餐/休息/交通等没有规划完整（典型：上午景点结束后直接跳到下午景点，中午空着）。
+ *
+ * 注：sequence 只含非餐饮条目（餐饮候选不排时间线）；但候选用餐时间落在空档内时
+ * （如 12:00 的午餐候选）说明这段时间有安排（选家餐厅吃饭），不算未规划空档。
  */
 function timelineGapIssues(
   timedItems: readonly (ItineraryItem & { time: string })[],
+  allItems: readonly ItineraryItem[],
   dayNumber: number,
 ): QualityIssue[] {
   const issues: QualityIssue[] = [];
@@ -518,6 +556,14 @@ function timelineGapIssues(
     if (previousEnd === undefined) continue;
     const gap = timeToMinutes(timedItems[i].time) - previousEnd;
     if (gap <= MAX_TIMELINE_GAP_MINUTES) continue;
+    const filledByMeal = allItems.some(
+      (item) =>
+        item.type === "meal" &&
+        item.time !== undefined &&
+        timeToMinutes(item.time) >= previousEnd &&
+        timeToMinutes(item.time) <= timeToMinutes(timedItems[i].time),
+    );
+    if (filledByMeal) continue;
     issues.push(
       issue(
         "P1",
@@ -644,6 +690,8 @@ function breakfastAnchorIssues(
       `早餐候选最近的也在 ${nearestKm.toFixed(1)} 公里外（当天起点：${anchor.name} 附近），` +
       `请补充起点附近的早餐店，或调整时间线先到候选店再出发`,
       dayNumber,
+      undefined,
+      true,
     ),
   ];
 }
@@ -830,6 +878,7 @@ function issue(
   message: string,
   day?: number,
   itemId?: string,
+  meal = false,
 ): QualityIssue {
   return {
     level,
@@ -837,6 +886,23 @@ function issue(
     message,
     ...(day !== undefined ? { day } : {}),
     ...(itemId !== undefined ? { item_id: itemId } : {}),
+    ...(meal ? { meal: true } : {}),
+  };
+}
+
+/** 内部标记：餐饮建议（不参与状态/评分，发布报告前剥掉标记） */
+function isMealNote(issue: QualityIssue): boolean {
+  return (issue as { meal?: boolean }).meal === true;
+}
+
+function plainIssue(issue: QualityIssue): QualityIssue {
+  const { level, code, message, day, item_id } = issue as QualityIssue & { meal?: boolean };
+  return {
+    level,
+    code,
+    message,
+    ...(day !== undefined ? { day } : {}),
+    ...(item_id !== undefined ? { item_id } : {}),
   };
 }
 
@@ -872,14 +938,38 @@ export function renderQualityReport(report: ItineraryQualityReport): string {
     ];
   });
 
+  // 餐饮单列：仅供参考，不参与状态/评分（选哪家看当天想法）
+  const mealSection =
+    report.meal_notes.length === 0
+      ? []
+      : [
+          "## 餐饮参考（不参与评分）",
+          ...report.meal_notes.map((item) => {
+            const location = item.day === undefined ? "" : `Day ${item.day} · `;
+            return `- ${location}${item.message}（${item.code}）`;
+          }),
+          "",
+        ];
+
+  const summary =
+    report.issues.length === 0
+      ? report.meal_notes.length === 0
+        ? "未发现需要处理的问题。"
+        : "行程校验通过；餐饮仅为参考（见上，可自行取舍，或让助手补充）。"
+      : "";
+
   return [
     `# 行程质量报告: ${report.title}`,
     "",
     `- 状态: ${status}`,
     `- 评分: ${report.score} / 100`,
-    `- 问题: P0 ${report.issue_count.P0} / P1 ${report.issue_count.P1} / P2 ${report.issue_count.P2}`,
+    `- 行程问题: P0 ${report.issue_count.P0} / P1 ${report.issue_count.P1} / P2 ${report.issue_count.P2}`,
+    ...(report.meal_notes.length > 0
+      ? [`- 餐饮建议: ${report.meal_notes.length} 条（仅供参考，不影响状态/评分）`]
+      : []),
     "",
     ...sections,
-    report.issues.length === 0 ? "未发现需要处理的问题。" : "",
+    ...mealSection,
+    summary,
   ].join("\n").replace(/\n{3,}/g, "\n\n").trimEnd();
 }

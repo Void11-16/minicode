@@ -155,6 +155,7 @@ export function createSaveItineraryTool(rootDir: string = process.cwd()): Tool {
       return [
         savedLabel,
         `质量: ${report.score} / 100（P0 ${report.issue_count.P0} / P1 ${report.issue_count.P1} / P2 ${report.issue_count.P2}）`,
+        ...(report.meal_notes.length > 0 ? [`餐饮建议 ${report.meal_notes.length} 条（仅供参考，不影响评分）`] : []),
         `${file}（结构化数据）`,
         `${base}.md（可读版本）`,
         `${base}.quality.md（质量报告）`,
@@ -212,13 +213,14 @@ export function createValidateItineraryTool(rootDir: string = process.cwd()): To
   return {
     name: "validate_itinerary",
     description:
-      "核验已保存的行程：时间顺序与重叠、时间线空档、赶路时间、游玩时长、午餐/晚餐、餐段、餐食候选数量、过长交通、当日总时长、景点路线折返、重复地点、预算、数据置信度。" +
-      "生成或修改行程后必须调用；strict=true 时 P0/P1 问题会抛错，要求模型修正后重试。",
+      "核验已保存的行程：时间顺序与重叠、时间线空档、赶路时间、游玩时长、过长交通、当日总时长、景点路线折返、跨天重复、闭馆、预算、数据置信度。" +
+      "餐饮项单独列为「餐饮参考」——只做提示（如某餐段没有推荐），不参与状态/评分。" +
+      "生成或修改行程后必须调用；strict=true 时行程类 P0/P1 问题会抛错，要求模型修正后重试（餐饮建议不影响通过）。",
     parameters: {
       type: "object",
       properties: {
         title: { type: "string", description: "行程标题（保存时的标题）" },
-        strict: { type: "boolean", description: "默认 false；true 时 P0/P1 问题会失败" },
+        strict: { type: "boolean", description: "默认 false；true 时行程类 P0/P1 问题会失败（餐饮建议不影响）" },
         budget_per_person_yuan: { type: "number", description: "人均总预算（元），可选" },
       },
       required: ["title"],

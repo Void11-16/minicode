@@ -21,7 +21,8 @@ async function main(): Promise<void> {
     version: serverVersion(),
     instructions:
       "通用 AI 助手工具集（旅行规划为特长）：文件读写编辑、命令执行、天气、地理编码、路线距离、景点/住宿/餐厅搜索、网络口碑。" +
-      "生成或修改行程后必须调用 validate_itinerary；strict 模式未通过时先修正行程再交付。" +
+      "生成或修改行程后必须调用 validate_itinerary；strict 模式未通过时先修正行程再交付" +
+      "（餐饮项只做参考提示，不影响通过判定）。" +
       `save_itinerary 生成的行程单会保存到 ${plansDir} 目录。` +
       (config.tastePreferences !== undefined ? `用户口味偏好：${config.tastePreferences}。` : ""),
   });

@@ -209,17 +209,21 @@ test("validate_itinerary: 发现时间冲突、餐段、交通与预算问题", 
 
   const report = validateItinerary(itinerary, { budget_per_person_yuan: 100 });
   const codes = report.issues.map((item) => item.code);
+  const mealCodes = report.meal_notes.map((item) => item.code);
 
   assert.equal(report.status, "invalid");
   assert.ok(codes.includes("time-overlap"));
   assert.ok(codes.includes("closed-on-date"));
   assert.ok(codes.includes("outside-opening-hours"));
   assert.ok(codes.includes("duplicate-place"));
-  assert.ok(codes.includes("missing-lunch"));
   assert.ok(codes.includes("long-transport"));
-  assert.ok(codes.includes("meal-outside-window"));
   assert.ok(codes.includes("budget-exceeded"));
+  // 餐饮问题单独成列：不参与状态与评分
+  assert.ok(mealCodes.includes("missing-lunch"));
+  assert.ok(mealCodes.includes("meal-outside-window"));
+  assert.ok(!codes.includes("missing-lunch"), "餐饮问题不应出现在行程问题里");
   assert.match(renderQualityReport(report), /## P0/);
+  assert.match(renderQualityReport(report), /餐饮参考/);
 });
 
 test("validate_itinerary: 空壳返程日（只有吃饭没有游览）必须被拦截", () => {
@@ -342,8 +346,67 @@ test("validate_itinerary: 餐厅候选不参与空间与路线核验", () => {
   assert.ok(!report.issues.some((item) => item.code === "spatial-gap"), "餐厅候选不触发空间断层");
   assert.ok(!report.issues.some((item) => item.code === "missing-time"), "餐饮候选可无 time");
   assert.ok(!report.issues.some((item) => item.code === "route-backtracking"), "餐厅不参与路线折返");
-  assert.ok(!report.issues.some((item) => item.code === "missing-lunch"), "午餐候选已提供");
-  assert.ok(!report.issues.some((item) => item.code === "missing-dinner"), "晚餐候选已提供");
+  assert.ok(!report.meal_notes.some((item) => item.code === "missing-lunch"), "午餐候选已提供");
+  assert.ok(!report.meal_notes.some((item) => item.code === "missing-dinner"), "晚餐候选已提供");
+});
+
+test("validate_itinerary: 餐饮候选不参与时间线核验（事故复现：候选混排/同餐段同时刻）", () => {
+  const days = JSON.parse(JSON.stringify(COMPLETE_ITINERARY.days));
+  // 复现真实事故：候选餐厅带 time 排在当天条目末尾、同餐段多个候选用同一时段、且带时长
+  days[0].items.push(
+    {
+      time: "07:30", end_time: "08:15", type: "meal", subtype: "breakfast", name: "早餐候选A",
+      location: { latitude: 30.2415, longitude: 120.1005 }, source: "amap", confidence: "medium",
+    },
+    {
+      time: "07:30", end_time: "08:15", type: "meal", subtype: "breakfast", name: "早餐候选B",
+      location: { latitude: 30.242, longitude: 120.101 }, source: "amap", confidence: "medium",
+    },
+    {
+      time: "12:00", end_time: "13:00", type: "meal", subtype: "lunch", name: "午餐候选X",
+      location: { latitude: 30.244, longitude: 120.15 }, source: "amap", confidence: "medium",
+    },
+  );
+
+  const report = validateItinerary(parseItinerary({ title: "候选混排", days }));
+  const codes = [...report.issues, ...report.meal_notes].map((item) => item.code);
+  assert.equal(report.status, "ok", "候选餐厅不应产生行程问题");
+  assert.equal(report.score, 100);
+  assert.ok(!codes.includes("time-out-of-order"), "候选的 time 不应参与时间线倒序判定");
+  assert.ok(!codes.includes("time-overlap"), "同餐段候选同时刻不应判为时间重叠");
+  assert.ok(!codes.includes("day-too-long"), "候选时长不应累加进全天活动时长");
+});
+
+test("validate_itinerary: 餐饮问题只进'餐饮参考'，不改变状态与评分", () => {
+  const days = JSON.parse(JSON.stringify(COMPLETE_ITINERARY.days));
+  // 制造一批餐饮问题：晚餐候选全删、午餐合并成一条、时间不在餐段
+  days[0].items = days[0].items.filter(
+    (item: { type?: string; subtype?: string }) => !(item.type === "meal" && item.subtype === "dinner"),
+  );
+  days[0].items.push({
+    id: "merged-lunch",
+    time: "15:00",
+    type: "meal",
+    subtype: "lunch",
+    name: "老城午餐 · 6个候选",
+    note: "① 店A 4.6｜¥23 ② 店B 4.5｜¥27",
+    location: { latitude: 30.24, longitude: 120.15 },
+    source: "amap",
+    confidence: "medium",
+  });
+
+  const report = validateItinerary(parseItinerary({ title: "餐饮凌乱", days }));
+  assert.equal(report.status, "ok", "餐饮问题不影响行程状态");
+  assert.equal(report.score, 100, "餐饮问题不影响评分");
+  const mealCodes = report.meal_notes.map((item) => item.code);
+  assert.ok(mealCodes.includes("missing-dinner"));
+  assert.ok(mealCodes.includes("meal-merged-candidates"));
+  assert.ok(mealCodes.includes("meal-outside-window"));
+  assert.ok(
+    !report.issues.some((item) => ["missing-dinner", "meal-merged-candidates", "meal-outside-window"].includes(item.code)),
+    "餐饮问题不应混进行程问题",
+  );
+  assert.match(renderQualityReport(report), /餐饮参考（不参与评分）/);
 });
 
 test("validate_itinerary: 多家餐厅合并进一条 meal 触发 P1（每条必须独立、坐标可定位）", () => {
@@ -370,7 +433,7 @@ test("validate_itinerary: 多家餐厅合并进一条 meal 触发 P1（每条必
     }],
   });
 
-  const merged = validateItinerary(itinerary).issues.filter((item) => item.code === "meal-merged-candidates");
+  const merged = validateItinerary(itinerary).meal_notes.filter((item) => item.code === "meal-merged-candidates");
   assert.equal(merged.length, 1, "只应命中合并条目，独立餐厅不误报");
   assert.equal(merged[0].level, "P1");
   assert.equal(merged[0].item_id, "merged");
@@ -411,7 +474,7 @@ test("validate_itinerary: 餐厅坐标与景点重合触发标记遮挡（同名
     }],
   });
 
-  const overlaps = validateItinerary(itinerary).issues.filter((item) => item.code === "meal-marker-overlap");
+  const overlaps = validateItinerary(itinerary).meal_notes.filter((item) => item.code === "meal-marker-overlap");
   assert.equal(overlaps.length, 2, "仅命中两处重合，且不误报远离的餐厅");
   const copied = overlaps.find((item) => item.item_id === "copied");
   assert.equal(copied?.level, "P1");
@@ -534,7 +597,7 @@ test("validate_itinerary: 早餐候选离当天起点过远提示（P2）", () =
       },
     ],
   });
-  const issues = validateItinerary(away).issues.filter((item) => item.code === "breakfast-far-from-start");
+  const issues = validateItinerary(away).meal_notes.filter((item) => item.code === "breakfast-far-from-start");
   assert.equal(issues.length, 1);
   assert.equal(issues[0].level, "P2");
   assert.equal(issues[0].day, 2);
@@ -561,7 +624,7 @@ test("validate_itinerary: 早餐候选离当天起点过远提示（P2）", () =
       },
     ],
   });
-  assert.ok(!validateItinerary(near).issues.some((item) => item.code === "breakfast-far-from-start"));
+  assert.ok(!validateItinerary(near).meal_notes.some((item) => item.code === "breakfast-far-from-start"));
 });
 
 test("validate_itinerary: 跨天重复景点提示", () => {
@@ -576,6 +639,7 @@ test("validate_itinerary: 跨天重复景点提示", () => {
   const report = validateItinerary(itinerary);
   const dup = report.issues.find((item) => item.code === "cross-day-duplicate");
   assert.ok(dup !== undefined, "跨天重复应触发提示");
+  assert.equal(dup.level, "P1", "跨天重复按行程问题处理（strict 需修正）");
   assert.match(dup.message, /第 1、2 天/);
 });
 
@@ -645,7 +709,7 @@ test("validate_itinerary: 餐食候选不足触发 P2 提示", () => {
       ],
     }],
   });
-  const issues = validateItinerary(few).issues.filter((item) => item.code === "few-meal-options");
+  const issues = validateItinerary(few).meal_notes.filter((item) => item.code === "few-meal-options");
   assert.equal(issues.length, 2);
   assert.equal(issues[0].level, "P2");
   assert.match(issues[0].message, /午餐候选只有 1 个，建议提供 4-6 个/);
@@ -667,7 +731,7 @@ test("validate_itinerary: 餐食候选不足触发 P2 提示", () => {
       ],
     }],
   });
-  assert.ok(!validateItinerary(enough).issues.some((item) => item.code === "few-meal-options"));
+  assert.ok(!validateItinerary(enough).meal_notes.some((item) => item.code === "few-meal-options"));
 });
 
 test("validate_itinerary: 多候选餐食按均价估算预算，不重复累加", () => {
