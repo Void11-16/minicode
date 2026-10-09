@@ -275,7 +275,7 @@ export function createListItinerariesTool(rootDir: string = process.cwd()): Tool
   };
 }
 
-function renderMarkdown(itinerary: Itinerary): string {
+export function renderMarkdown(itinerary: Itinerary): string {
   const lines = [`# ${itinerary.title}`, ""];
   itinerary.days.forEach((day, index) => {
     const header = [`Day ${index + 1}`];

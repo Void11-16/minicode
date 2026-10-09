@@ -21,6 +21,7 @@ import type { ApprovalMode, PermissionMemory } from "../service/permission-polic
 import type { AmapClient, RouteGeometry } from "../tools/amap.ts";
 import { haversineKm } from "../tools/geo.ts";
 import { resolvePlanCoordinates, type PlanJson } from "./plan-coords.ts";
+import { applyPlanEdit, suggestPlanOptions } from "./plan-edit.ts";
 import { PhotoCache } from "./photo-cache.ts";
 import { formatUsage } from "../core/usage.ts";
 import type { ChatProvider } from "../llm/provider.ts";
@@ -290,7 +291,7 @@ export async function startWebServer(options: WebServerOptions = {}): Promise<Ru
     return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}") as Record<string, unknown>;
   }
 
-  function stateJson(res: ServerResponse, body: Record<string, unknown>): void {
+  function stateJson(res: ServerResponse, body: unknown): void {
     res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
     res.end(JSON.stringify(body));
   }
@@ -545,6 +546,35 @@ export async function startWebServer(options: WebServerOptions = {}): Promise<Ru
       } catch {
         res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
         res.end(JSON.stringify({ error: `未找到行程「${title}」` }));
+      }
+      return;
+    }
+    // 行程条目编辑：附近推荐（高德 POI；服务端缓存 10 分钟，编辑面板反复打开不重复消耗配额）
+    if (req.method === "GET" && url.pathname.startsWith("/api/plans/") && url.pathname.endsWith("/suggest")) {
+      const title = decodeURIComponent(url.pathname.slice("/api/plans/".length, -"/suggest".length));
+      const dayNo = Number(url.searchParams.get("day"));
+      const itemId = (url.searchParams.get("item_id") ?? "").trim();
+      if (!Number.isInteger(dayNo) || dayNo < 1 || itemId === "") {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: "缺少 day / item_id" }));
+        return;
+      }
+      try {
+        stateJson(res, await suggestPlanOptions(rootDir, title, dayNo, itemId));
+      } catch (error) {
+        res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+    // 行程条目编辑：替换 / 调换顺序 / 删除（写回 JSON 并重生成 Markdown 与质量报告）
+    if (req.method === "POST" && url.pathname === "/api/plans/edit") {
+      const body = await readJsonBody(req);
+      try {
+        stateJson(res, { ok: true, ...(await applyPlanEdit(rootDir, body)) });
+      } catch (error) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
       }
       return;
     }

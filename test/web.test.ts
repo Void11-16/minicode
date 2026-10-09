@@ -774,6 +774,119 @@ test("web: 行程路线接口返回真实路径几何（高德方向 API；景�
   }
 });
 
+test("web: 行程条目编辑（替换/调序/删除，重生成 md 与质量报告）+ 就近推荐", async () => {
+  const root = await mkdtemp(join(tmpdir(), "minicode-web-edit-"));
+  await mkdir(join(root, "plans"), { recursive: true });
+  await writeFile(
+    join(root, "plans", "编辑测试.json"),
+    JSON.stringify({
+      title: "编辑测试",
+      days: [
+        {
+          date: "2026-10-11",
+          items: [
+            { id: "a", name: "A景点", type: "visit", time: "09:00", end_time: "10:00", location: { name: "A景点", latitude: 30.0, longitude: 120.0 }, source: "amap", confidence: "high" },
+            { id: "t", name: "A到B", type: "transport", time: "10:00", end_time: "10:20" },
+            { id: "b", name: "B景点", type: "visit", time: "10:20", end_time: "11:20", location: { name: "B景点", latitude: 30.01, longitude: 120.01 }, source: "amap", confidence: "high" },
+            { id: "m1", name: "午饭甲", type: "meal", subtype: "lunch", location: { name: "午饭甲", latitude: 30.005, longitude: 120.005 }, source: "amap", confidence: "medium" },
+            { id: "m2", name: "午饭乙", type: "meal", subtype: "lunch", location: { name: "午饭乙", latitude: 30.006, longitude: 120.006 }, source: "amap", confidence: "medium" },
+            { id: "m3", name: "午饭丙", type: "meal", subtype: "lunch", location: { name: "午饭丙", latitude: 30.007, longitude: 120.007 }, source: "amap", confidence: "medium" },
+            { id: "m4", name: "午饭丁", type: "meal", subtype: "lunch", location: { name: "午饭丁", latitude: 30.008, longitude: 120.008 }, source: "amap", confidence: "medium" },
+            { id: "d1", name: "晚饭", type: "meal", subtype: "dinner", location: { name: "晚饭", latitude: 30.004, longitude: 120.004 }, source: "amap", confidence: "medium" },
+          ],
+        },
+      ],
+    }),
+    "utf8",
+  );
+  setAmapKey(undefined); // 确保从无 Key 状态开始（推荐降级路径）
+  const running = await startWebServer({ rootDir: root, port: 0, configOverrides: { provider: "mock" } });
+  const base = `http://127.0.0.1:${running.port}`;
+  const edit = (body: unknown) =>
+    fetch(`${base}/api/plans/edit`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  const loadPlan = async () =>
+    (await (await fetch(`${base}/api/plans/${encodeURIComponent("编辑测试")}`)).json()) as {
+      days: Array<{ items: Array<{ id?: string; name?: string; time?: string; end_time?: string; note?: string; location?: { latitude?: number } }> }>;
+    };
+
+  try {
+    // 替换（带坐标，不经推荐/地理编码）
+    const replaced = await edit({
+      title: "编辑测试",
+      day: 1,
+      item_id: "b",
+      op: "replace",
+      replacement: { name: "新B景点", latitude: 30.02, longitude: 120.02, rating: 4.7, cost: 35 },
+    });
+    assert.equal(replaced.status, 200);
+    let plan = await loadPlan();
+    const newB = plan.days[0].items.find((item) => item.id === "b")!;
+    assert.equal(newB.name, "新B景点");
+    assert.equal(newB.location?.latitude, 30.02);
+    assert.match(newB.note ?? "", /高德4\.7分｜人均约¥35/);
+
+    // 调序：B 上移与 A 交换位置，时间槽跟着槽位走
+    assert.equal((await edit({ title: "编辑测试", day: 1, item_id: "b", op: "move", direction: "up" })).status, 200);
+    plan = await loadPlan();
+    const items = plan.days[0].items;
+    assert.equal(items[0].id, "b");
+    assert.equal(items[0].time, "09:00");
+    assert.equal(items[0].end_time, "10:00");
+    assert.equal(items[2].id, "a");
+    assert.equal(items[2].time, "10:20");
+
+    // 删除一个午餐候选
+    assert.equal((await edit({ title: "编辑测试", day: 1, item_id: "m4", op: "remove" })).status, 200);
+    plan = await loadPlan();
+    assert.ok(!plan.days[0].items.some((item) => item.id === "m4"));
+
+    // Markdown 与质量报告随编辑重生成
+    assert.match(await readFile(join(root, "plans", "编辑测试.md"), "utf8"), /新B景点/);
+    const quality = JSON.parse(await readFile(join(root, "plans", "编辑测试.quality.json"), "utf8")) as { score: number };
+    assert.equal(typeof quality.score, "number");
+
+    // 非法操作 / 不存在的条目 → 400
+    assert.equal((await edit({ title: "编辑测试", day: 1, item_id: "b", op: "explode" })).status, 400);
+    assert.equal((await edit({ title: "编辑测试", day: 1, item_id: "不存在", op: "remove" })).status, 400);
+
+    // 无高德 Key：推荐接口降级提示，不报错
+    const degraded = await (await fetch(
+      `${base}/api/plans/${encodeURIComponent("编辑测试")}/suggest?day=1&item_id=a`,
+    )).json();
+    assert.equal(degraded.available, false);
+    assert.match(degraded.reason, /高德/);
+
+    // 有（假）高德：就近推荐，且剔除已在行程中的同名地点
+    setAmapKey("test-key", (async (url: string | URL | Request) => {
+      const parsed = new URL(String(url));
+      assert.match(parsed.pathname, /\/v3\/place\/text/);
+      const keywords = parsed.searchParams.get("keywords") ?? "";
+      const pois = keywords.includes("博物馆")
+        ? []
+        : [
+            { id: "p1", name: "新B景点", location: "120.03,30.03", address: "测试地址1", biz_ext: { rating: "4.5" } },
+            { id: "p2", name: "候选景点丙", location: "120.031,30.031", address: "测试地址2", biz_ext: { rating: "4.9" } },
+          ];
+      return new Response(JSON.stringify({ status: "1", infocode: "10000", pois }), { headers: { "Content-Type": "application/json" } });
+    }) as typeof fetch);
+    const suggested = await (await fetch(
+      `${base}/api/plans/${encodeURIComponent("编辑测试")}/suggest?day=1&item_id=a`,
+    )).json();
+    setAmapKey(undefined);
+    assert.equal(suggested.available, true);
+    const names = suggested.options.map((option: { name: string }) => option.name);
+    assert.ok(!names.includes("新B景点"), "已在行程中的地点不应再被推荐");
+    assert.ok(names.includes("候选景点丙"));
+  } finally {
+    setAmapKey(undefined);
+    await running.close();
+  }
+});
+
 test("web: POI 照片接口（高德 photos，服务端缓存，无 Key 时明确不可用）", async () => {
   const root = await mkdtemp(join(tmpdir(), "minicode-web-photos-"));
   const running = await startWebServer({ rootDir: root, port: 0, configOverrides: { provider: "mock" } });

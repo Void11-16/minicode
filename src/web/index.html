@@ -230,6 +230,30 @@
     .marker-pin span { transform: rotate(45deg); font-weight: 700; color: #fff; }
     .marker-cluster { display: flex; align-items: center; justify-content: center; height: 24px; padding: 0 9px; border-radius: 999px; background: #ea580c; color: #fff; font-size: 11.5px; font-weight: 700; border: 2px solid #fff; box-shadow: 0 2px 6px rgba(0,0,0,.3); white-space: nowrap; }
     .leaflet-popup-content { font-size: 13px; line-height: 1.6; }
+    /* 侧栏条目编辑按钮 + 编辑面板（替换/调序/删除） */
+    .side-item .side-edit { flex: 0 0 auto; margin-left: auto; font-size: 12px; color: var(--muted); padding: 2px 5px; border-radius: 6px; cursor: pointer; }
+    .side-item .side-edit:hover { background: var(--primary-light); color: var(--primary); }
+    #item-editor { display: none; position: fixed; left: 50%; transform: translateX(-50%); bottom: 18px; width: min(720px, 92vw); max-height: 64vh; z-index: 260; background: var(--card); border: 1px solid var(--border); border-radius: 14px; box-shadow: 0 12px 40px rgba(15,23,42,.28); flex-direction: column; overflow: hidden; }
+    #item-editor.open { display: flex; }
+    .ie-head { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--border); }
+    .ie-head strong { font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 45%; }
+    .ie-head .ie-meta { font-size: 11.5px; color: var(--muted); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #ie-close { cursor: pointer; color: var(--muted); padding: 2px 8px; border-radius: 6px; }
+    #ie-close:hover { background: #f1f5f9; color: var(--text); }
+    .ie-actions { display: flex; gap: 8px; padding: 10px 14px 4px; }
+    .ie-label { font-size: 11.5px; color: var(--muted); padding: 8px 14px 6px; }
+    .ie-strip { display: flex; gap: 8px; overflow-x: auto; padding: 0 14px 10px; }
+    .ie-card { flex: 0 0 172px; border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; cursor: pointer; background: var(--bg); transition: border-color .12s, background .12s; }
+    .ie-card:hover { border-color: var(--primary); background: var(--primary-light); }
+    .ie-card .t { display: block; font-size: 12.5px; color: var(--text); line-height: 1.35; }
+    .ie-card .m { display: block; font-size: 11px; color: var(--muted); margin-top: 4px; line-height: 1.5; }
+    .ie-note { font-size: 12px; color: var(--muted); padding: 4px 2px; }
+    .ie-custom { display: flex; gap: 8px; padding: 0 14px 12px; }
+    .ie-custom input { flex: 1; border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px; font-size: 13px; font-family: inherit; }
+    .ie-custom input:focus { outline: none; border-color: var(--primary); }
+    .ie-hint { font-size: 11px; color: #94a3b8; padding: 0 14px 12px; }
+    .map-toast { position: fixed; top: 64px; left: 50%; transform: translateX(-50%); background: rgba(15,23,42,.92); color: #fff; font-size: 12.5px; padding: 8px 16px; border-radius: 999px; opacity: 0; transition: opacity .2s; z-index: 270; pointer-events: none; max-width: 80vw; }
+    .map-toast.show { opacity: 1; }
     .popup-time { font-size: 11px; color: var(--muted); }
     .popup-type { display: inline-block; font-size: 10.5px; padding: 1px 6px; border-radius: 4px; color: #fff; margin-left: 4px; }
 
@@ -373,6 +397,27 @@
         <div class="item"><span class="dot" style="background:#7c3aed"></span>住宿</div>
         <div class="item"><span class="dot" style="background:#059669"></span>休息</div>
       </div>
+    </div>
+
+    <!-- 行程条目编辑：替换（附近推荐/自定义输入）、上移/下移、删除 -->
+    <div id="item-editor">
+      <div class="ie-head">
+        <strong id="ie-title">编辑条目</strong>
+        <span class="ie-meta" id="ie-meta"></span>
+        <span id="ie-close" title="关闭">✕</span>
+      </div>
+      <div class="ie-actions">
+        <button class="btn" id="ie-up">⬆ 上移</button>
+        <button class="btn" id="ie-down">⬇ 下移</button>
+        <button class="btn" id="ie-remove">🗑 删除此项</button>
+      </div>
+      <div class="ie-label" id="ie-label">附近推荐（点击即替换）</div>
+      <div class="ie-strip" id="ie-strip"></div>
+      <div class="ie-custom" id="ie-custom">
+        <input id="ie-input" placeholder="或输入地点/餐厅名称，如：烟台山公园">
+        <button class="btn primary" id="ie-apply">使用</button>
+      </div>
+      <div class="ie-hint" id="ie-hint"></div>
     </div>
   </div>
 
@@ -1695,6 +1740,16 @@
             }
             row.appendChild(main);
 
+            const edit = document.createElement("span");
+            edit.className = "side-edit";
+            edit.textContent = "✏️";
+            edit.title = "修改这条（替换 / 调序 / 删除）";
+            edit.onclick = (event) => {
+              event.stopPropagation();
+              openItemEditor(dayNo, item);
+            };
+            row.appendChild(edit);
+
             row.onclick = () => {
               side.querySelectorAll(".side-item.active").forEach((el) => el.classList.remove("active"));
               row.classList.add("active");
@@ -1888,6 +1943,7 @@
       }
 
       async function loadItinerary(title) {
+        closeItemEditor();
         const res = await fetch(`${API_BASE}/api/plans/${encodeURIComponent(title)}`);
         if (!res.ok) { currentItinerary = null; return; }
         currentItinerary = await res.json();
@@ -1946,6 +2002,186 @@
         if (data.plans.length > 0) await loadItinerary(data.plans[0].title);
       }
 
+      // ===== 行程条目编辑：替换（附近推荐/自定义输入）、调换顺序、删除 =====
+      // 服务端：GET /api/plans/:title/suggest（高德就近推荐，带缓存）+ POST /api/plans/edit（写回并重生成 md/质量报告）
+      let editCtx = null; // { dayNo, itemId, type }
+      let itemRemoveArmed = false;
+      let itemRemoveTimer = 0;
+      let mapToastTimer = 0;
+
+      function mapToast(text) {
+        let element = $("map-toast");
+        if (element === null) {
+          element = document.createElement("div");
+          element.id = "map-toast";
+          element.className = "map-toast";
+          $("map-overlay").appendChild(element);
+        }
+        element.textContent = text;
+        element.classList.add("show");
+        clearTimeout(mapToastTimer);
+        mapToastTimer = setTimeout(() => element.classList.remove("show"), 2800);
+      }
+
+      /** 编辑后刷新行程列表元信息（质量分/更新时间）而不重置已选行程 */
+      async function refreshPlanMeta(title) {
+        try {
+          const data = await (await fetch(`${API_BASE}/api/plans`)).json();
+          for (const plan of data.plans) planMeta.set(plan.title, plan);
+          renderPlanMeta(title);
+        } catch {
+          // 元信息刷新失败不影响主流程
+        }
+      }
+
+      function openItemEditor(dayNo, item) {
+        editCtx = { dayNo, itemId: item.id ?? item.name, type: item.type ?? "note" };
+        itemRemoveArmed = false;
+        clearTimeout(itemRemoveTimer);
+        $("ie-title").textContent = `✏️ ${item.name}`;
+        $("ie-meta").textContent = item.time !== undefined
+          ? `${item.time}${item.end_time !== undefined ? `–${item.end_time}` : ""}`
+          : "";
+        $("ie-remove").textContent = "🗑 删除此项";
+        const isStop = editCtx.type === "visit" || editCtx.type === "accommodation" || editCtx.type === "rest";
+        const canReplace = editCtx.type === "visit" || editCtx.type === "meal";
+        $("ie-up").style.display = isStop ? "" : "none";
+        $("ie-down").style.display = isStop ? "" : "none";
+        $("ie-label").style.display = canReplace ? "" : "none";
+        $("ie-strip").style.display = canReplace ? "" : "none";
+        $("ie-custom").style.display = canReplace ? "" : "none";
+        $("ie-hint").textContent = isStop
+          ? "调整顺序后交通段落描述可能未同步，可在对话里让 AI 复核通勤明细。"
+          : (canReplace ? "点击推荐卡片直接替换；没有合适的就在下方输入名称。" : "该类型仅支持删除。");
+        $("item-editor").classList.add("open");
+        if (canReplace) void loadSuggest();
+      }
+
+      function closeItemEditor() {
+        $("item-editor").classList.remove("open");
+        editCtx = null;
+      }
+      $("ie-close").onclick = closeItemEditor;
+
+      async function loadSuggest() {
+        const strip = $("ie-strip");
+        strip.textContent = "";
+        const loading = document.createElement("span");
+        loading.className = "ie-note";
+        loading.textContent = "正在查询附近推荐…";
+        strip.appendChild(loading);
+        if (currentPlanTitle === null || editCtx === null) return;
+        const ctx = editCtx;
+        try {
+          const res = await fetch(
+            `${API_BASE}/api/plans/${encodeURIComponent(currentPlanTitle)}/suggest` +
+            `?day=${ctx.dayNo}&item_id=${encodeURIComponent(ctx.itemId)}`,
+          );
+          const data = await res.json().catch(() => ({}));
+          if (editCtx !== ctx) return; // 面板已切换或关闭
+          strip.textContent = "";
+          if (!res.ok) { suggestNote(strip, data.error ?? "查询失败"); return; }
+          if (data.available !== true) { suggestNote(strip, data.reason ?? "暂无推荐，可手动输入名称"); return; }
+          if (!Array.isArray(data.options) || data.options.length === 0) {
+            suggestNote(strip, "附近没有更合适的候选，可在下方手动输入");
+            return;
+          }
+          for (const option of data.options) {
+            const card = document.createElement("div");
+            card.className = "ie-card";
+            const name = document.createElement("span");
+            name.className = "t";
+            name.textContent = option.name;
+            const meta = document.createElement("span");
+            meta.className = "m";
+            const parts = [];
+            if (option.rating !== undefined) parts.push(`高德 ${option.rating} 分`);
+            if (option.cost !== undefined) parts.push(`人均 ¥${Math.round(option.cost)}`);
+            if (typeof option.cuisine === "string" && option.cuisine !== "") parts.push(option.cuisine);
+            parts.push(`${Number(option.distanceKm).toFixed(1)}km`);
+            meta.textContent = parts.join(" · ");
+            card.append(name, meta);
+            card.title = option.address ?? "";
+            card.onclick = () => void applyItemEdit({
+              op: "replace",
+              replacement: {
+                name: option.name,
+                address: option.address,
+                latitude: option.latitude,
+                longitude: option.longitude,
+                rating: option.rating,
+                cost: option.cost,
+                cuisine: option.cuisine,
+              },
+            });
+            strip.appendChild(card);
+          }
+        } catch {
+          if (editCtx === ctx) {
+            strip.textContent = "";
+            suggestNote(strip, "查询失败，请稍后重试");
+          }
+        }
+      }
+
+      function suggestNote(container, text) {
+        const note = document.createElement("span");
+        note.className = "ie-note";
+        note.textContent = text;
+        container.appendChild(note);
+      }
+
+      async function applyItemEdit(body) {
+        if (editCtx === null || currentPlanTitle === null) return;
+        const ctx = editCtx;
+        const title = currentPlanTitle;
+        $("ie-meta").textContent = "正在保存…";
+        let res;
+        try {
+          res = await fetch(`${API_BASE}/api/plans/edit`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ title, day: ctx.dayNo, item_id: ctx.itemId, ...body }),
+          });
+        } catch {
+          $("ie-meta").textContent = "❌ 网络失败，请重试";
+          return;
+        }
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          $("ie-meta").textContent = `❌ ${data.error ?? "修改失败"}`;
+          return;
+        }
+        closeItemEditor();
+        mapToast(`✅ 已更新（质量 ${data.quality?.score ?? "-"} 分${data.quality?.status === "ok" ? "" : " · 可在对话里让 AI 复核"}）`);
+        await loadItinerary(title);
+        void refreshPlanMeta(title);
+      }
+
+      $("ie-up").onclick = () => void applyItemEdit({ op: "move", direction: "up" });
+      $("ie-down").onclick = () => void applyItemEdit({ op: "move", direction: "down" });
+      $("ie-remove").onclick = () => {
+        if (!itemRemoveArmed) {
+          itemRemoveArmed = true;
+          $("ie-remove").textContent = "确认删除？再点一次";
+          itemRemoveTimer = setTimeout(() => {
+            itemRemoveArmed = false;
+            $("ie-remove").textContent = "🗑 删除此项";
+          }, 3000);
+          return;
+        }
+        clearTimeout(itemRemoveTimer);
+        void applyItemEdit({ op: "remove" });
+      };
+      $("ie-apply").onclick = () => {
+        const name = $("ie-input").value.trim();
+        if (name === "") return;
+        void applyItemEdit({ op: "replace", replacement: { name } });
+      };
+      $("ie-input").addEventListener("keydown", (event) => {
+        if (event.key === "Enter") $("ie-apply").click();
+      });
+
       // 删除行程（二次确认；删除当前选中项后自动刷新列表）
       let deleteArmed = false;
       let deleteTimer = 0;
@@ -1981,6 +2217,7 @@
       }
 
       function closeMap() {
+        closeItemEditor();
         $("map-overlay").classList.remove("open");
       }
 
