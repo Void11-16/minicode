@@ -22,6 +22,8 @@ import type { AmapClient, RouteGeometry } from "../tools/amap.ts";
 import { haversineKm } from "../tools/geo.ts";
 import { resolvePlanCoordinates, type PlanJson } from "./plan-coords.ts";
 import { applyPlanEdit, suggestPlanOptions } from "./plan-edit.ts";
+import { deleteProfile, listProfiles, parseProfileDocument, profileSummary, saveProfile } from "../tools/profiles.ts";
+import type { ProfileFieldId } from "../tools/profiles.ts";
 import { PhotoCache } from "./photo-cache.ts";
 import { formatUsage } from "../core/usage.ts";
 import type { ChatProvider } from "../llm/provider.ts";
@@ -291,6 +293,18 @@ export async function startWebServer(options: WebServerOptions = {}): Promise<Ru
     return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}") as Record<string, unknown>;
   }
 
+  /** 原始字节 body（档案文件上传用），带大小上限防误传大文件 */
+  async function readRawBody(request: IncomingMessage, limitBytes = 8 * 1024 * 1024): Promise<Buffer> {
+    const chunks: Buffer[] = [];
+    let total = 0;
+    for await (const chunk of request) {
+      total += (chunk as Buffer).length;
+      if (total > limitBytes) throw new Error("文件超过 8MB 上限");
+      chunks.push(chunk as Buffer);
+    }
+    return Buffer.concat(chunks);
+  }
+
   function stateJson(res: ServerResponse, body: unknown): void {
     res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
     res.end(JSON.stringify(body));
@@ -411,6 +425,91 @@ export async function startWebServer(options: WebServerOptions = {}): Promise<Ru
         res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
         res.end(JSON.stringify({ error: `文件夹不存在或没有权限：${target}` }));
       }
+      return;
+    }
+    // ===== 旅行者档案：列表 / 导入（上传填好的表单解析）/ 保存 / 删除 =====
+    if (req.method === "GET" && url.pathname === "/api/profiles") {
+      const profiles = await listProfiles(rootDir);
+      stateJson(res, {
+        profiles: profiles.map((profile) => ({
+          id: profile.id,
+          name: profile.name,
+          summary: profileSummary(profile),
+          updatedAt: profile.updatedAt,
+        })),
+      });
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/api/profiles/detail") {
+      const id = (url.searchParams.get("id") ?? "").trim();
+      const profile = id === "" ? null : (await listProfiles(rootDir)).find((entry) => entry.id === id) ?? null;
+      if (profile === null) {
+        res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: "未找到该档案" }));
+        return;
+      }
+      stateJson(res, { profile });
+      return;
+    }
+    // 导入：上传填好的档案文件（原始字节）；只解析不落盘，前端确认后再 save
+    if (req.method === "POST" && url.pathname === "/api/profiles/import") {
+      const fileName = (url.searchParams.get("name") ?? "").trim();
+      if (fileName === "") {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: "缺少文件名（?name=xxx.docx）" }));
+        return;
+      }
+      try {
+        const parsed = parseProfileDocument(fileName, await readRawBody(req));
+        stateJson(res, { file: fileName, ...parsed });
+      } catch (error) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/api/profiles/save") {
+      const body = await readJsonBody(req);
+      const fields: Partial<Record<ProfileFieldId, string>> = {};
+      if (typeof body.fields === "object" && body.fields !== null) {
+        for (const [key, value] of Object.entries(body.fields)) {
+          if (typeof value === "string" && value.trim() !== "") fields[key as ProfileFieldId] = value;
+        }
+      }
+      const source =
+        typeof body.source === "object" && body.source !== null
+          ? {
+              ...(typeof (body.source as Record<string, unknown>).file === "string"
+                ? { file: (body.source as Record<string, unknown>).file as string }
+                : {}),
+              ...(typeof (body.source as Record<string, unknown>).rawText === "string"
+                ? { rawText: (body.source as Record<string, unknown>).rawText as string, importedAt: Date.now() }
+                : {}),
+            }
+          : undefined;
+      try {
+        const profile = await saveProfile(rootDir, {
+          ...(typeof body.id === "string" && body.id !== "" ? { id: body.id } : {}),
+          name: typeof body.name === "string" ? body.name : "",
+          fields,
+          ...(source !== undefined ? { source } : {}),
+        });
+        stateJson(res, { ok: true, profile: { id: profile.id, name: profile.name, summary: profileSummary(profile) } });
+      } catch (error) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/api/profiles/delete") {
+      const body = await readJsonBody(req);
+      const id = typeof body.id === "string" ? body.id : "";
+      if (id === "") {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: "缺少档案 id" }));
+        return;
+      }
+      stateJson(res, { deleted: await deleteProfile(rootDir, id) });
       return;
     }
     if (req.method === "GET" && url.pathname === "/api/models") {

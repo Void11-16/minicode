@@ -3,6 +3,7 @@ import { dirname } from "node:path";
 import type { Tool } from "./tool.ts";
 import { requireString } from "./tool.ts";
 import { planFileFor } from "./itinerary.ts";
+import { loadProfile, mergeProfiles } from "./profiles.ts";
 
 interface TravelBrief {
   readonly title: string;
@@ -17,6 +18,8 @@ interface TravelBrief {
   readonly mustVisit?: readonly string[];
   readonly avoid?: readonly string[];
   readonly tastePreferences?: string;
+  /** 同行人档案名字列表（与 profiles 合并后的约束见合并输出） */
+  readonly travelerProfiles?: readonly string[];
   readonly notes?: string;
 }
 
@@ -65,6 +68,11 @@ export function createSaveTravelBriefTool(rootDir: string = process.cwd()): Tool
         mustVisit: { type: "array", items: { type: "string" }, description: "必去地点列表，可选" },
         avoid: { type: "array", items: { type: "string" }, description: "要避开的地点/类型，可选" },
         tastePreferences: { type: "string", description: "本次出行口味偏好（优先于长期偏好），可选" },
+        travelerProfiles: {
+          type: "array",
+          items: { type: "string" },
+          description: "同行人档案名字列表（用户在页面勾选或提到时填写，如 [\"爸爸\",\"妈妈\"]），可选",
+        },
         notes: { type: "string", description: "其他要求（带老人/孩子、摄影等），可选" },
       },
       required: ["title", "destination"],
@@ -86,7 +94,8 @@ export function createLoadTravelBriefTool(rootDir: string = process.cwd()): Tool
     name: "load_travel_brief",
     description:
       "读取已保存的旅行需求单。开始规划或用户补充需求前先调用它拿到当前版本，" +
-      "更新后用 save_travel_brief 保存。",
+      "更新后用 save_travel_brief 保存。需求单里若勾选了同行人档案，" +
+      "输出会附上已合并的同行人约束（忌口取并集、辣度/节奏取最保守），规划必须遵守。",
     parameters: {
       type: "object",
       properties: {
@@ -96,11 +105,22 @@ export function createLoadTravelBriefTool(rootDir: string = process.cwd()): Tool
     },
     async execute(args) {
       const title = requireString(args, "title");
+      let raw: string;
       try {
-        return await readFile(planFileFor(rootDir, "plans/briefs", title, "json"), "utf8");
+        raw = await readFile(planFileFor(rootDir, "plans/briefs", title, "json"), "utf8");
       } catch {
         return `未找到需求单「${title}」。已保存的需求单在 plans/briefs/ 目录。`;
       }
+      const brief = JSON.parse(raw) as TravelBrief;
+      const names = Array.isArray(brief.travelerProfiles) ? brief.travelerProfiles : [];
+      if (names.length === 0) return raw;
+      const profiles = (await Promise.all(names.map((name) => loadProfile(rootDir, name)))).filter(
+        (profile): profile is NonNullable<typeof profile> => profile !== null,
+      );
+      const missing = names.filter((name) => !profiles.some((profile) => profile.name === name || profile.id === name));
+      const merged = mergeProfiles(profiles);
+      const missingNote = missing.length > 0 ? `\n（注意：未找到档案 ${missing.join("、")}，可在页面 👥 里导入）` : "";
+      return `${raw}${merged === "" ? "" : `\n\n${merged}`}${missingNote}`;
     },
   };
 }
@@ -127,6 +147,12 @@ function parseBrief(args: Record<string, unknown>): TravelBrief {
       throw new Error(`${key} 需要字符串数组`);
     }
   }
+  {
+    const value = args.travelerProfiles;
+    if (value !== undefined && (!Array.isArray(value) || value.some((item) => typeof item !== "string" || item.trim() === ""))) {
+      throw new Error("travelerProfiles 需要非空字符串数组");
+    }
+  }
 
   return {
     title,
@@ -141,6 +167,7 @@ function parseBrief(args: Record<string, unknown>): TravelBrief {
     ...(Array.isArray(args.mustVisit) ? { mustVisit: args.mustVisit as string[] } : {}),
     ...(Array.isArray(args.avoid) ? { avoid: args.avoid as string[] } : {}),
     ...(typeof args.tastePreferences === "string" ? { tastePreferences: args.tastePreferences } : {}),
+    ...(Array.isArray(args.travelerProfiles) ? { travelerProfiles: args.travelerProfiles as string[] } : {}),
     ...(typeof args.notes === "string" ? { notes: args.notes } : {}),
   };
 }
@@ -157,6 +184,7 @@ function summarizeBrief(brief: TravelBrief): string {
     ["节奏", brief.pace ?? "适中"],
     ["必去", brief.mustVisit?.join("、") ?? "无"],
     ["避开", brief.avoid?.join("、") ?? "无"],
+    ["同行人档案", brief.travelerProfiles?.join("、") ?? "无"],
   ];
   return rows.map(([key, value]) => `- ${key}: ${value}`).join("\n");
 }

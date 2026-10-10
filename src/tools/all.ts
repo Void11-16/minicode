@@ -22,6 +22,7 @@ import {
   createValidateItineraryTool,
 } from "./itinerary.ts";
 import { createSaveTravelBriefTool, createLoadTravelBriefTool } from "./brief.ts";
+import { createListTravelerProfilesTool, createLoadTravelerProfileTool } from "./profiles.ts";
 /**
  * 注册默认工具集（旅行规划场景）。
  * 注意: 高德 Key 通过 setAmapKey 由装配层（CLI）管理，这里不触碰 ——
@@ -59,6 +60,8 @@ export function createDefaultRegistry(options: DefaultRegistryOptions = {}): Too
     .register(createListItinerariesTool(options.writeRoot ?? process.cwd()))
     .register(createValidateItineraryTool(options.writeRoot ?? process.cwd()))
     .register(createSaveTravelBriefTool(options.writeRoot ?? process.cwd()))
-    .register(createLoadTravelBriefTool(options.writeRoot ?? process.cwd()));
+    .register(createLoadTravelBriefTool(options.writeRoot ?? process.cwd()))
+    .register(createListTravelerProfilesTool(options.writeRoot ?? process.cwd()))
+    .register(createLoadTravelerProfileTool(options.writeRoot ?? process.cwd()));
   return registry;
 }

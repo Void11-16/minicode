@@ -774,6 +774,62 @@ test("web: 行程路线接口返回真实路径几何（高德方向 API；景�
   }
 });
 
+test("web: 旅行者档案导入（上传解析）/保存/列表/详情/删除接口", async () => {
+  const { port, close } = await withMockServer();
+  const base = `http://127.0.0.1:${port}`;
+  const fixture = await readFile(join(import.meta.dirname, "fixtures", "档案-已填示例.docx"));
+
+  try {
+    // 导入：解析填好的 Word，只返回预览、不落盘
+    const imported = await (
+      await fetch(`${base}/api/profiles/import?name=${encodeURIComponent("档案-已填示例.docx")}`, {
+        method: "POST",
+        body: fixture,
+      })
+    ).json();
+    assert.equal(imported.name, "爸爸");
+    assert.equal(imported.fields.allergies, "花生");
+    assert.equal((await (await fetch(`${base}/api/profiles`)).json()).profiles.length, 0, "确认前不落盘");
+
+    // 前端确认后保存
+    const saved = await (
+      await fetch(`${base}/api/profiles/save`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: imported.name,
+          fields: imported.fields,
+          source: { file: "档案-已填示例.docx", rawText: imported.rawText },
+        }),
+      })
+    ).json();
+    assert.equal(saved.ok, true);
+
+    const list = await (await fetch(`${base}/api/profiles`)).json();
+    assert.equal(list.profiles.length, 1);
+    assert.equal(list.profiles[0].name, "爸爸");
+    assert.match(list.profiles[0].summary, /花生/);
+
+    const detail = await (
+      await fetch(`${base}/api/profiles/detail?id=${encodeURIComponent(saved.profile.id)}`)
+    ).json();
+    assert.equal(detail.profile.fields.spicy, "微辣");
+
+    // 删除
+    const deleted = await (
+      await fetch(`${base}/api/profiles/delete`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: saved.profile.id }),
+      })
+    ).json();
+    assert.equal(deleted.deleted, true);
+    assert.equal((await (await fetch(`${base}/api/profiles`)).json()).profiles.length, 0);
+  } finally {
+    await close();
+  }
+});
+
 test("web: 行程条目编辑（替换/调序/删除，重生成 md 与质量报告）+ 就近推荐", async () => {
   const root = await mkdtemp(join(tmpdir(), "minicode-web-edit-"));
   await mkdir(join(root, "plans"), { recursive: true });
