@@ -1,0 +1,107 @@
+{
+  "title": "福州5日游",
+  "generated_at": "2026-10-09T07:18:58.038Z",
+  "status": "needs_revision",
+  "score": 82,
+  "issue_count": {
+    "P0": 0,
+    "P1": 2,
+    "P2": 2
+  },
+  "issues": [
+    {
+      "level": "P2",
+      "code": "missing-opening-hours",
+      "message": "可可主角·福州巧克力博览馆 缺少开放时间",
+      "day": 1,
+      "item_id": "d1-v1"
+    },
+    {
+      "level": "P1",
+      "code": "transfer-too-tight",
+      "message": "上下杭历史文化街区（16:20 结束）到 福文化博物馆（16:20 开始）相距约 0.6 公里，至少需要约 7 分钟赶路，时间线上只留了 0 分钟：请缩短前一项或把后续时间顺延",
+      "day": 2,
+      "item_id": "d2-v4"
+    },
+    {
+      "level": "P1",
+      "code": "transfer-too-tight",
+      "message": "鼓山（涌泉寺+摩崖石刻+十八景）（12:20 结束）到 午餐休整 · 鼓山下院一带候选自选（12:20 开始）相距约 1.9 公里，至少需要约 10 分钟赶路，时间线上只留了 0 分钟：请缩短前一项或把后续时间顺延",
+      "day": 3,
+      "item_id": "d3-rest2"
+    },
+    {
+      "level": "P2",
+      "code": "missing-opening-hours",
+      "message": "冰心故居（林觉民故居同址） 缺少开放时间",
+      "day": 5,
+      "item_id": "d5-v1"
+    }
+  ],
+  "meal_notes": [
+    {
+      "level": "P1",
+      "code": "duplicate-place",
+      "message": "当天重复安排 后街捞化(雅道巷店)",
+      "day": 1,
+      "item_id": "d1-m10"
+    },
+    {
+      "level": "P1",
+      "code": "duplicate-place",
+      "message": "当天重复安排 朱紫坊蹄膀·福州菜(三坊七巷店)",
+      "day": 1,
+      "item_id": "d1-m13"
+    },
+    {
+      "level": "P1",
+      "code": "duplicate-place",
+      "message": "当天重复安排 南马唐鲜作闽南菜(烟台山店)",
+      "day": 2,
+      "item_id": "d2-m9"
+    },
+    {
+      "level": "P2",
+      "code": "few-meal-options",
+      "message": "晚餐候选只有 3 个，建议提供 4-6 个供用户挑选",
+      "day": 5
+    },
+    {
+      "level": "P1",
+      "code": "duplicate-place",
+      "message": "当天重复安排 永和鱼丸(三坊七巷店)",
+      "day": 5,
+      "item_id": "d5-m4"
+    },
+    {
+      "level": "P2",
+      "code": "breakfast-far-from-start",
+      "message": "早餐候选最近的也在 1.8 公里外（当天起点：广达商务酒店（五一广场·三坊七巷店）办理入住/寄存 附近），请补充起点附近的早餐店，或调整时间线先到候选店再出发",
+      "day": 1
+    },
+    {
+      "level": "P2",
+      "code": "breakfast-far-from-start",
+      "message": "早餐候选最近的也在 1.8 公里外（当天起点：回酒店休息 附近），请补充起点附近的早餐店，或调整时间线先到候选店再出发",
+      "day": 2
+    },
+    {
+      "level": "P2",
+      "code": "breakfast-far-from-start",
+      "message": "早餐候选最近的也在 1.8 公里外（当天起点：回酒店休息 附近），请补充起点附近的早餐店，或调整时间线先到候选店再出发",
+      "day": 3
+    },
+    {
+      "level": "P2",
+      "code": "breakfast-far-from-start",
+      "message": "早餐候选最近的也在 1.8 公里外（当天起点：回酒店休息 附近），请补充起点附近的早餐店，或调整时间线先到候选店再出发",
+      "day": 4
+    },
+    {
+      "level": "P2",
+      "code": "breakfast-far-from-start",
+      "message": "早餐候选最近的也在 1.8 公里外（当天起点：回酒店休息 附近），请补充起点附近的早餐店，或调整时间线先到候选店再出发",
+      "day": 5
+    }
+  ]
+}

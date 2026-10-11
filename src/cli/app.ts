@@ -19,6 +19,7 @@ import { handleCommand, executeSimpleCommand } from "./commands.ts";
 import { SessionService } from "../service/session-service.ts";
 import { debugLog } from "../util/logger.ts";
 import { setAmapKey } from "../tools/amap-access.ts";
+import { briefForSessionTitle, toolRoundsForBrief } from "../tools/brief.ts";
 import { createPermissionMemory, decidePermission, permissionModeOf } from "../service/permission-policy.ts";
 import type { ApprovalMode, PermissionMemory } from "../service/permission-policy.ts";
 import { appendFile, mkdir } from "node:fs/promises";
@@ -193,6 +194,13 @@ export class CliApp {
     this.runtime = new AgentRuntime({
       summarize: this.summarizeForCompact,
       archive: (session, epoch) => this.store.archive(session, epoch),
+      // 工具轮次按行程需求动态给：多天行程的搜索/口碑/餐饮/逐日保存+校验远超默认 30 轮
+      maxToolRounds: async (session, input) =>
+        toolRoundsForBrief(await briefForSessionTitle(process.cwd(), `${session.title}\n${input}`), 30),
+      onBudgetExtended: (sessionId, info) => {
+        if (sessionId !== this.currentSessionId) return;
+        console.log(`⚙️ 工具轮次不够用，预算从 ${info.from} 提到 ${info.to} 轮继续（按行程需求自动续期）\n`);
+      },
       onCheckpoint: (sessionId) => {
         const checkpointAgent = this.runtime.getAgent(sessionId);
         if (checkpointAgent === undefined) return;

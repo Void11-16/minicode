@@ -24,11 +24,15 @@ import { resolvePlanCoordinates, type PlanJson } from "./plan-coords.ts";
 import { applyPlanEdit, suggestPlanOptions } from "./plan-edit.ts";
 import { deleteProfile, listProfiles, parseProfileDocument, profileSummary, saveProfile } from "../tools/profiles.ts";
 import type { ProfileFieldId } from "../tools/profiles.ts";
+import { briefForSessionTitle, toolRoundsForBrief } from "../tools/brief.ts";
 import { PhotoCache } from "./photo-cache.ts";
 import { formatUsage } from "../core/usage.ts";
 import type { ChatProvider } from "../llm/provider.ts";
 import type { Message } from "../core/message.ts";
 import { STEERED_NOTE } from "../runtime/runtime.ts";
+
+/** 工具轮次兜底预算：需求单还没落盘（首轮）时使用，落盘后按行程天数动态调整 */
+const FALLBACK_TOOL_ROUNDS = 30;
 
 export interface WebServerOptions {
   /** 项目根目录（配置/会话/plans 落盘位置），默认源码根 */
@@ -171,6 +175,18 @@ export async function startWebServer(options: WebServerOptions = {}): Promise<Ru
     return {
       summarize,
       archive: (session, epoch) => store.archive(session, epoch),
+      // 工具轮次按行程需求动态给：7 天游的搜索+口碑+餐饮+逐日保存+校验远超默认 30 轮
+      maxToolRounds: async (session, input) =>
+        toolRoundsForBrief(
+          await briefForSessionTitle(rootDir, `${session.title}\n${input}`),
+          FALLBACK_TOOL_ROUNDS,
+        ),
+      onBudgetExtended: (sessionId, info) => {
+        write(sessionId, {
+          type: "budget",
+          text: `⚙️ 工具轮次不够用，预算从 ${info.from} 提到 ${info.to} 轮继续（按行程需求自动续期）`,
+        });
+      },
       onCheckpoint: (sessionId) => {
         const agent = runtime.getAgent(sessionId);
         if (agent === undefined) return;
@@ -580,7 +596,7 @@ export async function startWebServer(options: WebServerOptions = {}): Promise<Ru
         stateJson(res, { available: true, photos: [] });
         return;
       }
-      // 同一点位（约百米网格）复用缓存；名称变化重新查询
+      // 同一点位（约百米网格）复用缓存；名称变化重新查询（缓存内部带版本号，见 PhotoCache）
       const cacheKey = `${name}|${latitude.toFixed(3)},${longitude.toFixed(3)}`;
       const cached = photoCache.get(cacheKey);
       if (cached !== undefined) {

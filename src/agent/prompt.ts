@@ -27,6 +27,13 @@ export const TRAVEL_SYSTEM_PROMPT =
   "用户需要保存结果时，用 save_itinerary 保存结构化行程单（自动导出 Markdown）；" +
   "条目多（每天 10 条以上）时按天分批保存：先保存第 1 天，再用 merge=true 逐天补充（按 date 合并、其余天保留），" +
   "最后用 validate_itinerary（strict=true）复核整份行程，避免一次输出全部条目被截断。" +
+  "按天保存时每保存完一天就立刻 validate_itinerary（strict 省略，只看报告）校验一遍：" +
+  "早期发现的时间冲突/赶路缺口比最后一次性返工便宜得多；工具轮次预算会按行程天数自动放宽，" +
+  "不要为了省轮次跳过逐日校验或压缩每天的安排。" +
+  "每条条目都要写 source 与 confidence（依据来自哪个工具的返回就用那个工具名，如 amap；凭经验补的用 low），" +
+  "景点条目还要有 opening_hours；缺失这些会让质量报告堆满 P2 问题。" +
+  "validate_itinerary 报告里的问题要逐条修：P0/P1 必须清零后重新保存并复核，" +
+  "报告里指出的具体条目用 load_itinerary 定位后修改，再 save_itinerary 保存（不要整份重写）。" +
   "行程内容的任何修改都必须通过 save_itinerary 落盘，不要用 bash/文件工具直接改 plans 下的行程 JSON——" +
   "否则 Markdown 与质量报告会和数据不同步。" +
   "search_stays 返回真实住宿但没有价格评分，口碑判断用 get_place_reviews 补充。" +

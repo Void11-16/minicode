@@ -47,7 +47,7 @@ class EndlessToolProvider implements ChatProvider {
   readonly name = "endless";
   readonly chatHistories: PromptMessage[][] = [];
   private readonly wrapUpReply: string;
-  private toolCalls = 0;
+  toolCalls = 0;
 
   constructor(wrapUpReply: string) {
     this.wrapUpReply = wrapUpReply;
@@ -180,6 +180,31 @@ test("Agent 工具循环: 打满轮次后自动收尾给出最终回答", async 
   assert.match(wrapHistory[wrapHistory.length - 1].content, /用尽|禁用/);
   // 收尾回答写入会话，成为最终产出
   assert.equal(agent.history.at(-1)?.content, "收尾总结：整合已获得的数据如下…");
+});
+
+test("Agent 工具循环: 预算用尽时 onBudgetExhausted 可以放宽轮次继续跑", async () => {
+  const provider = new EndlessToolProvider("收尾总结：整合已获得的数据如下…");
+  const registry = new ToolRegistry();
+  registry.register(echoTool());
+  const agent = new ChatAgent(new Session(), provider, registry);
+
+  // 宿主按轮读取预算：第一次用尽放宽到 4，第二次拒绝 → 走收尾
+  let limit = 2;
+  const exhaustedAt: number[] = [];
+  const reply = await agent.run("测试", {
+    maxToolRounds: () => limit,
+    onBudgetExhausted: (current) => {
+      exhaustedAt.push(current);
+      if (exhaustedAt.length > 1) return false;
+      limit = 4;
+      return true;
+    },
+  });
+
+  assert.equal(reply, "收尾总结：整合已获得的数据如下…");
+  assert.deepEqual(exhaustedAt, [2, 4]);
+  // 续期后多跑了两轮工具调用
+  assert.equal(provider.toolCalls, 4);
 });
 
 test("Agent 工具循环: 剩余轮数不足时注入收尾提醒（不写入会话历史）", async () => {

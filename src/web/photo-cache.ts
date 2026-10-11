@@ -12,6 +12,12 @@ interface CacheEntry {
 
 const TTL_MS = 7 * 24 * 60 * 60_000;
 const MAX_ENTRIES = 500;
+/** 载荷版本：照片「挑最像的 POI」逻辑改动时必须 +1，否则旧的错图/空结果会被继续复用 */
+const CACHE_VERSION = "v2";
+
+function versioned(key: string): string {
+  return `${CACHE_VERSION}|${key}`;
+}
 
 export class PhotoCache {
   private readonly file: string;
@@ -27,7 +33,7 @@ export class PhotoCache {
       const raw = JSON.parse(await readFile(this.file, "utf8")) as Record<string, CacheEntry>;
       const now = Date.now();
       for (const [key, entry] of Object.entries(raw)) {
-        if (now - entry.savedAt < TTL_MS && Array.isArray(entry.photos)) {
+        if (key.startsWith(`${CACHE_VERSION}|`) && now - entry.savedAt < TTL_MS && Array.isArray(entry.photos)) {
           this.entries.set(key, entry);
         }
       }
@@ -37,7 +43,7 @@ export class PhotoCache {
   }
 
   get(key: string): string[] | undefined {
-    const entry = this.entries.get(key);
+    const entry = this.entries.get(versioned(key));
     if (entry === undefined || Date.now() - entry.savedAt >= TTL_MS) return undefined;
     return [...entry.photos];
   }
@@ -49,7 +55,7 @@ export class PhotoCache {
       if (oldest === undefined) break;
       this.entries.delete(oldest);
     }
-    this.entries.set(key, { photos: [...photos], savedAt: Date.now() });
+    this.entries.set(versioned(key), { photos: [...photos], savedAt: Date.now() });
   }
 
   async persist(): Promise<void> {

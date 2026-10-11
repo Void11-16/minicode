@@ -263,3 +263,30 @@ test("checkpoint: 运行时向 Agent 透传安全边界回调（带 sessionId）
   // 用户消息后 + 最终回答后
   assert.deepEqual(checkpoints, ["sess_cp", "sess_cp"]);
 });
+
+test("轮次预算: 按会话动态解析，用尽后自动续期并通知宿主", async () => {
+  const provider = new ManualProvider();
+  const extended: Array<{ from: number; to: number }> = [];
+  const runtime = new AgentRuntime({
+    summarize: async () => "摘要",
+    // 动态预算：测试里恒为 2（真实场景是按需求单的行程天数算）
+    maxToolRounds: () => 2,
+    onBudgetExtended: (_sessionId, info) => {
+      extended.push(info);
+    },
+  });
+  runtime.registerAgent("sess_budget", new ChatAgent(new Session("sess_budget"), provider, echoRegistry()));
+
+  const turn = runtime.send("sess_budget", "开始", "queue");
+  // 前两轮把 2 轮预算打满
+  for (let i = 0; i < 2; i += 1) {
+    await waitFor(() => provider.pending.length > i);
+    provider.complete(i, { type: "tool_calls", toolCalls: [{ id: `c${i}`, name: "echo", arguments: "{}" }] });
+  }
+  // 预算用尽 → 续期（重算后取 current+15）→ 第 3 轮给出最终回答
+  await waitFor(() => provider.pending.length > 2);
+  provider.complete(2, { type: "text", content: "完成" });
+
+  assert.equal(await turn, "完成");
+  assert.deepEqual(extended, [{ from: 2, to: 17 }]);
+});

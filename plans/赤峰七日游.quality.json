@@ -1,0 +1,47 @@
+{
+  "title": "赤峰七日游",
+  "generated_at": "2026-10-10T11:39:26.761Z",
+  "status": "needs_confirmation",
+  "score": 98,
+  "issue_count": {
+    "P0": 0,
+    "P1": 0,
+    "P2": 1
+  },
+  "issues": [
+    {
+      "level": "P2",
+      "code": "title-day-mismatch",
+      "message": "标题为7日游，实际排了 5 天（日期跨度与游玩天数可能不一致）"
+    }
+  ],
+  "meal_notes": [
+    {
+      "level": "P2",
+      "code": "meal-marker-overlap",
+      "message": "三赫包子(应昌街店) 与景点「赤峰博物馆（深度观展）」坐标几乎重合（<25 米），餐标记可能盖住景点标记；若非同一地点请改用餐厅自身坐标",
+      "day": 2,
+      "item_id": "day-1-item-2"
+    },
+    {
+      "level": "P2",
+      "code": "meal-marker-overlap",
+      "message": "兰州牛肉面(应昌街店) 与景点「赤峰博物馆（深度观展）」坐标几乎重合（<25 米），餐标记可能盖住景点标记；若非同一地点请改用餐厅自身坐标",
+      "day": 2,
+      "item_id": "day-1-item-3"
+    },
+    {
+      "level": "P2",
+      "code": "meal-marker-overlap",
+      "message": "武家面(富河街店) 与景点「赤峰博物馆（深度观展）」坐标几乎重合（<25 米），餐标记可能盖住景点标记；若非同一地点请改用餐厅自身坐标",
+      "day": 2,
+      "item_id": "day-1-item-4"
+    },
+    {
+      "level": "P2",
+      "code": "breakfast-far-from-start",
+      "message": "早餐候选最近的也在 1.6 公里外（当天起点：入住 · 赤峰昭乌达宾馆 附近），请补充起点附近的早餐店，或调整时间线先到候选店再出发",
+      "day": 3
+    }
+  ]
+}

@@ -218,12 +218,7 @@ export class AmapClient {
     limit = 4,
   ): Promise<string[]> {
     const pois = await this.poiSearch(keywords, center, radiusMeters);
-    const normalize = (text: string) => text.replace(/[（）()·\s]/g, "");
-    const key = normalize(keywords);
-    const matched = pois.find((poi) => {
-      const name = normalize(poi.name);
-      return (name.includes(key) || key.includes(name)) && (poi.photos ?? []).length > 0;
-    });
+    const matched = rankPoisByName(pois, keywords)[0];
     if (matched === undefined) return [];
     return (matched.photos ?? [])
       .map((photo) => photo.url)
@@ -323,4 +318,53 @@ export function rankPoisByRating(
       if (Math.abs(ratingDiff) > 0.01) return ratingDiff;
       return a.distanceKm - b.distanceKm;
     });
+}
+
+/** 名称相似度低于该值就认为不是同一地点，宁可不给图也不贴错图 */
+const POI_NAME_SIMILARITY_MIN = 0.6;
+
+/** 归一化：去掉括号/分隔符/空白并统一小写，让「赤峰博物馆（新馆）」≡「赤峰博物馆新馆」 */
+function normalizePoiName(text: string): string {
+  return text.toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
+}
+
+/** 最长公共子序列长度：容忍中间插入的修饰词（「乌兰布统旅游景区-欧式风光区」） */
+function lcsLength(left: string, right: string): number {
+  let previous = Array.from<number>({ length: right.length + 1 }).fill(0);
+  for (let i = 1; i <= left.length; i += 1) {
+    const current = Array.from<number>({ length: right.length + 1 }).fill(0);
+    for (let j = 1; j <= right.length; j += 1) {
+      current[j] = left[i - 1] === right[j - 1]
+        ? previous[j - 1] + 1
+        : Math.max(previous[j], current[j - 1]);
+    }
+    previous = current;
+  }
+  return previous[right.length];
+}
+
+/**
+ * 按名称把搜索结果排到最像目标的前面，只保留有照片的 POI。
+ * 高德对同一地点常返回带修饰词的别名或泛化结果，两级排序都容易出错：
+ * 取首个命中会贴错（「赤峰博物馆南停车场」排在「赤峰博物馆」前），
+ * 只允许包含关系又会漏掉别名（「乌兰布统旅游景区-欧式风光区」不含「乌兰布统欧式风光区」）。
+ * 因此按 同名 > 包含 > 相似度 分级，同级再比名称长度与相似度。
+ */
+export function rankPoisByName(pois: readonly AmapPoi[], keywords: string): AmapPoi[] {
+  const key = normalizePoiName(keywords);
+  return pois
+    .filter((poi) => (poi.photos ?? []).length > 0)
+    .map((poi) => {
+      const name = normalizePoiName(poi.name);
+      const relation = name === key ? 0 : name.includes(key) || key.includes(name) ? 1 : 2;
+      return {
+        poi,
+        name,
+        relation,
+        similarity: relation === 2 ? lcsLength(name, key) / Math.max(name.length, key.length, 1) : 1,
+      };
+    })
+    .filter((entry) => entry.name !== "" && (entry.relation < 2 || entry.similarity >= POI_NAME_SIMILARITY_MIN))
+    .sort((a, b) => a.relation - b.relation || b.similarity - a.similarity || a.name.length - b.name.length)
+    .map((entry) => entry.poi);
 }

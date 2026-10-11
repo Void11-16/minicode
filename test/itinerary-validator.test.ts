@@ -159,6 +159,31 @@ test("itinerary schema: 拒绝非法时间与重复 ID", () => {
   );
 });
 
+test("itinerary schema: 跨天重复 ID 自动改写为当天默认 ID（同一天内仍报错）", () => {
+  // 模型常把 Day 1 的自动 id 抄到后面几天：前端把 id 当全局键，必须改写而不是报错
+  const itinerary = parseItinerary({
+    title: "跨天重复",
+    days: [
+      { date: "2026-10-01", items: [{ id: "day-1-item-1", name: "A" }, { name: "B" }] },
+      { date: "2026-10-02", items: [{ id: "day-1-item-1", name: "C" }, { id: "custom", name: "D" }] },
+      { date: "2026-10-03", items: [{ id: "custom", name: "E" }] },
+    ],
+  });
+
+  assert.deepEqual(
+    itinerary.days.map((day) => day.items.map((item) => item.id)),
+    [["day-1-item-1", "day-1-item-2"], ["day-2-item-1", "custom"], ["day-3-item-1"]],
+  );
+  // 全局唯一：前端照片缓存/标记定位不会再串到别的天
+  const ids = itinerary.days.flatMap((day) => day.items.map((item) => item.id));
+  assert.equal(new Set(ids).size, ids.length);
+  // 同一天内重复仍然报错（模型漏改条目）
+  assert.throws(
+    () => parseItinerary({ title: "x", days: [{ items: [{ id: "a", name: "x" }, { id: "a", name: "y" }] }] }),
+    /id 重复/,
+  );
+});
+
 test("validate_itinerary: 完整行程通过核验", () => {
   const report = validateItinerary(COMPLETE_ITINERARY, { budget_per_person_yuan: 200 });
 

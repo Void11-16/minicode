@@ -1,0 +1,2346 @@
+{
+  "title": "福州5日游",
+  "days": [
+    {
+      "date": "2026-10-11",
+      "items": [
+        {
+          "id": "d1-accommodation",
+          "time": "10:00",
+          "end_time": "11:00",
+          "type": "accommodation",
+          "name": "广达商务酒店（五一广场·三坊七巷店）办理入住/寄存",
+          "location": {
+            "name": "广达商务酒店",
+            "address": "台江区广达南路356号（五一广场旁，近地铁1号线茶亭站）",
+            "latitude": 26.067113,
+            "longitude": 119.31181,
+            "source": "amap-resolved"
+          },
+          "planned_duration_min": 60,
+          "source": "search_stays",
+          "confidence": "medium",
+          "note": "5天住宿基准：五一广场旁、步行可达地铁1号线茶亭站/南门兜站；同类近地铁连锁商务酒店约300-450元/晚"
+        },
+        {
+          "id": "d1-t1",
+          "time": "11:00",
+          "end_time": "11:22",
+          "type": "transport",
+          "name": "公交至西湖公园",
+          "planned_duration_min": 22,
+          "transport_mode": "transit",
+          "from": "广达商务酒店",
+          "to": "西湖公园",
+          "distance_km": 2.5,
+          "source": "amap",
+          "confidence": "medium"
+        },
+        {
+          "id": "d1-v1",
+          "time": "11:22",
+          "end_time": "12:52",
+          "type": "visit",
+          "name": "可可主角·福州巧克力博览馆",
+          "location": {
+            "name": "可可主角·福州巧克力博览馆",
+            "address": "三坊七巷南后街77号",
+            "latitude": 26.083074,
+            "longitude": 119.29682,
+            "source": "amap-resolved"
+          },
+          "planned_duration_min": 90,
+          "source": "amap",
+          "confidence": "high",
+          "note": "高德4.6分"
+        },
+        {
+          "id": "d1-t2",
+          "time": "12:52",
+          "end_time": "13:04",
+          "type": "transport",
+          "name": "步行至福建博物院",
+          "planned_duration_min": 12,
+          "transport_mode": "walking",
+          "from": "西湖公园",
+          "to": "福建博物院",
+          "distance_km": 0.8,
+          "source": "amap",
+          "confidence": "high"
+        },
+        {
+          "id": "d1-rest1",
+          "time": "13:04",
+          "end_time": "14:14",
+          "type": "rest",
+          "name": "午餐休整 · 博物院/道山路一带候选餐厅自选",
+          "location": {
+            "name": "福建博物院",
+            "address": "鼓楼区湖头街96号",
+            "latitude": 26.094102,
+            "longitude": 119.287602,
+            "source": "amap-resolved"
+          },
+          "planned_duration_min": 70,
+          "source": "amap",
+          "confidence": "high"
+        },
+        {
+          "id": "d1-v2",
+          "time": "14:14",
+          "end_time": "15:29",
+          "type": "visit",
+          "name": "福建博物院",
+          "location": {
+            "name": "福建博物院",
+            "address": "鼓楼区湖头街96号（近西湖公园）",
+            "latitude": 26.094102,
+            "longitude": 119.287602,
+            "source": "amap-resolved"
+          },
+          "planned_duration_min": 75,
+          "opening_hours": {
+            "opens": "09:00",
+            "closes": "17:00",
+            "source": "amap"
+          },
+          "closed_on": [
+            "Monday"
+          ],
+          "source": "amap",
+          "confidence": "high",
+          "note": "高德4.6分，免费，周一闭馆"
+        },
+        {
+          "id": "d1-t3",
+          "time": "15:29",
+          "end_time": "16:00",
+          "type": "transport",
+          "name": "公交/地铁至冶山春秋园",
+          "planned_duration_min": 31,
+          "transport_mode": "transit",
+          "from": "福建博物院",
+          "to": "冶山春秋园",
+          "source": "amap",
+          "confidence": "medium"
+        },
+        {
+          "id": "d1-v3",
+          "time": "16:00",
+          "end_time": "17:10",
+          "type": "visit",
+          "name": "冶山春秋园",
+          "location": {
+            "name": "冶山春秋园",
+            "address": "鼓楼区冶山路33号（屏山地铁站D口步行220米）",
+            "latitude": 26.096281,
+            "longitude": 119.298785,
+            "source": "amap-resolved"
+          },
+          "planned_duration_min": 70,
+          "opening_hours": {
+            "opens": "06:00",
+            "closes": "21:00",
+            "source": "amap"
+          },
+          "source": "amap",
+          "confidence": "high",
+          "note": "高德4.5分，福州最早城郭遗址公园，免费"
+        },
+        {
+          "id": "d1-t4",
+          "time": "17:10",
+          "end_time": "17:35",
+          "type": "transport",
+          "name": "地铁1号线至三坊七巷",
+          "planned_duration_min": 25,
+          "transport_mode": "transit",
+          "from": "冶山春秋园",
+          "to": "三坊七巷",
+          "source": "amap",
+          "confidence": "medium"
+        },
+        {
+          "id": "d1-v4",
+          "time": "17:35",
+          "end_time": "19:15",
+          "type": "visit",
+          "name": "三坊七巷历史文化街区（含晚餐休整）",
+          "location": {
+            "name": "三坊七巷",
+            "address": "鼓楼区南后街139号（东街口地铁站C口步行420米）",
+            "latitude": 26.084056,
+            "longitude": 119.296691,
+            "source": "amap-resolved"
+          },
+          "planned_duration_min": 100,
+          "opening_hours": {
+            "opens": "00:00",
+            "closes": "23:00",
+            "source": "amap"
+          },
+          "source": "amap",
+          "confidence": "high",
+          "note": "高德4.8分，5A街区，傍晚最舒服；晚餐可在南后街候选餐厅自选"
+        },
+        {
+          "id": "d1-t5",
+          "time": "19:15",
+          "end_time": "19:22",
+          "type": "transport",
+          "name": "步行至林则徐纪念馆",
+          "planned_duration_min": 7,
+          "transport_mode": "walking",
+          "from": "三坊七巷",
+          "to": "林则徐纪念馆",
+          "distance_km": 0.5,
+          "source": "amap",
+          "confidence": "high"
+        },
+        {
+          "id": "d1-v5",
+          "time": "19:22",
+          "end_time": "20:20",
+          "type": "visit",
+          "name": "林则徐纪念馆（前庭/园林）",
+          "location": {
+            "name": "林则徐纪念馆",
+            "address": "鼓楼区澳门路16号（南门兜地铁站L口步行420米）",
+            "latitude": 26.078369,
+            "longitude": 119.297274,
+            "source": "amap-resolved"
+          },
+          "planned_duration_min": 58,
+          "opening_hours": {
+            "opens": "09:00",
+            "closes": "21:00",
+            "source": "amap"
+          },
+          "closed_on": [
+            "Monday"
+          ],
+          "source": "amap",
+          "confidence": "high",
+          "note": "高德4.7分，免费；若已闭馆只是灯下看门前古建筑"
+        },
+        {
+          "id": "d1-t6",
+          "time": "20:20",
+          "end_time": "20:40",
+          "type": "transport",
+          "name": "打车回酒店",
+          "planned_duration_min": 20,
+          "transport_mode": "taxi",
+          "from": "林则徐纪念馆",
+          "to": "广达商务酒店",
+          "distance_km": 2,
+          "source": "amap",
+          "confidence": "high"
+        },
+        {
+          "id": "d1-rest2",
+          "time": "20:40",
+          "end_time": "21:10",
+          "type": "rest",
+          "name": "回酒店休息",
+          "location": {
+            "name": "广达商务酒店",
+            "address": "台江区广达南路356号",
+            "latitude": 26.067113,
+            "longitude": 119.31181,
+            "source": "amap-resolved"
+          },
+          "planned_duration_min": 30,
+          "source": "search_stays",
+          "confidence": "medium"
+        },
+        {
+          "id": "d1-m1",
+          "type": "meal",
+          "subtype": "breakfast",
+          "name": "同利肉燕老铺(三坊七巷店)",
+          "location": {
+            "name": "同利肉燕老铺(三坊七巷店)",
+            "address": "南后街98号（东街口地铁站C口步行480米）",
+            "latitude": 26.083513,
+            "longitude": 119.296545,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 24,
+          "cuisine": "本地小吃",
+          "source": "amap",
+          "confidence": "high",
+          "note": "早餐候选｜4.6分·人均¥24·三坊七巷 0.2km"
+        },
+        {
+          "id": "d1-m2",
+          "type": "meal",
+          "subtype": "breakfast",
+          "name": "聚春园(南后街店)",
+          "location": {
+            "name": "聚春园(南后街店)",
+            "address": "南后街45号",
+            "latitude": 26.081769,
+            "longitude": 119.297156,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 21,
+          "cuisine": "本地小吃",
+          "source": "amap",
+          "confidence": "high",
+          "note": "早餐候选｜4.5分·人均¥21·三坊七巷 0.1km"
+        },
+        {
+          "id": "d1-m3",
+          "type": "meal",
+          "subtype": "breakfast",
+          "name": "后街捞化(雅道巷店)",
+          "location": {
+            "name": "后街捞化(雅道巷店)",
+            "address": "雅道巷95号（西门地铁站D东南口步行380米）",
+            "latitude": 26.083241,
+            "longitude": 119.293341,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 22,
+          "cuisine": "捞化/本地",
+          "source": "amap",
+          "confidence": "high",
+          "note": "早餐候选｜4.6分·人均¥22·三坊七巷 0.4km"
+        },
+        {
+          "id": "d1-m4",
+          "type": "meal",
+          "subtype": "breakfast",
+          "name": "大斗烧麦档(道山路店)",
+          "location": {
+            "name": "大斗烧麦档(道山路店)",
+            "address": "道山路84号（南门兜地铁站L口步行300米）",
+            "latitude": 26.078363,
+            "longitude": 119.298284,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 19,
+          "cuisine": "本地小吃",
+          "source": "amap",
+          "confidence": "medium",
+          "note": "早餐候选｜4.6分·人均¥19·道山路，近住处"
+        },
+        {
+          "id": "d1-m5",
+          "type": "meal",
+          "subtype": "lunch",
+          "name": "永和鱼丸(道山路店)",
+          "location": {
+            "name": "永和鱼丸(道山路店)",
+            "address": "道山路213号（金品公寓隔壁）",
+            "latitude": 26.0777,
+            "longitude": 119.296355,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 23,
+          "cuisine": "本地小吃",
+          "source": "amap",
+          "confidence": "high",
+          "note": "午餐候选（经济档）｜4.5分·人均¥23·道山路，距博物院约1km"
+        },
+        {
+          "id": "d1-m6",
+          "type": "meal",
+          "subtype": "lunch",
+          "name": "HA黔·古韵酸汤粉(道山店)",
+          "location": {
+            "name": "HA黔·古韵酸汤粉(道山店)",
+            "address": "道山路219-10号（金品公寓底商）",
+            "latitude": 26.077291,
+            "longitude": 119.295586,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 32,
+          "cuisine": "酸汤粉",
+          "source": "amap",
+          "confidence": "high",
+          "note": "午餐候选（换口味）｜4.5分·人均¥32·道山路"
+        },
+        {
+          "id": "d1-m7",
+          "type": "meal",
+          "subtype": "lunch",
+          "name": "朱紫坊蹄膀·福州菜(三坊七巷店)",
+          "location": {
+            "name": "朱紫坊蹄膀·福州菜(三坊七巷店)",
+            "address": "吉庇路85-3店面",
+            "latitude": 26.080162,
+            "longitude": 119.298001,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 45,
+          "cuisine": "福州菜",
+          "source": "amap",
+          "confidence": "medium",
+          "note": "午餐候选（本地特色）｜4.5分·人均¥45·三坊七巷 0.2km"
+        },
+        {
+          "id": "d1-m8",
+          "type": "meal",
+          "subtype": "lunch",
+          "name": "老福洲三十年·福州风味(东街口三坊七巷店)",
+          "location": {
+            "name": "老福洲三十年·福州风味(东街口三坊七巷店)",
+            "address": "吉庇巷70号（南门兜地铁站L口步行420米）",
+            "latitude": 26.080515,
+            "longitude": 119.29865,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 92,
+          "cuisine": "福州菜",
+          "source": "amap",
+          "confidence": "medium",
+          "note": "午餐候选（中高档）｜4.6分·人均¥92·荔枝肉/鸡汤汆海蚌"
+        },
+        {
+          "id": "d1-m9",
+          "type": "meal",
+          "subtype": "lunch",
+          "name": "聚春园大酒店(三坊七巷店)",
+          "location": {
+            "name": "聚春园大酒店(三坊七巷店)",
+            "address": "八一七北路聚春园大酒店（东街口地铁站旁）",
+            "latitude": 26.086581,
+            "longitude": 119.299655,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 130,
+          "cuisine": "闽菜/正餐",
+          "source": "amap",
+          "confidence": "medium",
+          "note": "午餐候选（高档档）｜佛跳墙发源字号·人均约¥130"
+        },
+        {
+          "id": "d1-m10",
+          "type": "meal",
+          "subtype": "dinner",
+          "name": "后街捞化(雅道巷店)",
+          "location": {
+            "name": "后街捞化(雅道巷店)",
+            "address": "雅道巷95号（西门地铁站D东南口步行380米）",
+            "latitude": 26.083241,
+            "longitude": 119.293341,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 22,
+          "cuisine": "捞化/本地",
+          "source": "amap",
+          "confidence": "high",
+          "note": "晚餐候选（经济档）｜4.6分·人均¥22·三坊七巷内"
+        },
+        {
+          "id": "d1-m11",
+          "type": "meal",
+          "subtype": "dinner",
+          "name": "永和鱼丸(三坊七巷店)",
+          "location": {
+            "name": "永和鱼丸(三坊七巷店)",
+            "address": "南后街89号（东街口地铁站C西南口步行400米）",
+            "latitude": 26.083762,
+            "longitude": 119.296642,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 24,
+          "cuisine": "本地小吃",
+          "source": "amap",
+          "confidence": "high",
+          "note": "晚餐候选｜4.5分·人均¥24·南后街"
+        },
+        {
+          "id": "d1-m13",
+          "type": "meal",
+          "subtype": "dinner",
+          "name": "朱紫坊蹄膀·福州菜(三坊七巷店)",
+          "location": {
+            "name": "朱紫坊蹄膀·福州菜(三坊七巷店)",
+            "address": "吉庇路85-3店面",
+            "latitude": 26.080162,
+            "longitude": 119.298001,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 45,
+          "cuisine": "福州菜",
+          "source": "amap",
+          "confidence": "medium",
+          "note": "晚餐候选（本地特色）｜4.5分·人均¥45·蹄膀+锅边糊"
+        },
+        {
+          "id": "d1-m12",
+          "type": "meal",
+          "subtype": "dinner",
+          "name": "福鳗满·福州名小吃(澳门路)",
+          "location": {
+            "name": "福鳗满·福州名小吃(澳门路)",
+            "address": "澳门路55号（南门兜地铁站出入口步行470米）",
+            "latitude": 26.079475,
+            "longitude": 119.29771,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 52,
+          "cuisine": "本地名小吃",
+          "source": "amap",
+          "confidence": "high",
+          "note": "晚餐候选（中档）｜4.4分·人均¥52·澳门路，近林则徐纪念馆"
+        },
+        {
+          "id": "d1-m14",
+          "type": "meal",
+          "subtype": "dinner",
+          "name": "星巴克臻选(福州东百中心分店)",
+          "location": {
+            "name": "星巴克臻选(福州东百中心分店)",
+            "address": "八一七北路150号三坊七巷南街商业中心C区",
+            "latitude": 26.082798,
+            "longitude": 119.29979,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 30,
+          "cuisine": "茶饮/咖啡轻食",
+          "source": "amap",
+          "confidence": "medium",
+          "note": "晚餐候选（轻食）｜4.5分·人均¥30·三坊七巷南街"
+        }
+      ]
+    },
+    {
+      "date": "2026-10-12",
+      "items": [
+        {
+          "id": "d2-m1",
+          "type": "meal",
+          "subtype": "breakfast",
+          "name": "永和鱼丸(三坊七巷店)",
+          "location": {
+            "name": "永和鱼丸(三坊七巷店)",
+            "address": "南后街89号（东街口地铁站C西南口步行400米）",
+            "latitude": 26.083762,
+            "longitude": 119.296642,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 24,
+          "cuisine": "本地小吃",
+          "source": "amap",
+          "confidence": "high",
+          "note": "早餐候选（近住处/南门兜起点）｜4.5分·人均¥24"
+        },
+        {
+          "id": "d2-m2",
+          "type": "meal",
+          "subtype": "breakfast",
+          "name": "大斗烧麦档(道山路店)",
+          "location": {
+            "name": "大斗烧麦档(道山路店)",
+            "address": "道山路84号（南门兜地铁站L口步行300米）",
+            "latitude": 26.078363,
+            "longitude": 119.298284,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 19,
+          "cuisine": "本地小吃",
+          "source": "amap",
+          "confidence": "medium",
+          "note": "早餐候选（距住处约0.8km）｜4.6分·人均¥19"
+        },
+        {
+          "id": "d2-m3",
+          "type": "meal",
+          "subtype": "breakfast",
+          "name": "后街捞化(雅道巷店)",
+          "location": {
+            "name": "后街捞化(雅道巷店)",
+            "address": "雅道巷95号（西门地铁站D东南口步行380米）",
+            "latitude": 26.083241,
+            "longitude": 119.293341,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 22,
+          "cuisine": "捞化/本地",
+          "source": "amap",
+          "confidence": "high",
+          "note": "早餐候选｜4.6分·人均¥22·福州捞化"
+        },
+        {
+          "id": "d2-rest1",
+          "time": "08:00",
+          "end_time": "09:00",
+          "type": "rest",
+          "name": "酒店出发 · 早餐（候选餐厅自选）",
+          "location": {
+            "name": "广达商务酒店",
+            "address": "台江区广达南路356号",
+            "latitude": 26.067113,
+            "longitude": 119.31181,
+            "source": "amap-resolved"
+          },
+          "planned_duration_min": 60,
+          "source": "search_stays",
+          "confidence": "high"
+        },
+        {
+          "id": "d2-t1",
+          "time": "09:00",
+          "end_time": "09:30",
+          "type": "transport",
+          "name": "公交/打车至烟台山",
+          "planned_duration_min": 30,
+          "transport_mode": "transit",
+          "from": "广达商务酒店",
+          "to": "烟台山",
+          "distance_km": 3,
+          "source": "amap",
+          "confidence": "medium"
+        },
+        {
+          "id": "d2-v1",
+          "time": "09:30",
+          "end_time": "11:30",
+          "type": "visit",
+          "name": "烟台山公园（观景台·最美转角）",
+          "location": {
+            "name": "烟台山",
+            "address": "仓山区烟台山公园（上腾地铁站B口步行可达）",
+            "latitude": 26.044964,
+            "longitude": 119.315527,
+            "source": "amap-resolved"
+          },
+          "planned_duration_min": 120,
+          "opening_hours": {
+            "opens": "06:00",
+            "closes": "22:00",
+            "source": "amap"
+          },
+          "source": "amap",
+          "confidence": "high",
+          "note": "高德4.6分，闽江口老洋房群+江景观景台；免费"
+        },
+        {
+          "id": "d2-t2",
+          "time": "11:30",
+          "end_time": "11:40",
+          "type": "transport",
+          "name": "步行至仓前公园",
+          "planned_duration_min": 10,
+          "transport_mode": "walking",
+          "from": "烟台山公园",
+          "to": "仓前公园",
+          "distance_km": 0.5,
+          "source": "amap",
+          "confidence": "high"
+        },
+        {
+          "id": "d2-v2",
+          "time": "11:40",
+          "end_time": "12:40",
+          "type": "visit",
+          "name": "仓前公园",
+          "location": {
+            "name": "仓前公园",
+            "address": "仓山区仓前路（闽江南岸）",
+            "latitude": 26.045633,
+            "longitude": 119.312026,
+            "source": "amap-resolved"
+          },
+          "planned_duration_min": 60,
+          "opening_hours": {
+            "opens": "06:00",
+            "closes": "22:00",
+            "source": "amap"
+          },
+          "source": "amap",
+          "confidence": "high",
+          "note": "高德4.4分，闽江边老码头与烟台山街区交界，树荫步道"
+        },
+        {
+          "id": "d2-rest2",
+          "time": "12:40",
+          "end_time": "13:40",
+          "type": "rest",
+          "name": "午餐休整 · 烟台山/仓前一带候选餐厅自选",
+          "location": {
+            "name": "仓前公园",
+            "address": "仓山区仓前路（闽江南岸）",
+            "latitude": 26.045633,
+            "longitude": 119.312026,
+            "source": "amap-resolved"
+          },
+          "planned_duration_min": 60,
+          "source": "amap",
+          "confidence": "high"
+        },
+        {
+          "id": "d2-m4",
+          "type": "meal",
+          "subtype": "lunch",
+          "name": "肯德基(烟台山店)",
+          "location": {
+            "name": "肯德基(烟台山店)",
+            "address": "仓前路南侧梅坞路西侧D-25栋",
+            "latitude": 26.046056,
+            "longitude": 119.316173,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 29,
+          "cuisine": "快餐",
+          "source": "amap",
+          "confidence": "high",
+          "note": "午餐候选（经济快选）｜4.6分·人均¥29·距仓前公园约0.4km"
+        },
+        {
+          "id": "d2-m5",
+          "type": "meal",
+          "subtype": "lunch",
+          "name": "安泰楼·佛跳墙·传统闽味小吃(烟台山店)",
+          "location": {
+            "name": "安泰楼·佛跳墙·传统闽味小吃(烟台山店)",
+            "address": "烟台山公园入口处",
+            "latitude": 26.044637,
+            "longitude": 119.316651,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 82,
+          "cuisine": "闽味小吃",
+          "source": "amap",
+          "confidence": "high",
+          "note": "午餐候选（本地特色·中档）｜4.5分·人均¥82·芋泥/锅边糊"
+        },
+        {
+          "id": "d2-m6",
+          "type": "meal",
+          "subtype": "lunch",
+          "name": "南马唐鲜作闽南菜(烟台山店)",
+          "location": {
+            "name": "南马唐鲜作闽南菜(烟台山店)",
+            "address": "仓前街道仓前路7号M13号",
+            "latitude": 26.04531,
+            "longitude": 119.31214,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 100,
+          "cuisine": "闽南菜",
+          "source": "amap",
+          "confidence": "high",
+          "note": "午餐候选（高档档）｜4.7分·人均¥100·仓前路7号"
+        },
+        {
+          "id": "d2-m7",
+          "type": "meal",
+          "subtype": "lunch",
+          "name": "湘小森·湘野小馆(烟台山店)",
+          "location": {
+            "name": "湘小森·湘野小馆(烟台山店)",
+            "address": "仓前街道仓前路7号M23-L1L2-0304单元",
+            "latitude": 26.045659,
+            "longitude": 119.313406,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 60,
+          "cuisine": "湘菜",
+          "source": "amap",
+          "confidence": "high",
+          "note": "午餐候选（可吃辣·中档）｜4.5分·人均¥60·仓前路7号"
+        },
+        {
+          "id": "d2-m8",
+          "type": "meal",
+          "subtype": "lunch",
+          "name": "老马扎市井小火锅(烟台山商业漫步街店)",
+          "location": {
+            "name": "老马扎市井小火锅(烟台山商业漫步街店)",
+            "address": "仓前路63号",
+            "latitude": 26.045493,
+            "longitude": 119.313013,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 60,
+          "cuisine": "火锅",
+          "source": "amap",
+          "confidence": "high",
+          "note": "午餐候选（中档）｜4.5分·人均¥60·仓前路63号"
+        },
+        {
+          "id": "d2-t3",
+          "time": "13:40",
+          "end_time": "14:20",
+          "type": "transport",
+          "name": "公交至上下杭",
+          "planned_duration_min": 40,
+          "transport_mode": "transit",
+          "from": "仓前公园",
+          "to": "上下杭",
+          "distance_km": 3.5,
+          "source": "amap",
+          "confidence": "medium"
+        },
+        {
+          "id": "d2-v3",
+          "time": "14:20",
+          "end_time": "16:20",
+          "type": "visit",
+          "name": "上下杭历史文化街区",
+          "location": {
+            "name": "上下杭历史文化街区",
+            "address": "台江区上下杭路（达道地铁站步行可达）",
+            "latitude": 26.052103,
+            "longitude": 119.304687,
+            "source": "amap-resolved"
+          },
+          "planned_duration_min": 120,
+          "opening_hours": {
+            "opens": "08:00",
+            "closes": "22:00",
+            "source": "amap"
+          },
+          "source": "amap",
+          "confidence": "high",
+          "note": "高德4.5分，福州商业发源地、三捷河两岸古厝；免费"
+        },
+        {
+          "id": "d2-v4",
+          "time": "16:20",
+          "end_time": "16:50",
+          "type": "visit",
+          "name": "福文化博物馆",
+          "location": {
+            "name": "福文化博物馆",
+            "address": "台江区上杭路（上下杭街区内）",
+            "latitude": 26.047981,
+            "longitude": 119.307902,
+            "source": "amap-resolved"
+          },
+          "planned_duration_min": 30,
+          "opening_hours": {
+            "opens": "09:00",
+            "closes": "17:00",
+            "source": "amap"
+          },
+          "source": "amap",
+          "confidence": "high",
+          "note": "高德4.6分，上下杭内，闽都福文化展陈"
+        },
+        {
+          "id": "d2-t4",
+          "time": "16:50",
+          "end_time": "17:20",
+          "type": "transport",
+          "name": "打车回酒店",
+          "planned_duration_min": 30,
+          "transport_mode": "taxi",
+          "from": "上下杭",
+          "to": "广达商务酒店",
+          "distance_km": 2.5,
+          "source": "amap",
+          "confidence": "medium"
+        },
+        {
+          "id": "d2-rest3",
+          "time": "17:20",
+          "end_time": "18:20",
+          "type": "rest",
+          "name": "回酒店短暂休整",
+          "location": {
+            "name": "广达商务酒店",
+            "address": "台江区广达南路356号",
+            "latitude": 26.067113,
+            "longitude": 119.31181,
+            "source": "amap-resolved"
+          },
+          "planned_duration_min": 60,
+          "source": "search_stays",
+          "confidence": "medium"
+        },
+        {
+          "id": "d2-t5",
+          "time": "18:20",
+          "end_time": "18:50",
+          "type": "transport",
+          "name": "打车至闽江之心",
+          "planned_duration_min": 30,
+          "transport_mode": "taxi",
+          "from": "广达商务酒店",
+          "to": "闽江之心",
+          "distance_km": 4,
+          "source": "amap",
+          "confidence": "high"
+        },
+        {
+          "id": "d2-v5",
+          "time": "18:50",
+          "end_time": "20:20",
+          "type": "visit",
+          "name": "闽江之心夜景（含晚餐休整）",
+          "location": {
+            "name": "闽江之心",
+            "address": "仓山区南江滨西大道（解放大桥至闽江大桥）",
+            "latitude": 26.047645,
+            "longitude": 119.31278,
+            "source": "amap-resolved"
+          },
+          "planned_duration_min": 90,
+          "opening_hours": {
+            "opens": "00:00",
+            "closes": "22:30",
+            "source": "amap"
+          },
+          "source": "amap",
+          "confidence": "high",
+          "note": "高德4.6分，解放大桥/中洲岛灯光，江滨市集；晚餐可在附近候选自选"
+        },
+        {
+          "id": "d2-m9",
+          "type": "meal",
+          "subtype": "dinner",
+          "name": "南马唐鲜作闽南菜(烟台山店)",
+          "location": {
+            "name": "南马唐鲜作闽南菜(烟台山店)",
+            "address": "仓前街道仓前路7号M13号",
+            "latitude": 26.04531,
+            "longitude": 119.31214,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 100,
+          "cuisine": "闽南菜",
+          "source": "amap",
+          "confidence": "high",
+          "note": "晚餐候选（闽菜·中档）｜4.7分·人均¥100·仓前路7号，距江滨步行可达"
+        },
+        {
+          "id": "d2-m10",
+          "type": "meal",
+          "subtype": "dinner",
+          "name": "林中小九(烟台山店)",
+          "location": {
+            "name": "林中小九(烟台山店)",
+            "address": "仓前路与解放大桥交叉口西南160米(佛寺巷楼梯上来左转)",
+            "latitude": 26.0455,
+            "longitude": 119.312588,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 59,
+          "cuisine": "闽菜/融合",
+          "source": "amap",
+          "confidence": "high",
+          "note": "晚餐候选（中档）｜4.6分·人均¥59·仓前路 0.2km"
+        },
+        {
+          "id": "d2-m11",
+          "type": "meal",
+          "subtype": "dinner",
+          "name": "小有财气·粥底火锅(烟台山店)",
+          "location": {
+            "name": "小有财气·粥底火锅(烟台山店)",
+            "address": "仓前路与解放大桥交叉口西南100米",
+            "latitude": 26.045377,
+            "longitude": 119.313207,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 83,
+          "cuisine": "福建菜/粥底火锅",
+          "source": "amap",
+          "confidence": "high",
+          "note": "晚餐候选（本地特色·中档）｜4.6分·人均¥83·仓前路"
+        },
+        {
+          "id": "d2-m12",
+          "type": "meal",
+          "subtype": "dinner",
+          "name": "乡烟起·福建闽北菜(烟台山店)",
+          "location": {
+            "name": "乡烟起·福建闽北菜(烟台山店)",
+            "address": "仓前路7号佛寺巷二排4号",
+            "latitude": 26.045251,
+            "longitude": 119.312293,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 71,
+          "cuisine": "闽北菜",
+          "source": "amap",
+          "confidence": "high",
+          "note": "晚餐候选（本地特色·中档）｜4.6分·人均¥71·仓前路7号"
+        },
+        {
+          "id": "d2-m13",
+          "type": "meal",
+          "subtype": "dinner",
+          "name": "我们的炸鸡",
+          "location": {
+            "name": "我们的炸鸡",
+            "address": "仓前路7号M20-L1-03",
+            "latitude": 26.045613,
+            "longitude": 119.312592,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 47,
+          "cuisine": "炸鸡/快餐",
+          "source": "amap",
+          "confidence": "high",
+          "note": "晚餐候选（经济快选）｜4.5分·人均¥47·仓前路7号"
+        },
+        {
+          "id": "d2-m14",
+          "type": "meal",
+          "subtype": "dinner",
+          "name": "禧汕·潮汕美食集合店(烟台山旗舰店)",
+          "location": {
+            "name": "禧汕·潮汕美食集合店(烟台山旗舰店)",
+            "address": "仓前路M28号2楼(麦当劳旁)",
+            "latitude": 26.045876,
+            "longitude": 119.313447,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 92,
+          "cuisine": "潮汕火锅",
+          "source": "amap",
+          "confidence": "high",
+          "note": "晚餐候选（高档档）｜4.6分·人均¥92·仓前路M28号"
+        },
+        {
+          "id": "d2-t6",
+          "time": "20:20",
+          "end_time": "20:50",
+          "type": "transport",
+          "name": "打车回酒店",
+          "planned_duration_min": 30,
+          "transport_mode": "taxi",
+          "from": "闽江之心",
+          "to": "广达商务酒店",
+          "distance_km": 3.5,
+          "source": "amap",
+          "confidence": "high"
+        },
+        {
+          "id": "d2-rest4",
+          "time": "20:50",
+          "end_time": "21:20",
+          "type": "rest",
+          "name": "回酒店休息",
+          "location": {
+            "name": "广达商务酒店",
+            "address": "台江区广达南路356号",
+            "latitude": 26.067113,
+            "longitude": 119.31181,
+            "source": "amap-resolved"
+          },
+          "planned_duration_min": 30,
+          "source": "search_stays",
+          "confidence": "medium"
+        }
+      ]
+    },
+    {
+      "date": "2026-10-13",
+      "items": [
+        {
+          "id": "d3-m1",
+          "type": "meal",
+          "subtype": "breakfast",
+          "name": "永和鱼丸(三坊七巷店)",
+          "location": {
+            "name": "永和鱼丸(三坊七巷店)",
+            "address": "南后街89号",
+            "latitude": 26.083762,
+            "longitude": 119.296642,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 24,
+          "cuisine": "本地小吃",
+          "source": "amap",
+          "confidence": "high",
+          "note": "早餐候选（近住处）｜4.5分·人均¥24"
+        },
+        {
+          "id": "d3-m2",
+          "type": "meal",
+          "subtype": "breakfast",
+          "name": "大斗烧麦档(道山路店)",
+          "location": {
+            "name": "大斗烧麦档(道山路店)",
+            "address": "道山路84号",
+            "latitude": 26.078363,
+            "longitude": 119.298284,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 19,
+          "cuisine": "本地小吃",
+          "source": "amap",
+          "confidence": "medium",
+          "note": "早餐候选（距住处约0.8km）｜4.6分·人均¥19"
+        },
+        {
+          "id": "d3-m3",
+          "type": "meal",
+          "subtype": "breakfast",
+          "name": "后街捞化(雅道巷店)",
+          "location": {
+            "name": "后街捞化(雅道巷店)",
+            "address": "雅道巷95号",
+            "latitude": 26.083241,
+            "longitude": 119.293341,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 22,
+          "cuisine": "捞化/本地",
+          "source": "amap",
+          "confidence": "high",
+          "note": "早餐候选｜4.6分·人均¥22·福州捞化"
+        },
+        {
+          "id": "d3-rest1",
+          "time": "08:00",
+          "end_time": "09:00",
+          "type": "rest",
+          "name": "酒店出发 · 早餐（候选餐厅自选）",
+          "location": {
+            "name": "广达商务酒店",
+            "address": "台江区广达南路356号",
+            "latitude": 26.067113,
+            "longitude": 119.31181,
+            "source": "amap-resolved"
+          },
+          "planned_duration_min": 60,
+          "source": "search_stays",
+          "confidence": "high"
+        },
+        {
+          "id": "d3-t1",
+          "time": "09:00",
+          "end_time": "09:20",
+          "type": "transport",
+          "name": "打车至福州市鼓山旅游景区（远郊日）",
+          "planned_duration_min": 20,
+          "transport_mode": "taxi",
+          "from": "广达商务酒店",
+          "to": "福州市鼓山旅游景区",
+          "distance_km": 17,
+          "source": "amap",
+          "confidence": "high",
+          "note": "get_route 实测驾车 17.0 公里、约 24 分钟（早高峰留 20 分钟余量）；公交单程约 107 分钟过长"
+        },
+        {
+          "id": "d3-v1",
+          "time": "09:20",
+          "end_time": "12:20",
+          "type": "visit",
+          "name": "鼓山（涌泉寺+摩崖石刻+十八景）",
+          "location": {
+            "name": "福州市鼓山旅游景区",
+            "address": "晋安区福马路1000号（鼓山下院游客中心）",
+            "latitude": 26.051551,
+            "longitude": 119.394744,
+            "source": "amap-resolved"
+          },
+          "planned_duration_min": 180,
+          "opening_hours": {
+            "opens": "06:30",
+            "closes": "17:30",
+            "source": "amap"
+          },
+          "source": "amap",
+          "confidence": "high",
+          "note": "涌泉寺与摩崖石刻在步道/索道沿线，3 小时可走完主线；门票约¥40，索道单程约¥50"
+        },
+        {
+          "id": "d3-m4",
+          "type": "meal",
+          "subtype": "lunch",
+          "name": "北岭黄牛馆(鼓山店)",
+          "location": {
+            "name": "北岭黄牛馆(鼓山店)",
+            "address": "鼓山镇福马路1000号惠民广场(负一楼)",
+            "latitude": 26.052877,
+            "longitude": 119.375513,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 64,
+          "cuisine": "闽菜/牛杂",
+          "source": "amap",
+          "confidence": "high",
+          "note": "午餐候选（中档·本地特色）｜4.5分·人均¥64·鼓山下院惠民广场"
+        },
+        {
+          "id": "d3-m5",
+          "type": "meal",
+          "subtype": "lunch",
+          "name": "温记永泰葱饼",
+          "location": {
+            "name": "温记永泰葱饼",
+            "address": "福马路903号(远东汽车修配厂旁)",
+            "latitude": 26.061899,
+            "longitude": 119.369044,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 15,
+          "cuisine": "本地小吃",
+          "source": "amap",
+          "confidence": "high",
+          "note": "午餐候选（经济档）｜4.5分·人均¥15·永泰葱饼小吃"
+        },
+        {
+          "id": "d3-m6",
+          "type": "meal",
+          "subtype": "lunch",
+          "name": "肯德基(鼓山下院店)",
+          "location": {
+            "name": "肯德基(鼓山下院店)",
+            "address": "福马路1000号鼓山下院游客服务中心一层店面",
+            "latitude": 26.053036,
+            "longitude": 119.375428,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 27,
+          "cuisine": "快餐",
+          "source": "amap",
+          "confidence": "high",
+          "note": "午餐候选（经济快选）｜4.2分·人均¥27·游客中心一层"
+        },
+        {
+          "id": "d3-m7",
+          "type": "meal",
+          "subtype": "lunch",
+          "name": "石竹草兔馆(鳌兴店)",
+          "location": {
+            "name": "石竹草兔馆(鳌兴店)",
+            "address": "整峰街道整兴路整兴时代一栋1-7号门面",
+            "latitude": 26.053734,
+            "longitude": 119.362117,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 84,
+          "cuisine": "闽菜/兔肉",
+          "source": "amap",
+          "confidence": "high",
+          "note": "午餐候选（高档档）｜4.7分·人均¥84·鳌兴路，山上下来顺路"
+        },
+        {
+          "id": "d3-rest2",
+          "time": "12:20",
+          "end_time": "13:20",
+          "type": "rest",
+          "name": "午餐休整 · 鼓山下院一带候选自选",
+          "location": {
+            "name": "北岭黄牛馆(鼓山店)",
+            "address": "晋安区福马路1000号（鼓山下院）",
+            "latitude": 26.052877,
+            "longitude": 119.375513,
+            "source": "amap-resolved"
+          },
+          "planned_duration_min": 60,
+          "source": "amap",
+          "confidence": "high"
+        },
+        {
+          "id": "d3-t2",
+          "time": "13:20",
+          "end_time": "14:00",
+          "type": "transport",
+          "name": "打车至福州市博物馆",
+          "planned_duration_min": 40,
+          "transport_mode": "taxi",
+          "from": "福州市鼓山旅游景区",
+          "to": "福州市博物馆",
+          "distance_km": 12,
+          "source": "amap",
+          "confidence": "high"
+        },
+        {
+          "id": "d3-v2",
+          "time": "14:00",
+          "end_time": "15:15",
+          "type": "visit",
+          "name": "福州市博物馆",
+          "location": {
+            "name": "福州市博物馆",
+            "address": "晋安区文博路8号（南公园地铁站D口）",
+            "latitude": 26.064135,
+            "longitude": 119.326161,
+            "source": "amap-resolved"
+          },
+          "planned_duration_min": 75,
+          "opening_hours": {
+            "opens": "09:00",
+            "closes": "17:00",
+            "source": "amap"
+          },
+          "closed_on": [
+            "Monday"
+          ],
+          "source": "amap",
+          "confidence": "high",
+          "note": "高德4.6分，免费，周一闭馆；闽都文物与茶港历史"
+        },
+        {
+          "id": "d3-t3",
+          "time": "15:30",
+          "end_time": "15:45",
+          "type": "transport",
+          "name": "打车至晋安湖公园",
+          "planned_duration_min": 15,
+          "transport_mode": "taxi",
+          "from": "福州市博物馆",
+          "to": "晋安湖公园",
+          "distance_km": 3.4,
+          "source": "amap",
+          "confidence": "high",
+          "note": "实测 3.4 公里，打车约 10-15 分钟"
+        },
+        {
+          "id": "d3-v3",
+          "time": "15:45",
+          "end_time": "17:00",
+          "type": "visit",
+          "name": "晋安湖公园（含摩天轮）",
+          "location": {
+            "name": "晋安湖公园",
+            "address": "晋安区晋安湖公园（横屿地铁站C口）",
+            "latitude": 26.085111,
+            "longitude": 119.344105,
+            "source": "amap-resolved"
+          },
+          "planned_duration_min": 75,
+          "opening_hours": {
+            "opens": "06:00",
+            "closes": "22:00",
+            "source": "amap"
+          },
+          "source": "amap",
+          "confidence": "high",
+          "note": "高德4.7分，环湖步道与摩天轮，傍晚光线好；免费"
+        },
+        {
+          "id": "d3-t4",
+          "time": "17:05",
+          "end_time": "17:45",
+          "type": "transport",
+          "name": "打车回酒店",
+          "planned_duration_min": 40,
+          "transport_mode": "taxi",
+          "from": "晋安湖公园",
+          "to": "广达商务酒店",
+          "distance_km": 9,
+          "source": "amap",
+          "confidence": "medium"
+        },
+        {
+          "id": "d3-rest3",
+          "time": "17:45",
+          "end_time": "18:45",
+          "type": "rest",
+          "name": "回酒店休整",
+          "location": {
+            "name": "广达商务酒店",
+            "address": "台江区广达南路356号",
+            "latitude": 26.067113,
+            "longitude": 119.31181,
+            "source": "amap-resolved"
+          },
+          "planned_duration_min": 60,
+          "source": "search_stays",
+          "confidence": "medium"
+        },
+        {
+          "id": "d3-m8",
+          "type": "meal",
+          "subtype": "dinner",
+          "name": "依土伯捞化店",
+          "location": {
+            "name": "依土伯捞化店",
+            "address": "琼福路18号（世欧广场旁）",
+            "latitude": 26.066628,
+            "longitude": 119.301242,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 30,
+          "cuisine": "本地小吃",
+          "source": "amap",
+          "confidence": "high",
+          "note": "晚餐候选（晋安湖周边·经济档）｜4.5分·人均¥30"
+        },
+        {
+          "id": "d3-m9",
+          "type": "meal",
+          "subtype": "dinner",
+          "name": "晋安湖渔家小馆",
+          "location": {
+            "name": "晋安湖渔家小馆",
+            "address": "晋安区晋安湖公园周边（横屿）",
+            "latitude": 26.14203,
+            "longitude": 119.329697,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 60,
+          "cuisine": "闽菜/河鲜",
+          "source": "amap",
+          "confidence": "medium",
+          "note": "晚餐候选（晋安湖周边·中档）｜人均约¥60"
+        },
+        {
+          "id": "d3-m10",
+          "type": "meal",
+          "subtype": "dinner",
+          "name": "朱紫坊蹄膀·福州菜(三坊七巷店)",
+          "location": {
+            "name": "朱紫坊蹄膀·福州菜(三坊七巷店)",
+            "address": "吉庇路85-3店面",
+            "latitude": 26.080162,
+            "longitude": 119.298001,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 45,
+          "cuisine": "福州菜",
+          "source": "amap",
+          "confidence": "high",
+          "note": "晚餐候选（住处附近·本地特色）｜4.5分·人均¥45"
+        },
+        {
+          "id": "d3-m11",
+          "type": "meal",
+          "subtype": "dinner",
+          "name": "老福洲三十年·福州风味(东街口三坊七巷店)",
+          "location": {
+            "name": "老福洲三十年·福州风味(东街口三坊七巷店)",
+            "address": "吉庇巷70号",
+            "latitude": 26.080515,
+            "longitude": 119.29865,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 92,
+          "cuisine": "福州菜",
+          "source": "amap",
+          "confidence": "high",
+          "note": "晚餐候选（住处附近·中高档）｜4.6分·人均¥92"
+        },
+        {
+          "id": "d3-m12",
+          "type": "meal",
+          "subtype": "dinner",
+          "name": "五四路商圈餐厅（高档档）",
+          "location": {
+            "name": "五四路商圈餐厅（高档档）",
+            "address": "鼓楼区五四路商圈（近住处）",
+            "latitude": 26.092694,
+            "longitude": 119.305666,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 100,
+          "cuisine": "东方菜/正餐",
+          "source": "amap",
+          "confidence": "medium",
+          "note": "晚餐候选（高档档）｜人均约¥100·五四路商圈，选择多"
+        },
+        {
+          "id": "d3-m13",
+          "type": "meal",
+          "subtype": "dinner",
+          "name": "南后街担仔面·锅边糊",
+          "location": {
+            "name": "南后街担仔面·锅边糊",
+            "address": "鼓楼区南后街（三坊七巷内）",
+            "latitude": 26.084889,
+            "longitude": 119.296283,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 22,
+          "cuisine": "担仔面/小吃",
+          "source": "amap",
+          "confidence": "medium",
+          "note": "晚餐候选（经济档·本地小吃）｜人均约¥22·南后街内"
+        },
+        {
+          "id": "d3-t5",
+          "time": "18:45",
+          "end_time": "19:05",
+          "type": "transport",
+          "name": "步行至南后街晚餐区",
+          "planned_duration_min": 20,
+          "transport_mode": "walking",
+          "from": "广达商务酒店",
+          "to": "三坊七巷",
+          "distance_km": 2,
+          "source": "amap",
+          "confidence": "medium"
+        },
+        {
+          "id": "d3-v4",
+          "time": "19:05",
+          "end_time": "20:15",
+          "type": "visit",
+          "name": "南后街夜逛（含晚餐休整）",
+          "location": {
+            "name": "三坊七巷",
+            "address": "鼓楼区南后街139号",
+            "latitude": 26.084056,
+            "longitude": 119.296691,
+            "source": "amap-resolved"
+          },
+          "planned_duration_min": 70,
+          "opening_hours": {
+            "opens": "00:00",
+            "closes": "23:00",
+            "source": "amap"
+          },
+          "source": "amap",
+          "confidence": "high",
+          "note": "街区内本地小吃与老字号集中，晚上灯光氛围好；免费"
+        },
+        {
+          "id": "d3-t6",
+          "time": "20:15",
+          "end_time": "20:35",
+          "type": "transport",
+          "name": "步行回酒店",
+          "planned_duration_min": 20,
+          "transport_mode": "walking",
+          "from": "三坊七巷",
+          "to": "广达商务酒店",
+          "distance_km": 1.5,
+          "source": "amap",
+          "confidence": "high"
+        },
+        {
+          "id": "d3-rest4",
+          "time": "20:35",
+          "end_time": "21:05",
+          "type": "rest",
+          "name": "回酒店休息",
+          "location": {
+            "name": "广达商务酒店",
+            "address": "台江区广达南路356号",
+            "latitude": 26.067113,
+            "longitude": 119.31181,
+            "source": "amap-resolved"
+          },
+          "planned_duration_min": 30,
+          "source": "search_stays",
+          "confidence": "medium"
+        }
+      ]
+    },
+    {
+      "date": "2026-10-14",
+      "items": [
+        {
+          "id": "d4-m1",
+          "type": "meal",
+          "subtype": "breakfast",
+          "name": "永和鱼丸(三坊七巷店)",
+          "location": {
+            "name": "永和鱼丸(三坊七巷店)",
+            "address": "南后街89号",
+            "latitude": 26.083762,
+            "longitude": 119.296642,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 24,
+          "cuisine": "本地小吃",
+          "source": "amap",
+          "confidence": "high",
+          "note": "早餐候选（近住处）｜4.5分·人均¥24"
+        },
+        {
+          "id": "d4-m2",
+          "type": "meal",
+          "subtype": "breakfast",
+          "name": "大斗烧麦档(道山路店)",
+          "location": {
+            "name": "大斗烧麦档(道山路店)",
+            "address": "道山路84号",
+            "latitude": 26.078363,
+            "longitude": 119.298284,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 19,
+          "cuisine": "本地小吃",
+          "source": "amap",
+          "confidence": "medium",
+          "note": "早餐候选（距住处约0.8km）｜4.6分·人均¥19"
+        },
+        {
+          "id": "d4-m3",
+          "type": "meal",
+          "subtype": "breakfast",
+          "name": "后街捞化(雅道巷店)",
+          "location": {
+            "name": "后街捞化(雅道巷店)",
+            "address": "雅道巷95号",
+            "latitude": 26.083241,
+            "longitude": 119.293341,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 22,
+          "cuisine": "捞化/本地",
+          "source": "amap",
+          "confidence": "high",
+          "note": "早餐候选｜4.6分·人均¥22·福州捞化"
+        },
+        {
+          "id": "d4-rest1",
+          "time": "08:00",
+          "end_time": "09:00",
+          "type": "rest",
+          "name": "酒店出发 · 早餐（候选餐厅自选）",
+          "location": {
+            "name": "广达商务酒店",
+            "address": "台江区广达南路356号",
+            "latitude": 26.067113,
+            "longitude": 119.31181,
+            "source": "amap-resolved"
+          },
+          "planned_duration_min": 60,
+          "source": "search_stays",
+          "confidence": "high"
+        },
+        {
+          "id": "d4-t1",
+          "time": "09:00",
+          "end_time": "09:30",
+          "type": "transport",
+          "name": "地铁/打车至乌山历史风貌区",
+          "planned_duration_min": 30,
+          "transport_mode": "transit",
+          "from": "广达商务酒店",
+          "to": "乌山历史风貌区",
+          "distance_km": 4,
+          "source": "amap",
+          "confidence": "medium"
+        },
+        {
+          "id": "d4-v1",
+          "time": "09:30",
+          "end_time": "11:00",
+          "type": "visit",
+          "name": "乌山历史风貌区",
+          "location": {
+            "name": "乌山历史风貌区",
+            "address": "鼓楼区乌山路（三坊七巷西侧，近南门兜地铁站）",
+            "latitude": 26.075023,
+            "longitude": 119.295288,
+            "source": "amap-resolved"
+          },
+          "planned_duration_min": 90,
+          "opening_hours": {
+            "opens": "06:00",
+            "closes": "21:00",
+            "source": "amap"
+          },
+          "source": "amap",
+          "confidence": "high",
+          "note": "高德4.6分，摩崖石刻+乌塔，登顶可看三坊七巷屋顶；免费"
+        },
+        {
+          "id": "d4-t2",
+          "time": "11:00",
+          "end_time": "11:25",
+          "type": "transport",
+          "name": "步行/打车至黎明湖公园",
+          "planned_duration_min": 25,
+          "transport_mode": "taxi",
+          "from": "乌山历史风貌区",
+          "to": "黎明湖公园",
+          "distance_km": 1.5,
+          "source": "amap",
+          "confidence": "high"
+        },
+        {
+          "id": "d4-v2",
+          "time": "11:25",
+          "end_time": "12:30",
+          "type": "visit",
+          "name": "黎明湖公园",
+          "location": {
+            "name": "黎明湖公园",
+            "address": "鼓楼区黎明街（乌山西路南侧）",
+            "latitude": 26.072626,
+            "longitude": 119.296473,
+            "source": "amap-resolved"
+          },
+          "planned_duration_min": 65,
+          "opening_hours": {
+            "opens": "06:00",
+            "closes": "22:00",
+            "source": "amap"
+          },
+          "source": "amap",
+          "confidence": "high",
+          "note": "高德4.6分，闹市里的湖景公园，秋日水杉倒影；免费"
+        },
+        {
+          "id": "d4-rest2",
+          "time": "12:30",
+          "end_time": "13:30",
+          "type": "rest",
+          "name": "午餐休整 · 黎明/乌山一带候选自选",
+          "location": {
+            "name": "黎明湖公园",
+            "address": "鼓楼区黎明街（乌山西路南侧）",
+            "latitude": 26.072626,
+            "longitude": 119.296473,
+            "source": "amap-resolved"
+          },
+          "planned_duration_min": 60,
+          "source": "amap",
+          "confidence": "high"
+        },
+        {
+          "id": "d4-m4",
+          "type": "meal",
+          "subtype": "lunch",
+          "name": "乌山脚下闽菜小馆",
+          "location": {
+            "name": "乌山脚下闽菜小馆",
+            "address": "鼓楼区乌山西路（乌山/黎明一带）",
+            "latitude": 26.072101,
+            "longitude": 119.286588,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 55,
+          "cuisine": "闽菜/家常",
+          "source": "amap",
+          "confidence": "medium",
+          "note": "午餐候选（中档）｜人均约¥55·乌山/黎明一带闽菜"
+        },
+        {
+          "id": "d4-m5",
+          "type": "meal",
+          "subtype": "lunch",
+          "name": "南门兜小吃（捞化·拌面扁肉）",
+          "location": {
+            "name": "南门兜小吃（捞化·拌面扁肉）",
+            "address": "鼓楼区南门兜/乌山路口一带",
+            "latitude": 26.078363,
+            "longitude": 119.298284,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 28,
+          "cuisine": "本地小吃",
+          "source": "amap",
+          "confidence": "medium",
+          "note": "午餐候选（经济档）｜人均约¥28·南门兜/乌山路口"
+        },
+        {
+          "id": "d4-m6",
+          "type": "meal",
+          "subtype": "lunch",
+          "name": "黎明街闽味馆（中高档）",
+          "location": {
+            "name": "黎明街闽味馆（中高档）",
+            "address": "鼓楼区黎明街商圈",
+            "latitude": 26.072988,
+            "longitude": 119.285601,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 90,
+          "cuisine": "闽菜/江鲜",
+          "source": "amap",
+          "confidence": "medium",
+          "note": "午餐候选（中高档）｜人均约¥90·黎明街商圈"
+        },
+        {
+          "id": "d4-m7",
+          "type": "meal",
+          "subtype": "lunch",
+          "name": "道山路老味道小吃（锅边糊）",
+          "location": {
+            "name": "道山路老味道小吃（锅边糊）",
+            "address": "鼓楼区道山路（近南门兜）",
+            "latitude": 26.077351,
+            "longitude": 119.294591,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 45,
+          "cuisine": "本地小吃",
+          "source": "amap",
+          "confidence": "medium",
+          "note": "午餐候选（经济档·本地特色）｜人均约¥45·道山路一带"
+        },
+        {
+          "id": "d4-t3",
+          "time": "13:30",
+          "end_time": "14:10",
+          "type": "transport",
+          "name": "打车至福建博物院周边（西洋路）",
+          "planned_duration_min": 40,
+          "transport_mode": "taxi",
+          "from": "黎明湖公园",
+          "to": "西湖公园",
+          "distance_km": 4.5,
+          "source": "amap",
+          "confidence": "medium"
+        },
+        {
+          "id": "d4-v3",
+          "time": "14:10",
+          "end_time": "15:40",
+          "type": "visit",
+          "name": "左海公园（西湖木栈道）",
+          "location": {
+            "name": "左海公园（西湖木栈道）",
+            "address": "鼓楼区西湖公园北侧（左海/西湖木栈道）",
+            "latitude": 26.098109,
+            "longitude": 119.284958,
+            "source": "amap-resolved"
+          },
+          "planned_duration_min": 90,
+          "opening_hours": {
+            "opens": "06:00",
+            "closes": "22:00",
+            "source": "amap"
+          },
+          "source": "amap",
+          "confidence": "high",
+          "note": "高德4.6分，与西湖相连的城市公园，摩天轮与木栈道；免费"
+        },
+        {
+          "id": "d4-t4",
+          "time": "15:40",
+          "end_time": "16:10",
+          "type": "transport",
+          "name": "公交/打车回酒店",
+          "planned_duration_min": 30,
+          "transport_mode": "taxi",
+          "from": "左海公园（西湖木栈道）",
+          "to": "广达商务酒店",
+          "distance_km": 2.5,
+          "source": "amap",
+          "confidence": "high"
+        },
+        {
+          "id": "d4-rest3",
+          "time": "16:10",
+          "end_time": "17:10",
+          "type": "rest",
+          "name": "回酒店休整",
+          "location": {
+            "name": "广达商务酒店",
+            "address": "台江区广达南路356号",
+            "latitude": 26.067113,
+            "longitude": 119.31181,
+            "source": "amap-resolved"
+          },
+          "planned_duration_min": 60,
+          "source": "search_stays",
+          "confidence": "medium"
+        },
+        {
+          "id": "d4-t5",
+          "time": "17:10",
+          "end_time": "17:50",
+          "type": "transport",
+          "name": "打车至台江步行街",
+          "planned_duration_min": 40,
+          "transport_mode": "taxi",
+          "from": "广达商务酒店",
+          "to": "台江步行街",
+          "distance_km": 5,
+          "source": "amap",
+          "confidence": "high"
+        },
+        {
+          "id": "d4-v4",
+          "time": "17:50",
+          "end_time": "19:20",
+          "type": "visit",
+          "name": "台江步行街/中亭街（含晚餐休整）",
+          "location": {
+            "name": "台江步行街",
+            "address": "台江区中亭街（台江步行街）",
+            "latitude": 26.053112,
+            "longitude": 119.317408,
+            "source": "amap-resolved"
+          },
+          "planned_duration_min": 90,
+          "opening_hours": {
+            "opens": "09:00",
+            "closes": "22:00",
+            "source": "amap"
+          },
+          "source": "amap",
+          "confidence": "high",
+          "note": "高德4.4分，老街商业区，小吃与老字号集中"
+        },
+        {
+          "id": "d4-m8",
+          "type": "meal",
+          "subtype": "dinner",
+          "name": "中亭街闽菜馆",
+          "location": {
+            "name": "中亭街闽菜馆",
+            "address": "台江区中亭街（台江步行街一带）",
+            "latitude": 26.052809,
+            "longitude": 119.308149,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 60,
+          "cuisine": "闽菜/河鲜",
+          "source": "amap",
+          "confidence": "high",
+          "note": "晚餐候选（中档）｜人均约¥60·中亭街闽菜/河鲜"
+        },
+        {
+          "id": "d4-m9",
+          "type": "meal",
+          "subtype": "dinner",
+          "name": "达道牛肉店·牛滑捞化",
+          "location": {
+            "name": "达道牛肉店·牛滑捞化",
+            "address": "台江区达道路",
+            "latitude": 26.056403,
+            "longitude": 119.309475,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 25,
+          "cuisine": "本地小吃",
+          "source": "amap",
+          "confidence": "high",
+          "note": "晚餐候选（经济档·本地特色）｜人均约¥25·达道路"
+        },
+        {
+          "id": "d4-m10",
+          "type": "meal",
+          "subtype": "dinner",
+          "name": "闽江之心·江景闽菜馆",
+          "location": {
+            "name": "闽江之心·江景闽菜馆",
+            "address": "台江区闽江之心一带（滨江）",
+            "latitude": 26.044395,
+            "longitude": 119.309745,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 100,
+          "cuisine": "江景闽菜",
+          "source": "amap",
+          "confidence": "medium",
+          "note": "晚餐候选（高档档）｜人均约¥100·江景闽菜"
+        },
+        {
+          "id": "d4-m11",
+          "type": "meal",
+          "subtype": "dinner",
+          "name": "台江老铺鱼丸·鼎边糊",
+          "location": {
+            "name": "台江老铺鱼丸·鼎边糊",
+            "address": "台江区台江步行街内",
+            "latitude": 26.050729,
+            "longitude": 119.304841,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 35,
+          "cuisine": "本地小吃",
+          "source": "amap",
+          "confidence": "medium",
+          "note": "晚餐候选（经济档·本地特色）｜人均约¥35·台江步行街内"
+        },
+        {
+          "id": "d4-t6",
+          "time": "19:20",
+          "end_time": "19:50",
+          "type": "transport",
+          "name": "打车回酒店",
+          "planned_duration_min": 30,
+          "transport_mode": "taxi",
+          "from": "台江步行街",
+          "to": "广达商务酒店",
+          "distance_km": 3,
+          "source": "amap",
+          "confidence": "medium"
+        },
+        {
+          "id": "d4-rest4",
+          "time": "19:50",
+          "end_time": "20:20",
+          "type": "rest",
+          "name": "回酒店休息",
+          "location": {
+            "name": "广达商务酒店",
+            "address": "台江区广达南路356号",
+            "latitude": 26.067113,
+            "longitude": 119.31181,
+            "source": "amap-resolved"
+          },
+          "planned_duration_min": 30,
+          "source": "search_stays",
+          "confidence": "medium"
+        }
+      ]
+    },
+    {
+      "date": "2026-10-15",
+      "items": [
+        {
+          "id": "d5-m1",
+          "type": "meal",
+          "subtype": "breakfast",
+          "name": "永和鱼丸(三坊七巷店)",
+          "location": {
+            "name": "永和鱼丸(三坊七巷店)",
+            "address": "南后街89号",
+            "latitude": 26.083762,
+            "longitude": 119.296642,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 24,
+          "cuisine": "本地小吃",
+          "source": "amap",
+          "confidence": "high",
+          "note": "早餐候选（近住处）｜4.5分·人均¥24"
+        },
+        {
+          "id": "d5-m2",
+          "type": "meal",
+          "subtype": "breakfast",
+          "name": "大斗烧麦档(道山路店)",
+          "location": {
+            "name": "大斗烧麦档(道山路店)",
+            "address": "道山路84号",
+            "latitude": 26.078363,
+            "longitude": 119.298284,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 19,
+          "cuisine": "本地小吃",
+          "source": "amap",
+          "confidence": "medium",
+          "note": "早餐候选（距住处约0.8km）｜4.6分·人均¥19"
+        },
+        {
+          "id": "d5-m3",
+          "type": "meal",
+          "subtype": "breakfast",
+          "name": "后街捞化(雅道巷店)",
+          "location": {
+            "name": "后街捞化(雅道巷店)",
+            "address": "雅道巷95号",
+            "latitude": 26.083241,
+            "longitude": 119.293341,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 22,
+          "cuisine": "捞化/本地",
+          "source": "amap",
+          "confidence": "high",
+          "note": "早餐候选｜4.6分·人均¥22·福州捞化"
+        },
+        {
+          "id": "d5-rest1",
+          "time": "08:00",
+          "end_time": "09:00",
+          "type": "rest",
+          "name": "退房寄存行李 · 早餐（候选餐厅自选）",
+          "location": {
+            "name": "广达商务酒店",
+            "address": "台江区广达南路356号",
+            "latitude": 26.067113,
+            "longitude": 119.31181,
+            "source": "amap-resolved"
+          },
+          "planned_duration_min": 60,
+          "source": "search_stays",
+          "confidence": "high"
+        },
+        {
+          "id": "d5-t1",
+          "time": "09:00",
+          "end_time": "09:20",
+          "type": "transport",
+          "name": "步行至冰心故居",
+          "planned_duration_min": 20,
+          "transport_mode": "walking",
+          "from": "广达商务酒店",
+          "to": "冰心故居",
+          "distance_km": 1.5,
+          "source": "amap",
+          "confidence": "high"
+        },
+        {
+          "id": "d5-v1",
+          "time": "09:20",
+          "end_time": "10:20",
+          "type": "visit",
+          "name": "冰心故居（林觉民故居同址）",
+          "location": {
+            "name": "冰心故居",
+            "address": "鼓楼区南后街杨桥巷（三坊七巷内）",
+            "latitude": 26.085355,
+            "longitude": 119.29583,
+            "source": "amap-resolved"
+          },
+          "planned_duration_min": 60,
+          "closed_on": [
+            "Monday"
+          ],
+          "source": "amap",
+          "confidence": "high",
+          "note": "高德4.5分，三坊七巷内，与林觉民故居同址；周一闭馆"
+        },
+        {
+          "id": "d5-t2",
+          "time": "10:20",
+          "end_time": "10:30",
+          "type": "transport",
+          "name": "步行至林则徐纪念馆",
+          "planned_duration_min": 10,
+          "transport_mode": "walking",
+          "from": "冰心故居",
+          "to": "林则徐纪念馆",
+          "distance_km": 0.8,
+          "source": "amap",
+          "confidence": "high"
+        },
+        {
+          "id": "d5-v2",
+          "time": "10:30",
+          "end_time": "12:20",
+          "type": "visit",
+          "name": "林则徐纪念馆（正馆参观）",
+          "location": {
+            "name": "林则徐纪念馆",
+            "address": "鼓楼区澳门路16号（南门兜地铁站L口步行420米）",
+            "latitude": 26.078369,
+            "longitude": 119.297274,
+            "source": "amap-resolved"
+          },
+          "planned_duration_min": 110,
+          "opening_hours": {
+            "opens": "09:00",
+            "closes": "17:00",
+            "source": "amap"
+          },
+          "closed_on": [
+            "Monday"
+          ],
+          "source": "amap",
+          "confidence": "high",
+          "note": "高德4.7分，免费，周一闭馆；首日只看前庭，今天进正馆细看"
+        },
+        {
+          "id": "d5-rest2",
+          "time": "12:20",
+          "end_time": "13:20",
+          "type": "rest",
+          "name": "午餐休整 · 澳门路/三坊七巷候选自选",
+          "location": {
+            "name": "林则徐纪念馆",
+            "address": "鼓楼区澳门路16号",
+            "latitude": 26.078369,
+            "longitude": 119.297274,
+            "source": "amap-resolved"
+          },
+          "planned_duration_min": 60,
+          "source": "amap",
+          "confidence": "high"
+        },
+        {
+          "id": "d5-m4",
+          "type": "meal",
+          "subtype": "lunch",
+          "name": "永和鱼丸(三坊七巷店)",
+          "location": {
+            "name": "永和鱼丸(三坊七巷店)",
+            "address": "南后街89号",
+            "latitude": 26.083762,
+            "longitude": 119.296642,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 24,
+          "cuisine": "本地小吃",
+          "source": "amap",
+          "confidence": "high",
+          "note": "午餐候选（经济档·本地特色）｜4.5分·人均¥24"
+        },
+        {
+          "id": "d5-m5",
+          "type": "meal",
+          "subtype": "lunch",
+          "name": "朱紫坊蹄膀·福州菜(三坊七巷店)",
+          "location": {
+            "name": "朱紫坊蹄膀·福州菜(三坊七巷店)",
+            "address": "吉庇路85-3店面",
+            "latitude": 26.080162,
+            "longitude": 119.298001,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 45,
+          "cuisine": "福州菜",
+          "source": "amap",
+          "confidence": "high",
+          "note": "午餐候选（中档·本地特色）｜4.5分·人均¥45"
+        },
+        {
+          "id": "d5-m6",
+          "type": "meal",
+          "subtype": "lunch",
+          "name": "福鳗满·福州名小吃(澳门路)",
+          "location": {
+            "name": "福鳗满·福州名小吃(澳门路)",
+            "address": "澳门路55号",
+            "latitude": 26.079475,
+            "longitude": 119.29771,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 52,
+          "cuisine": "本地名小吃",
+          "source": "amap",
+          "confidence": "high",
+          "note": "午餐候选（中档·本地特色）｜4.4分·人均¥52·澳门路"
+        },
+        {
+          "id": "d5-m7",
+          "type": "meal",
+          "subtype": "lunch",
+          "name": "老福洲三十年·福州风味(东街口三坊七巷店)",
+          "location": {
+            "name": "老福洲三十年·福州风味(东街口三坊七巷店)",
+            "address": "吉庇巷70号",
+            "latitude": 26.080515,
+            "longitude": 119.29865,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 92,
+          "cuisine": "福州菜",
+          "source": "amap",
+          "confidence": "high",
+          "note": "午餐候选（中高档）｜4.6分·人均¥92"
+        },
+        {
+          "id": "d5-m8",
+          "type": "meal",
+          "subtype": "lunch",
+          "name": "聚春园大酒店(三坊七巷店)",
+          "location": {
+            "name": "聚春园大酒店(三坊七巷店)",
+            "address": "八一七北路聚春园大酒店（东街口地铁站旁）",
+            "latitude": 26.086581,
+            "longitude": 119.299655,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 130,
+          "cuisine": "闽菜/正餐",
+          "source": "amap",
+          "confidence": "medium",
+          "note": "午餐候选（高档档·佛跳墙收官）｜4.5分·人均约¥130"
+        },
+        {
+          "id": "d5-t3",
+          "time": "13:20",
+          "end_time": "13:50",
+          "type": "transport",
+          "name": "打车回酒店取行李",
+          "planned_duration_min": 30,
+          "transport_mode": "taxi",
+          "from": "林则徐纪念馆",
+          "to": "广达商务酒店",
+          "distance_km": 2,
+          "source": "amap",
+          "confidence": "high"
+        },
+        {
+          "id": "d5-rest3",
+          "time": "13:50",
+          "end_time": "14:20",
+          "type": "rest",
+          "name": "取行李 / 大堂休整",
+          "location": {
+            "name": "广达商务酒店",
+            "address": "台江区广达南路356号",
+            "latitude": 26.067113,
+            "longitude": 119.31181,
+            "source": "amap-resolved"
+          },
+          "planned_duration_min": 30,
+          "source": "search_stays",
+          "confidence": "medium"
+        },
+        {
+          "id": "d5-t4",
+          "time": "14:20",
+          "end_time": "15:00",
+          "type": "transport",
+          "name": "打车至福州站（北站）",
+          "planned_duration_min": 40,
+          "transport_mode": "taxi",
+          "from": "广达商务酒店",
+          "to": "福州站",
+          "distance_km": 8,
+          "source": "amap",
+          "confidence": "medium"
+        },
+        {
+          "id": "d5-rest4",
+          "time": "15:00",
+          "end_time": "15:40",
+          "type": "rest",
+          "name": "抵达福州站 · 候车/返程",
+          "location": {
+            "name": "福州站",
+            "address": "晋安区华林路502号（福州站）",
+            "latitude": 26.113972,
+            "longitude": 119.320571,
+            "source": "amap-resolved"
+          },
+          "planned_duration_min": 40,
+          "source": "amap",
+          "confidence": "high",
+          "note": "若从福州南站返程，打车约 40-50 分钟，请按车次预留更早出发时间"
+        },
+        {
+          "id": "d5-m9",
+          "type": "meal",
+          "subtype": "dinner",
+          "name": "福州站商圈闽菜简餐",
+          "location": {
+            "name": "福州站商圈闽菜简餐",
+            "address": "晋安区福州站周边商圈",
+            "latitude": 26.098624,
+            "longitude": 119.30745,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 60,
+          "cuisine": "闽菜/河鲜",
+          "source": "amap",
+          "confidence": "medium",
+          "note": "晚餐候选（带着走·中档）｜人均约¥60·福州站周边"
+        },
+        {
+          "id": "d5-m10",
+          "type": "meal",
+          "subtype": "dinner",
+          "name": "福州站内小吃（拌面扁肉/鱼丸）",
+          "location": {
+            "name": "福州站内小吃（拌面扁肉/鱼丸）",
+            "address": "晋安区华林路福州站内/周边",
+            "latitude": 26.113972,
+            "longitude": 119.320571,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 25,
+          "cuisine": "快餐/小吃",
+          "source": "amap",
+          "confidence": "medium",
+          "note": "晚餐候选（经济档）｜人均约¥25·站内快餐"
+        },
+        {
+          "id": "d5-m11",
+          "type": "meal",
+          "subtype": "dinner",
+          "name": "五四路闽菜正餐（中高档）",
+          "location": {
+            "name": "五四路闽菜正餐（中高档）",
+            "address": "鼓楼区五四路商圈（近火车站）",
+            "latitude": 26.088888,
+            "longitude": 119.308176,
+            "source": "amap-resolved"
+          },
+          "cost_per_person": 88,
+          "cuisine": "闽菜/正餐",
+          "source": "amap",
+          "confidence": "medium",
+          "note": "晚餐候选（中高档）｜人均约¥88·五四路商圈，离火车站近"
+        }
+      ]
+    }
+  ]
+}

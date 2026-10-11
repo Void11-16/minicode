@@ -156,32 +156,49 @@ export function parseItinerary(raw: unknown): Itinerary {
     throw new Error("days 必须是非空数组");
   }
 
+  // 条目 id 在整份行程内唯一：前端把 id 当作全局键（照片缓存、标记定位）。id → 所在天的下标
+  const ids = new Map<string, number>();
   return {
     title,
-    days: source.days.map((day, dayIndex) => parseDay(day, dayIndex)),
+    days: source.days.map((day, dayIndex) => parseDay(day, dayIndex, ids)),
   };
 }
 
-function parseDay(raw: unknown, dayIndex: number): ItineraryDay {
+function parseDay(raw: unknown, dayIndex: number, ids: Map<string, number>): ItineraryDay {
   const source = objectOf(raw);
   if (source === null) throw new Error(`days[${dayIndex}] 必须是对象`);
   if (!Array.isArray(source.items) || source.items.length === 0) {
     throw new Error(`days[${dayIndex}].items 必须是非空数组`);
   }
 
-  const ids = new Set<string>();
   const date = optionalString(source.date);
   const theme = optionalString(source.theme);
   return {
     ...(date !== undefined ? { date } : {}),
     ...(theme !== undefined ? { theme } : {}),
     items: source.items.map((item, itemIndex) =>
-      parseItem(item, `day-${dayIndex + 1}-item-${itemIndex + 1}`, ids),
+      parseItem(item, `day-${dayIndex + 1}-item-${itemIndex + 1}`, ids, dayIndex),
     ),
   };
 }
 
-function parseItem(raw: unknown, defaultId: string, ids: Set<string>): ItineraryItem {
+/**
+ * id 全局唯一化：同一天内重名仍然报错（模型很可能漏改条目）；
+ * 跨天重名改写为默认 id（day-N-item-M）——模型习惯照抄 Day 1 的自动 id，
+ * 直接报错会让已保存的行程读不出来。改写不依赖原始文本，重复解析结果稳定。
+ */
+function uniqueId(requested: string, ids: Map<string, number>, defaultId: string, dayIndex: number): string {
+  const owner = ids.get(requested);
+  if (owner === undefined) return requested;
+  if (owner === dayIndex) throw new Error(`行程条目 id 重复: ${requested}`);
+  if (ids.get(defaultId) === undefined) return defaultId;
+  for (let suffix = 2; ; suffix += 1) {
+    const candidate = `${defaultId}-${suffix}`;
+    if (ids.get(candidate) === undefined) return candidate;
+  }
+}
+
+function parseItem(raw: unknown, defaultId: string, ids: Map<string, number>, dayIndex: number): ItineraryItem {
   const source = objectOf(raw);
   if (source === null) throw new Error("行程条目必须是对象");
 
@@ -190,9 +207,8 @@ function parseItem(raw: unknown, defaultId: string, ids: Set<string>): Itinerary
 
   const originalType = optionalString(source.type) ?? "";
   const type = parseItemType(originalType);
-  const id = optionalString(source.id) ?? defaultId;
-  if (ids.has(id)) throw new Error(`行程条目 id 重复: ${id}`);
-  ids.add(id);
+  const id = uniqueId(optionalString(source.id) ?? defaultId, ids, defaultId, dayIndex);
+  ids.set(id, dayIndex);
 
   const time = optionalTime(source.time, "time");
   const endTime = optionalTime(source.end_time, "end_time");

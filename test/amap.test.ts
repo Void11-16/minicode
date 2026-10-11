@@ -114,6 +114,56 @@ test("AmapClient: poiPhotos 名称不匹配或无照片时返回空数组", asyn
   assert.deepEqual(await noPhotos.poiPhotos("水亭门城墙", { latitude: 28.96, longitude: 118.87 }), []);
 });
 
+test("AmapClient: poiPhotos 命中多个名称时挑最像的 POI（不吃泛化结果）", async () => {
+  const client = new AmapClient({
+    apiKey: "k",
+    fetchFn: amapOnlyFetch(() =>
+      amapResponse({
+        pois: [
+          { id: "p0", name: "博物馆", location: "118.9,42.2", photos: [{ url: "https://img.example/generic.jpg" }] },
+          { id: "p1", name: "赤峰博物馆", location: "118.9,42.2", photos: [{ url: "https://img.example/exact.jpg" }] },
+        ],
+      }),
+    ),
+  });
+
+  // 旧实现取首个命中 → 得到泛化「博物馆」的照片；现在精确同名优先
+  assert.deepEqual(await client.poiPhotos("赤峰博物馆", { latitude: 42.2, longitude: 118.9 }), ["https://img.example/exact.jpg"]);
+});
+
+test("AmapClient: poiPhotos 允许带修饰词的别名（乌兰布统旅游景区-欧式风光区）", async () => {
+  const client = new AmapClient({
+    apiKey: "k",
+    fetchFn: amapOnlyFetch(() =>
+      amapResponse({
+        pois: [
+          { id: "p0", name: "乌兰布统旅游景区-欧式风光区", location: "117.15,42.54", photos: [{ url: "https://img.example/euro.jpg" }] },
+          { id: "p1", name: "乌兰布统影视基地", location: "117.14,42.53", photos: [{ url: "https://img.example/studio.jpg" }] },
+        ],
+      }),
+    ),
+  });
+
+  // 目标名不是别名子串，只做包含判断会漏掉；相似度兜底要能命中
+  assert.deepEqual(await client.poiPhotos("乌兰布统欧式风光区", { latitude: 42.54, longitude: 117.15 }), ["https://img.example/euro.jpg"]);
+});
+
+test("AmapClient: poiPhotos 找不到相似地点时宁可不给图", async () => {
+  const client = new AmapClient({
+    apiKey: "k",
+    fetchFn: amapOnlyFetch(() =>
+      amapResponse({
+        pois: [
+          { id: "p0", name: "都趣壹号院酒店", location: "117.23,42.52", photos: [{ url: "https://img.example/hotel.jpg" }] },
+          { id: "p1", name: "花栖堂民宿(乌兰布统草原景区店)", location: "117.23,42.52", photos: [{ url: "https://img.example/min-su.jpg" }] },
+        ],
+      }),
+    ),
+  });
+
+  assert.deepEqual(await client.poiPhotos("乌兰布统红山军马场 民宿", { latitude: 42.52, longitude: 117.23 }), []);
+});
+
 test("AmapClient: 公交路径规划解析推荐方案", async () => {
   const requests: URL[] = [];
   const fetchFn = amapOnlyFetch((url) => {

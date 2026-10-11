@@ -13,8 +13,17 @@ export interface AgentEvent {
 }
 
 export interface RunOptions {
-  /** 工具调用最大轮数，防止模型无限循环，默认 5 */
-  readonly maxToolRounds?: number;
+  /**
+   * 工具调用最大轮数，防止模型无限循环，默认 5。
+   * 传函数时每轮重新取值：宿主可以按行程天数等动态调高预算。
+   */
+  readonly maxToolRounds?: number | (() => number);
+  /**
+   * 轮次预算用尽时的续期钩子：返回 true 表示宿主提高了 maxToolRounds，
+   * 循环继续跑下去；返回 false（或不提供）则进入收尾。
+   * 宿主要负责封顶；Agent 另有 BUDGET_EXTENSION_LIMIT 次续期硬上限防死循环。
+   */
+  readonly onBudgetExhausted?: (limit: number) => boolean | Promise<boolean>;
   readonly onEvent?: (event: AgentEvent) => void;
   /** 权限确认回调：返回 true 允许执行。未提供时默认放行（非交互场景） */
   readonly onPermission?: PermissionHandler;
@@ -44,6 +53,9 @@ export type PermissionHandler = (request: PermissionRequest) => Promise<boolean>
 
 /** 剩余轮数少于该值时，每次请求注入收尾提醒（不写入会话历史） */
 const WRAP_UP_HINT_ROUNDS = 3;
+
+/** 单轮内最多接受几次预算续期：宿主钩子故障（一直返回 true）也不会空转 */
+const BUDGET_EXTENSION_LIMIT = 10;
 
 /** 用户主动中断当前轮（/stop）时抛出 */
 export class TurnAbortedError extends Error {
@@ -158,7 +170,9 @@ export class ChatAgent {
       return reply;
     }
 
-    const maxToolRounds = options.maxToolRounds ?? 5;
+    // 预算可以按轮动态读取（宿主按行程天数调整），也可以中途续期
+    const roundLimit = (): number =>
+      typeof options.maxToolRounds === "function" ? options.maxToolRounds() : options.maxToolRounds ?? 5;
     const onEvent = options.onEvent;
     const definitions = tools.definitions();
     const streamWithTools = this.provider.chatStreamWithTools;
@@ -170,7 +184,19 @@ export class ChatAgent {
       this.sessionValue.add("user", trimmed);
       await this.checkpoint(options);
 
-      for (let round = 0; round < maxToolRounds; round++) {
+      // executed = 已执行的轮数（续期的检查本身不占轮次，否则续期一次只能多跑一轮）
+      let executed = 0;
+      let extensions = 0;
+      for (;;) {
+        const limit = roundLimit();
+        if (executed >= limit) {
+          // 预算用尽：先问宿主能否续期（例如按行程天数放宽），不能续期才收尾
+          if (extensions >= BUDGET_EXTENSION_LIMIT) break;
+          const extended = await budgetExtension(options, limit);
+          if (!extended) break;
+          extensions += 1;
+          continue;
+        }
         if (controller.signal.aborted) throw new TurnAbortedError();
 
         // 排干 steer 注入的消息（在每次 LLM 调用前生效，模型可据此转向）
@@ -186,7 +212,7 @@ export class ChatAgent {
         );
 
         // 剩余轮数不足时注入收尾提醒（仅本次请求可见，不进入会话历史，避免污染后续轮次）
-        const remaining = maxToolRounds - round - 1;
+        const remaining = limit - executed - 1;
         const requestHistory = remaining < WRAP_UP_HINT_ROUNDS
           ? [...this.sessionValue.history, wrapUpHint(remaining)]
           : this.sessionValue.history;
@@ -246,6 +272,7 @@ export class ChatAgent {
         }
         // 一批工具结果全部回填完毕 = 历史一致的安全边界，落盘
         await this.checkpoint(options);
+        executed += 1;
       }
       // 轮次用尽：再做一次"禁用工具"的收尾请求，保证用户拿到最终产出而不是硬报错
       const wrapUp = await this.forceFinalAnswer(options.onTextDelta);
@@ -255,7 +282,7 @@ export class ChatAgent {
         await this.checkpoint(options);
         return wrapUp;
       }
-      throw new Error(`工具调用超过 ${maxToolRounds} 轮上限，模型未能给出最终回答`);
+      throw new Error(`工具调用超过 ${roundLimit()} 轮上限，模型未能给出最终回答`);
     } finally {
       this.currentController = undefined;
     }
@@ -280,7 +307,9 @@ export class ChatAgent {
       role: "system",
       content:
         "工具调用轮次已全部用尽，工具已被禁用。请基于以上已获得的信息直接给出最终回答：" +
-        "保留关键结论与数据；未查到的部分明确说明，不要再请求调用工具。",
+        "保留关键结论与数据；未查到的部分明确说明，不要再请求调用工具。" +
+        "如果本轮还有没做完的收尾动作（如某天还没保存、质量校验还没通过），必须如实说明做到哪一步，" +
+        "并给用户一句可操作的下一步（例如回复「继续」接着修），不要声称已完成或已通过校验。",
     };
     const history = [...this.sessionValue.history, instruction];
     try {
@@ -361,4 +390,14 @@ function wrapUpHint(remaining: number): PromptMessage {
       `【轮次提醒】${budget}。请避免重复查询，优先补齐关键信息并尽快收敛；` +
       "如果现有数据已足够，请立即用文字给出最终回答。",
   };
+}
+
+/** 询问宿主能否续期预算：宿主回调出错按"不许续期"处理，不能因此让整轮失败 */
+async function budgetExtension(options: RunOptions, limit: number): Promise<boolean> {
+  try {
+    return (await options.onBudgetExhausted?.(limit)) === true;
+  } catch (error) {
+    debugLog("agent", `预算续期回调失败: ${error instanceof Error ? error.message : String(error)}`);
+    return false;
+  }
 }

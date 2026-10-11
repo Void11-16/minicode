@@ -10,12 +10,26 @@ export type DeliveryMode = "steer" | "queue";
 /** steer 注入立即返回的提示（消息本身在当前轮内被处理） */
 export const STEERED_NOTE = "↪ 已注入当前执行轮";
 
+/** 工具轮次默认预算（未按会话解析时） */
+const DEFAULT_MAX_TOOL_ROUNDS = 30;
+/** 预算用尽后的续期步长与次数上限，以及绝对上限：防止模型无限刷轮次 */
+const BUDGET_EXTENSION_STEP = 15;
+const MAX_BUDGET_EXTENSIONS = 2;
+const ROUND_LIMIT_CEILING = 90;
+
 export interface AgentRuntimeOptions {
   /** 上下文压缩用的摘要器（通常走 LLM） */
   readonly summarize: (messages: readonly Message[]) => Promise<string>;
   readonly maxPromptTokens?: number;
   readonly keepRecent?: number;
-  readonly maxToolRounds?: number;
+  /**
+   * 每轮的工具调用预算：固定值或按会话解析（可异步读需求单，按行程天数调整；
+   * input 是本轮用户输入，首轮需求单还没落盘时可据此匹配已有需求单）。
+   * 未提供时默认 30。
+   */
+  readonly maxToolRounds?: number | ((session: Session, input: string) => number | Promise<number>);
+  /** 预算自动续期时通知宿主（前端/CLI 提示用户，便于解释为什么还在跑） */
+  readonly onBudgetExtended?: (sessionId: string, info: { readonly from: number; readonly to: number }) => void;
   /** 压缩前归档原始会话（数据安全） */
   readonly archive?: (session: Session, nextEpoch: number) => Promise<void>;
   /** 持久化检查点：会话历史在安全边界落盘（崩溃时最多丢进行中的半步） */
@@ -117,6 +131,21 @@ export class AgentRuntime {
     return drained;
   }
 
+  /** 解析本轮的工具轮次预算：支持按会话动态计算（如按需求单的行程天数） */
+  private async resolveRoundLimit(session: Session, input: string): Promise<number> {
+    const configured = this.options.maxToolRounds;
+    if (configured === undefined) return DEFAULT_MAX_TOOL_ROUNDS;
+    // 解析失败（需求单损坏等）按默认预算走，不能因为预算算不出来就让整轮报错
+    try {
+      const limit = typeof configured === "function" ? await configured(session, input) : configured;
+      if (!Number.isFinite(limit) || limit <= 0) return DEFAULT_MAX_TOOL_ROUNDS;
+      return Math.floor(limit);
+    } catch (error) {
+      debugLog("runtime", `工具轮次预算解析失败，用默认 ${DEFAULT_MAX_TOOL_ROUNDS}: ${error instanceof Error ? error.message : String(error)}`);
+      return DEFAULT_MAX_TOOL_ROUNDS;
+    }
+  }
+
   private async runTurn(sessionId: string, input: string): Promise<string> {
     debugLog("runtime", `turn 开始 session=${sessionId} input="${input.slice(0, 50)}"`);
     const agent = this.agents.get(sessionId);
@@ -133,9 +162,25 @@ export class AgentRuntime {
         this.options.onCompact?.(sessionId, compact);
       }
 
+      // 工具轮次预算：先按会话需求解析（例如 7 天行程给更多轮），
+      // 用尽后最多再续期两次，每次 +15 轮，绝对上限 90 轮
+      const resolvedLimit = await this.resolveRoundLimit(agent.session, input);
+      let limit = resolvedLimit;
+      let extensions = 0;
       const reply = await agent.run(input, {
         // 通用 agent 场景（读文件→改代码→跑测试→修）需要更多轮次；上限保护仍在
-        maxToolRounds: this.options.maxToolRounds ?? 30,
+        maxToolRounds: () => limit,
+        onBudgetExhausted: async (current) => {
+          if (extensions >= MAX_BUDGET_EXTENSIONS) return false;
+          // 需求单可能在本次轮次里才写盘：续期时重新解析一次，取更大的那个
+          const refreshed = await this.resolveRoundLimit(agent.session, input);
+          const next = Math.min(ROUND_LIMIT_CEILING, Math.max(refreshed, current + BUDGET_EXTENSION_STEP));
+          if (next <= current) return false;
+          extensions += 1;
+          limit = next;
+          this.options.onBudgetExtended?.(sessionId, { from: current, to: next });
+          return true;
+        },
         onCheckpoint: () => this.options.onCheckpoint?.(sessionId),
         onEvent: (event) => this.options.onEvent?.(sessionId, event),
         onPermission: (request) =>

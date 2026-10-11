@@ -1,11 +1,11 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import type { Tool } from "./tool.ts";
 import { requireString } from "./tool.ts";
 import { planFileFor } from "./itinerary.ts";
 import { loadProfile, mergeProfiles } from "./profiles.ts";
 
-interface TravelBrief {
+export interface TravelBrief {
   readonly title: string;
   readonly destination: string;
   readonly startDate?: string;
@@ -187,4 +187,84 @@ function summarizeBrief(brief: TravelBrief): string {
     ["同行人档案", brief.travelerProfiles?.join("、") ?? "无"],
   ];
   return rows.map(([key, value]) => `- ${key}: ${value}`).join("\n");
+}
+
+/** 行程天数（含首尾）；日期缺失或非法时返回 undefined（无法据此估算工作量） */
+export function briefDays(brief: TravelBrief): number | undefined {
+  if (brief.startDate === undefined || brief.endDate === undefined) return undefined;
+  const start = Date.parse(`${brief.startDate}T00:00:00Z`);
+  const end = Date.parse(`${brief.endDate}T00:00:00Z`);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return undefined;
+  return Math.round((end - start) / 86_400_000) + 1;
+}
+
+/**
+ * 按需求单换算工具轮次预算：天数越多越费轮次（每天要搜索+口碑+餐饮+保存+校验）。
+ * 没有日期时无法估算，返回 fallback；结果夹在 [12, 60]——再多由运行时续期兜底。
+ */
+export function toolRoundsForBrief(brief: TravelBrief | null, fallback: number): number {
+  if (brief === null) return fallback;
+  const days = briefDays(brief);
+  if (days === undefined) return fallback;
+  const pace = brief.pace ?? "";
+  const notes = brief.notes ?? "";
+  const budget =
+    10 +
+    6 * days +
+    (pace.includes("紧凑") ? 8 : pace.includes("慢") ? -4 : 0) +
+    (/自驾|包车|远郊|长线|徒步/.test(notes) ? 6 : 0);
+  return Math.max(12, Math.min(60, budget));
+}
+
+/** 已保存的需求单，按修改时间从新到旧；损坏或缺少目的地的文件跳过 */
+export async function listTravelBriefs(rootDir: string): Promise<TravelBrief[]> {
+  const dir = join(rootDir, "plans", "briefs");
+  const names = await readdir(dir).catch(() => [] as string[]);
+  const entries = await Promise.all(
+    names.filter((name) => name.endsWith(".json")).map((name) => readBriefFile(join(dir, name))),
+  );
+  return entries
+    .filter((entry): entry is { brief: TravelBrief; mtimeMs: number } => entry !== null)
+    .sort((a, b) => b.mtimeMs - a.mtimeMs)
+    .map((entry) => entry.brief);
+}
+
+/** 读取指定标题的需求单；不存在或损坏返回 null */
+export async function loadBriefForTitle(rootDir: string, title: string): Promise<TravelBrief | null> {
+  const raw = await readFile(planFileFor(rootDir, "plans/briefs", title, "json"), "utf8").catch(() => null);
+  return raw === null ? null : parseBriefJson(raw);
+}
+
+/**
+ * 按会话文本匹配需求单：先看标题、再看目的地（一次会话通常只规划一个行程），
+ * 都不匹配时退回最近保存的需求单；没有需求单返回 null。
+ */
+export async function briefForSessionTitle(rootDir: string, sessionText: string): Promise<TravelBrief | null> {
+  const briefs = await listTravelBriefs(rootDir);
+  return (
+    briefs.find((brief) => sessionText.includes(brief.title)) ??
+    briefs.find((brief) => sessionText.includes(brief.destination)) ??
+    briefs[0] ??
+    null
+  );
+}
+
+async function readBriefFile(file: string): Promise<{ brief: TravelBrief; mtimeMs: number } | null> {
+  const raw = await readFile(file, "utf8").catch(() => null);
+  const brief = raw === null ? null : parseBriefJson(raw);
+  if (brief === null) return null;
+  const mtimeMs = (await stat(file).catch(() => null))?.mtimeMs ?? 0;
+  return { brief, mtimeMs };
+}
+
+/** 宽松解析已落盘的需求单：只要求 title/destination 为非空字符串，损坏时返回 null */
+function parseBriefJson(raw: string): TravelBrief | null {
+  try {
+    const parsed = JSON.parse(raw) as Partial<TravelBrief>;
+    if (typeof parsed.title !== "string" || parsed.title === "") return null;
+    if (typeof parsed.destination !== "string" || parsed.destination === "") return null;
+    return parsed as TravelBrief;
+  } catch {
+    return null;
+  }
 }
