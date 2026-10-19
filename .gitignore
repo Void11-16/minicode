@@ -3,3 +3,10 @@ node_modules/
 .DS_Store
 screenlog.*
 eval/out/
+
+# plans/ 是运行时产物目录：行程单/需求单/同行人档案都是用户数据，不入库
+# 例外：给同行人填写的《旅行者档案填写表》模板是可复用交付物，保留在版本库
+plans/*
+!plans/profiles/
+plans/profiles/*
+!plans/profiles/模板/
