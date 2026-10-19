@@ -169,6 +169,117 @@ test("get_weather 工具: 组合地理编码 + 预报数据", async () => {
   assert.match(output, /2026-09-24: 小雨, 18~24\.1°C, 降水 4\.2mm/);
 });
 
+/** 距今天 N 天的本地日期（与工具口径一致：按本地时区取"今天"） */
+function isoDaysFromToday(offset: number): string {
+  const date = new Date();
+  date.setDate(date.getDate() + offset);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+/** 天气工具的 fetch 桩：地理编码固定杭州，预报返回给定日期 */
+function weatherFetch(dates: readonly string[], onForecast?: (url: string) => void): typeof fetch {
+  return (async (url: string | URL) => {
+    const u = String(url);
+    if (u.includes("api.open-meteo.com/v1/forecast")) {
+      onForecast?.(u);
+      return jsonResponse({
+        daily: {
+          time: [...dates],
+          weather_code: dates.map(() => 0),
+          temperature_2m_max: dates.map(() => 25),
+          temperature_2m_min: dates.map(() => 15),
+          precipitation_sum: dates.map(() => 0),
+        },
+      });
+    }
+    if (u.includes("geocoding-api")) {
+      return jsonResponse({ results: [{ name: "杭州", latitude: 30.27, longitude: 120.15, country: "中国", admin1: "浙江省" }] });
+    }
+    throw new Error("Photon 不可用"); // 触发 Open-Meteo 地理编码兜底
+  }) as typeof fetch;
+}
+
+test("get_weather: 指定行程日期区间，直接查那几天", async () => {
+  const start = isoDaysFromToday(2);
+  const end = isoDaysFromToday(3);
+  let requestedUrl = "";
+  const output = await createWeatherTool(
+    weatherFetch([start, end], (url) => {
+      requestedUrl = url;
+    }),
+  ).execute({ location: "杭州", start_date: start, end_date: end });
+
+  assert.match(requestedUrl, new RegExp(`start_date=${start}&end_date=${end}`));
+  assert.match(output, new RegExp(`天气预报 ${start} ~ ${end}`));
+  assert.match(output, new RegExp(`${start}: 晴, 15~25°C, 降水 0mm`));
+  assert.doesNotMatch(output, /参考性低|无法获取/); // 3 天内属可靠区间，不该带提示
+});
+
+test("get_weather: 行程日期超出预报窗口时明确说明拿不到，且不请求预报接口", async () => {
+  const start = isoDaysFromToday(30);
+  const end = isoDaysFromToday(35);
+  let forecastCalls = 0;
+  const output = await createWeatherTool(
+    weatherFetch([], () => {
+      forecastCalls += 1;
+    }),
+  ).execute({ location: "杭州", start_date: start, end_date: end });
+
+  assert.equal(forecastCalls, 0, "超出窗口时不应请求预报接口");
+  assert.match(output, /无法获取/);
+  assert.match(output, /超出预报范围/);
+  assert.match(output, /不要编造/);
+});
+
+test("get_weather: 行程前半段可查、后半段超窗口时，返回可查部分并说明缺口", async () => {
+  const start = isoDaysFromToday(10);
+  const horizonEnd = isoDaysFromToday(15);
+  const end = isoDaysFromToday(20);
+  let requestedUrl = "";
+  const output = await createWeatherTool(
+    weatherFetch([start, horizonEnd], (url) => {
+      requestedUrl = url;
+    }),
+  ).execute({ location: "杭州", start_date: start, end_date: end });
+
+  assert.match(requestedUrl, new RegExp(`start_date=${start}&end_date=${horizonEnd}`));
+  assert.match(output, new RegExp(`注意：${isoDaysFromToday(16)} ~ ${end} 超出预报范围`));
+  assert.match(output, /不要编造/);
+});
+
+test("get_weather: days 超上限按 16 天返回并说明，远期日期标注可靠性", async () => {
+  const dates = Array.from({ length: 16 }, (_value, index) => isoDaysFromToday(index));
+  const output = await createWeatherTool(weatherFetch(dates)).execute({ location: "杭州", days: 20 });
+
+  assert.match(output, /注意：请求了 20 天，但预报最多 16 天/);
+  assert.match(output, new RegExp(`${isoDaysFromToday(2)}: 晴, 15~25°C, 降水 0mm$`, "m"));
+  assert.match(output, new RegExp(`${isoDaysFromToday(7)}: .*（较远，参考性低）`));
+  assert.match(output, new RegExp(`${isoDaysFromToday(10)}: .*（远期，仅供趋势参考）`));
+  assert.match(output, /说明：第 8 天起的预报误差明显增大/);
+});
+
+test("get_weather: 服务不可用时返回说明而不是抛错", async () => {
+  const fetchFn = (async (url: string | URL) => {
+    const u = String(url);
+    if (u.includes("api.open-meteo.com/v1/forecast")) {
+      return new Response("boom", { status: 500 });
+    }
+    if (u.includes("geocoding-api")) {
+      return jsonResponse({ results: [{ name: "杭州", latitude: 30.27, longitude: 120.15, country: "中国" }] });
+    }
+    throw new Error("Photon 不可用");
+  }) as typeof fetch;
+
+  const output = await createWeatherTool(fetchFn).execute({ location: "杭州", days: 3 });
+  assert.match(output, /无法获取杭州的天气预报（天气服务返回 HTTP 500）/);
+  assert.match(output, /不要.*编造/);
+});
+
+test("get_weather: 日期格式非法时给出明确提示", async () => {
+  const output = await createWeatherTool(weatherFetch([])).execute({ location: "杭州", start_date: "2026/10/20" });
+  assert.match(output, /start_date 必须是 YYYY-MM-DD 格式/);
+});
+
 test("search_stays 工具: 返回真实住宿数据（geocode + Overpass）", async () => {
   const fetchFn = (async (url: string | URL, init?: RequestInit) => {
     const u = String(url);
