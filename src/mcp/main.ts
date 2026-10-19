@@ -21,8 +21,13 @@ async function main(): Promise<void> {
     version: serverVersion(),
     instructions:
       "通用 AI 助手工具集（旅行规划为特长）：文件读写编辑、命令执行、天气、地理编码、路线距离、景点/住宿/餐厅搜索、网络口碑。" +
-      "生成或修改行程后必须调用 validate_itinerary；strict 模式未通过时先修正行程再交付" +
-      "（餐饮项只做参考提示，不影响通过判定）。" +
+      "坐标规则：行程条目的经纬度从 search_attractions/search_stays/search_restaurants 返回条目里逐字复制（格式「纬度,经度」）；" +
+      "用 geocode 必须传 city（会做省市字段校验，防止外地同名地点——「北海公园」不带 city 会命中新疆五家渠）；" +
+      "核实失败先换查询词重查（城市+区+完整名称，如「北京市西城区北海公园」），再改用 search_attractions 取坐标；" +
+      "仍核实不了的地点不写坐标、note 注明「坐标待核实」。" +
+      "交付闭环：save_itinerary 分批（merge=true）保存 → plan_day_routes 复核通勤 → validate_itinerary（strict=true）验收" +
+      "（strict 未通过先修正行程再交付；餐饮项只做参考提示，不影响通过判定）；" +
+      "只有工具实际返回通过才能对用户说「已保存/已通过」，任何一步没通过都要如实报告未完成。" +
       `save_itinerary 生成的行程单会保存到 ${plansDir} 目录。` +
       (config.tastePreferences !== undefined ? `用户口味偏好：${config.tastePreferences}。` : ""),
   });
