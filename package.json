@@ -8,6 +8,7 @@
     "web": "node src/web/main.ts",
     "eval": "node src/eval/main.ts",
     "eval:live": "node src/eval/main.ts --live",
+    "eval:plans": "node src/eval/main.ts --plans",
     "test": "node --test \"test/*.test.ts\"",
     "typecheck": "tsc --noEmit",
     "lint": "oxlint src test"

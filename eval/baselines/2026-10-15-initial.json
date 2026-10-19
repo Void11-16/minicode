@@ -1,0 +1,144 @@
+{
+  "generated_at": "2026-10-15T12:39:50.462Z",
+  "mode": "plans",
+  "missing": [],
+  "samples": [
+    {
+      "id": "北京三日游",
+      "title": "北京三日游",
+      "days": 3,
+      "status": "needs_confirmation",
+      "score": 82,
+      "issues": {
+        "P0": 0,
+        "P1": 0,
+        "P2": 9
+      },
+      "issueCodes": [
+        "missing-source",
+        "missing-confidence",
+        "missing-opening-hours"
+      ],
+      "evidenceRate": 1,
+      "mealSlotsOk": 5,
+      "mealSlotsTotal": 6,
+      "visitsPerDay": 2,
+      "maxGapMinutes": 30,
+      "routeIssueCount": 0,
+      "costPerPerson": 473.8
+    },
+    {
+      "id": "北京四日游",
+      "title": "北京四日游",
+      "days": 4,
+      "status": "needs_revision",
+      "score": 82,
+      "issues": {
+        "P0": 0,
+        "P1": 2,
+        "P2": 2
+      },
+      "issueCodes": [
+        "reservation-required",
+        "long-transport"
+      ],
+      "evidenceRate": 0.9803921568627451,
+      "mealSlotsOk": 8,
+      "mealSlotsTotal": 8,
+      "visitsPerDay": 3.25,
+      "maxGapMinutes": 70,
+      "routeIssueCount": 2,
+      "costPerPerson": 1125.4666666666667
+    },
+    {
+      "id": "福州5日游",
+      "title": "福州5日游",
+      "days": 5,
+      "status": "needs_revision",
+      "score": 82,
+      "issues": {
+        "P0": 0,
+        "P1": 2,
+        "P2": 2
+      },
+      "issueCodes": [
+        "missing-opening-hours",
+        "transfer-too-tight"
+      ],
+      "evidenceRate": 0.7619047619047619,
+      "mealSlotsOk": 9,
+      "mealSlotsTotal": 10,
+      "visitsPerDay": 4,
+      "maxGapMinutes": 15,
+      "routeIssueCount": 2,
+      "costPerPerson": 690.1333333333333
+    },
+    {
+      "id": "衢州三日游",
+      "title": "衢州三日游",
+      "days": 3,
+      "status": "ok",
+      "score": 100,
+      "issues": {
+        "P0": 0,
+        "P1": 0,
+        "P2": 0
+      },
+      "issueCodes": [],
+      "evidenceRate": 1,
+      "mealSlotsOk": 6,
+      "mealSlotsTotal": 6,
+      "visitsPerDay": 3.6666666666666665,
+      "maxGapMinutes": 50,
+      "routeIssueCount": 0,
+      "costPerPerson": 938.0833333333334
+    },
+    {
+      "id": "衢州四日游情侣版",
+      "title": "衢州四日游（情侣版）",
+      "days": 4,
+      "status": "needs_revision",
+      "score": 75,
+      "issues": {
+        "P0": 0,
+        "P1": 3,
+        "P2": 2
+      },
+      "issueCodes": [
+        "long-transport",
+        "reservation-required",
+        "missing-opening-hours",
+        "no-activity"
+      ],
+      "evidenceRate": 0.6,
+      "mealSlotsOk": 0,
+      "mealSlotsTotal": 8,
+      "visitsPerDay": 2,
+      "maxGapMinutes": 60,
+      "routeIssueCount": 2,
+      "costPerPerson": 886
+    },
+    {
+      "id": "赤峰七日游",
+      "title": "赤峰七日游",
+      "days": 5,
+      "status": "needs_confirmation",
+      "score": 98,
+      "issues": {
+        "P0": 0,
+        "P1": 0,
+        "P2": 1
+      },
+      "issueCodes": [
+        "title-day-mismatch"
+      ],
+      "evidenceRate": 1,
+      "mealSlotsOk": 10,
+      "mealSlotsTotal": 10,
+      "visitsPerDay": 2.6,
+      "maxGapMinutes": 45,
+      "routeIssueCount": 0,
+      "costPerPerson": 903.9166666666666
+    }
+  ]
+}

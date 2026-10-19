@@ -1,5 +1,5 @@
 import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { Session } from "../core/session.ts";
 import { ChatAgent } from "../agent/agent.ts";
 import { composeSystemPrompt, readWorkspaceRules } from "../agent/prompt.ts";
@@ -12,8 +12,17 @@ import { setAmapKey } from "../tools/amap-access.ts";
 import { createDefaultRegistry } from "../tools/all.ts";
 import { planFileFor } from "../tools/itinerary.ts";
 import { parseItinerary } from "../tools/itinerary-schema.ts";
+import {
+  baselineFromResults,
+  diffBaselines,
+  latestBaseline,
+  loadBaseline,
+  renderBaselineDiff,
+  saveBaseline,
+} from "./baseline.ts";
 import { loadCases, type EvalCase } from "./cases.ts";
 import { computeItineraryMetrics, type ItineraryEvalMetrics } from "./metrics.ts";
+import { loadPlanSamples } from "./plans.ts";
 
 /**
  * 行程质量离线评测。
@@ -23,6 +32,9 @@ import { computeItineraryMetrics, type ItineraryEvalMetrics } from "./metrics.ts
  *   npm run eval -- --live             # 先用真实模型为每个样例生成行程，再评测（耗 API 费用）
  *   npm run eval -- --case quzhou-3d-couple   # 只评测单个样例
  *   npm run eval -- --strict           # 质量闸门：P0/P1 必须为 0、推荐证据率 ≥ 80%、全部样例有产出
+ *   npm run eval:plans                 # 评测 plans/ 下的真实产出（零生成费用）
+ *   npm run eval:plans -- --diff       # 与最新基线对比：这批行程是变好还是变差
+ *   npm run eval:plans -- --save       # 把本轮指标存成基线（eval/baselines/<时间戳>.json）
  *
  * 报告写入 eval/out/report.json（机器可读）与 eval/out/report.md（可读）。
  * --live 的生成产物在 eval/out/<id>/plans/ 下，可提交/对比多次运行的差异。
@@ -43,12 +55,19 @@ interface CaseResult {
   readonly run: RunMeta | null;
 }
 
+/** 一次评测的输入：金标准样例（path 为 null，按约定去 eval/out 找）或真实产出（path 固定） */
+interface Sample {
+  readonly evalCase: EvalCase;
+  readonly path: string | null;
+}
+
 const STRICT_MIN_EVIDENCE_RATE = 0.8;
 /** live 生成单样例的最大工具轮数（旅行规划全流程较长） */
 const LIVE_MAX_TOOL_ROUNDS = 40;
 
 const root = join(import.meta.dirname, "..", "..");
 const outRoot = join(root, "eval", "out");
+const baselineDir = join(root, "eval", "baselines");
 
 main().catch((error) => {
   console.error(`评测失败: ${error instanceof Error ? error.message : String(error)}`);
@@ -63,38 +82,90 @@ async function main(): Promise<void> {
   }
   const live = args.includes("--live");
   const strict = args.includes("--strict");
+  // 注意：npm script 自带 --plans，所以目录要用 --plans-dir 传，避免 indexOf 命中脚本里的那个开关
+  const plansDir = args.includes("--plans") ? resolve(root, optionalFlagValue(args, "--plans-dir") ?? "plans") : null;
+  if (plansDir !== null && live) {
+    throw new Error("--plans 与 --live 不能同时使用：真实产出是现成的，不需要重新生成");
+  }
   const caseFilter = flagValue(args, "--case");
   const profileFilter = flagValue(args, "--profile");
 
-  const allCases = await loadCases(join(root, "eval", "cases.json"));
-  const cases = caseFilter === undefined
-    ? allCases
-    : allCases.filter((item) => item.id === caseFilter);
-  if (cases.length === 0) {
-    throw new Error(`没有匹配的样例: ${caseFilter ?? "(空)"}（可用: ${allCases.map((item) => item.id).join(", ")}）`);
-  }
+  const samples = filterSamples(
+    plansDir === null
+      ? (await loadCases(join(root, "eval", "cases.json"))).map((evalCase): Sample => ({ evalCase, path: null }))
+      : await loadPlanSamples(plansDir),
+    caseFilter,
+  );
 
   const liveContext = live ? await prepareLiveContext(profileFilter) : null;
 
-  console.log(`\nminicode 行程评测 · ${new Date().toLocaleString("zh-CN")} · 共 ${cases.length} 个样例${live ? " · live 生成" : ""}\n`);
+  const scope = plansDir === null
+    ? `共 ${samples.length} 个样例${live ? " · live 生成" : ""}`
+    : `真实产出 ${relative(root, plansDir)} · 共 ${samples.length} 份 · 仅离线重评`;
+  console.log(`\nminicode 行程评测 · ${new Date().toLocaleString("zh-CN")} · ${scope}\n`);
 
   const results: CaseResult[] = [];
-  for (const evalCase of cases) {
-    const result = live && liveContext !== null
-      ? await runLiveCase(evalCase, liveContext)
-      : await runOfflineCase(evalCase);
+  for (const sample of samples) {
+    const result = sample.path !== null
+      ? await evaluateFile(sample.evalCase, sample.path, null)
+      : live && liveContext !== null
+        ? await runLiveCase(sample.evalCase, liveContext)
+        : await runOfflineCase(sample.evalCase);
     results.push(result);
     printCaseResult(result);
   }
 
+  const reportBase = join(outRoot, plansDir === null ? "report" : "plans-report");
+  const mode = plansDir === null ? (live ? "live" : "cases") : "plans";
   const summary = summarize(results);
-  printSummary(summary);
-  await writeReports(results, summary, liveContext?.providerName ?? null);
+  printSummary(summary, reportBase);
+  await writeReports(results, summary, liveContext?.providerName ?? null, reportBase);
+  await reportAgainstBaseline(args, results, mode);
 
   if (strict && summary.strictFailures.length > 0) {
     console.error(`\nstrict 闸门未通过: ${summary.strictFailures.join("；")}\n`);
     process.exitCode = 1;
   }
+}
+
+function filterSamples(samples: readonly Sample[], caseFilter: string | undefined): Sample[] {
+  if (caseFilter === undefined) return [...samples];
+  const matched = samples.filter((sample) => sample.evalCase.id === caseFilter);
+  if (matched.length === 0) {
+    throw new Error(`没有匹配的样例: ${caseFilter}（可用: ${samples.map((sample) => sample.evalCase.id).join(", ")}）`);
+  }
+  return matched;
+}
+
+/** --diff 与最新/指定基线对比，--save 把本轮指标存成基线；两者都没给就提示用法 */
+async function reportAgainstBaseline(
+  args: readonly string[],
+  results: readonly CaseResult[],
+  mode: string,
+): Promise<void> {
+  if (!args.includes("--diff") && !args.includes("--save")) {
+    console.log("提示: 加 --diff 与最新基线对比，加 --save 把本轮存成基线\n");
+    return;
+  }
+  const baseline = baselineFromResults(
+    results.map((result) => ({ id: result.evalCase.id, title: result.evalCase.title, metrics: result.metrics })),
+    mode,
+  );
+  const diffName = optionalFlagValue(args, "--diff");
+  if (args.includes("--diff")) {
+    const path = diffName === undefined ? await latestBaseline(baselineDir) : join(baselineDir, `${diffName}.json`);
+    console.log(renderBaselineDiff(diffBaselines(await loadBaseline(path), baseline), relative(root, path)).join("\n"));
+  }
+  if (args.includes("--save")) {
+    const path = join(baselineDir, `${optionalFlagValue(args, "--save") ?? timestampName(new Date())}.json`);
+    await saveBaseline(path, baseline);
+    console.log(`基线已保存: ${relative(root, path)}\n`);
+  }
+}
+
+function timestampName(now: Date): string {
+  const pad = (value: number): string => String(value).padStart(2, "0");
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -323,7 +394,7 @@ function printCaseResult(result: CaseResult): void {
   console.log("");
 }
 
-function printSummary(summary: Summary): void {
+function printSummary(summary: Summary, reportBase: string): void {
   console.log("————————————————————————————————————");
   console.log(
     `样例 ${summary.evaluated + summary.missing} · 已评测 ${summary.evaluated} · 缺失 ${summary.missing}` +
@@ -331,7 +402,7 @@ function printSummary(summary: Summary): void {
     ` · P0 ${summary.totalIssues.P0} / P1 ${summary.totalIssues.P1} / P2 ${summary.totalIssues.P2}` +
     ` · 推荐证据率 ${(summary.avgEvidenceRate * 100).toFixed(0)}%`,
   );
-  console.log(`报告: eval/out/report.md · eval/out/report.json`);
+  console.log(`报告: ${relative(root, reportBase)}.md · ${relative(root, reportBase)}.json`);
   console.log("");
 }
 
@@ -339,6 +410,7 @@ async function writeReports(
   results: readonly CaseResult[],
   summary: Summary,
   providerName: string | null,
+  reportBase: string,
 ): Promise<void> {
   await mkdir(outRoot, { recursive: true });
   const generatedAt = new Date().toISOString();
@@ -355,7 +427,7 @@ async function writeReports(
       metrics: result.metrics,
     })),
   };
-  await writeFile(join(outRoot, "report.json"), JSON.stringify(json, null, 2), "utf8");
+  await writeFile(`${reportBase}.json`, JSON.stringify(json, null, 2), "utf8");
 
   const lines: string[] = [
     `# 行程质量评测报告`,
@@ -383,13 +455,20 @@ async function writeReports(
     lines.push(`## ${result.evalCase.id} · ${result.evalCase.title}`, "");
     lines.push(`问题码: ${result.metrics.issueCodes.join(", ") || "（无）"}`, "");
   }
-  await writeFile(join(outRoot, "report.md"), lines.join("\n"), "utf8");
+  await writeFile(`${reportBase}.md`, lines.join("\n"), "utf8");
 }
 
 function flagValue(args: readonly string[], flag: string): string | undefined {
   const index = args.indexOf(flag);
   if (index < 0) return undefined;
   return args[index + 1];
+}
+
+/** 可选参数：`--flag` 后面没跟值（或紧跟另一个 flag）时返回 undefined */
+function optionalFlagValue(args: readonly string[], flag: string): string | undefined {
+  const value = flagValue(args, flag);
+  if (value === undefined || value.startsWith("--")) return undefined;
+  return value;
 }
 
 function helpText(): string {
@@ -401,5 +480,10 @@ function helpText(): string {
     "  npm run eval -- --case <id>           只评测单个样例",
     "  npm run eval -- --profile <id>        live 模式指定模型配置（models.json 的 id）",
     "  npm run eval -- --strict              质量闸门：P0/P1=0、证据率≥80%、全部有产出",
+    "",
+    "  npm run eval:plans                    评测 plans/ 下的真实产出（零生成费用）",
+    "  npm run eval:plans -- --plans-dir <dir>   评测指定目录下的行程文件",
+    "  npm run eval:plans -- --diff [name]   与最新（或指定）基线对比",
+    "  npm run eval:plans -- --save [name]   把本轮指标存成基线，缺省用时间戳命名",
   ].join("\n");
 }
