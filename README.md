@@ -1,5 +1,8 @@
 # minicode
 
+[![CI](https://github.com/Void11-16/minicode/actions/workflows/ci.yml/badge.svg)](https://github.com/Void11-16/minicode/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 一个零运行时依赖、无构建步骤的 AI Agent 实现：使用 Node.js 原生 TypeScript，提供 CLI 与 Web 双端、24 个内置工具、MCP Server，以及可开关的旅行规划能力。
 
 旅行规划不是唯一的定位，但它是当前最完整的垂直场景：从需求单、真实数据取数、逐日排程，到坐标核验、通勤复核、质量闸门、地图编辑和离线评测，形成了一条可验证的闭环。
@@ -11,8 +14,8 @@
 - 38 个测试文件、312 个测试用例
 - 6 份真实行程产出纳入离线质量基线
 - Web 端支持多会话、流式输出、地图、行程编辑与旅行者档案
-- 尚未配置 CI；推送前需要在本地执行 lint、typecheck 和测试
-- 尚未声明 LICENSE，默认版权保留
+- GitHub Actions CI 覆盖 Node.js 22.18 与 24，自动执行 lint、typecheck 和测试
+- 使用 [MIT License](LICENSE) 开源
 
 ## 快速开始
 
@@ -270,6 +273,6 @@ npm test
 npm run eval:plans -- --diff
 ```
 
-本次工作区状态：lint、typecheck 通过，312/312 测试通过，离线基线对比无回归。
+前三项由 GitHub Actions 在 Node.js 22.18 和 24 上自动执行。离线基线对比依赖本地 `plans/` 中的真实行程，不属于 CI 的必跑项。
 
-当前仓库没有 CI，因此 push 不会自动触发这些检查；当前仓库也没有 LICENSE，默认保留所有权利。若准备接受外部复用，应单独选择并添加许可证。
+贡献流程、提交规范和数据安全要求见 [CONTRIBUTING.md](CONTRIBUTING.md)。
