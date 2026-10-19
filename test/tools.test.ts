@@ -10,9 +10,7 @@ import {
 import { geocodeLocation } from "../src/tools/geocoding.ts";
 import { createWeatherTool } from "../src/tools/weather.ts";
 import { createStayTool } from "../src/tools/stay.ts";
-import { mkdtemp, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+
 
 function jsonResponse(body: unknown): Response {
   return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
@@ -71,8 +69,10 @@ test("geocode 工具: 返回多个候选（Photon）", async () => {
   const tool = createGeocodeTool(fetchFn);
   const output = await tool.execute({ location: "西湖" });
   assert.match(output, /「西湖」的 2 个候选/);
-  assert.match(output, /1\. 西湖 \(ZJ, 中国\) — 30\.2460, 120\.1431/);
-  assert.match(output, /2\. 西湖 \(山梨県, 日本\) — 35\.4985, 138\.6854/);
+  assert.match(output, /1\. 西湖 \(ZJ 杭州市, 中国\) — 30\.2460, 120\.1431/);
+  assert.match(output, /2\. 西湖 \(山梨県富士河口湖町, 日本\) — 35\.4985, 138\.6854/);
+  // 不传 city 时明确警告未做城市校验（外地同名地点风险）
+  assert.match(output, /未做城市校验/);
 });
 
 test("geocodeLocation: Photon 失败时降级到 Open-Meteo", async () => {
@@ -122,7 +122,7 @@ test("reverse_geocode 工具: 坐标转地名", async () => {
   }) as typeof fetch;
 
   const tool = createReverseGeocodeTool(fetchFn);
-  assert.match(await tool.execute({ latitude: 30.246, longitude: 120.1431 }), /西湖 \(ZJ, 中国\)/);
+  assert.match(await tool.execute({ latitude: 30.246, longitude: 120.1431 }), /西湖 \(ZJ 杭州市, 中国\)/);
 });
 
 test("geocode 工具: 所有后端都无结果时返回提示", async () => {
@@ -175,7 +175,7 @@ test("search_stays 工具: 返回真实住宿数据（geocode + Overpass）", as
     if (u.includes("geocoding-api")) {
       return jsonResponse({ results: [{ name: "杭州", latitude: 30.27, longitude: 120.15, country: "中国" }] });
     }
-    if (u.includes("overpass-api.de")) {
+    if (u.includes("/api/interpreter")) {
       const headers = init?.headers as Record<string, string>;
       assert.match(headers["User-Agent"], /minicode/);
       assert.match(String(init?.body), /tourism~.*hotel/);
@@ -195,7 +195,7 @@ test("search_stays 工具: 返回真实住宿数据（geocode + Overpass）", as
   const output = await tool.execute({ city: "杭州" });
 
   assert.match(output, /杭州 的真实住宿/);
-  assert.match(output, /杭州君悦酒店 \| 酒店 \| 距市中心 \d+\.\d 公里 \| 5星 \| 电话 0571-87888888/);
+  assert.match(output, /杭州君悦酒店 \| 酒店 \| 距市中心 \d+\.\d 公里 \| 坐标 30\.2800,120\.1600 \| 5星 \| 电话 0571-87888888/);
   assert.match(output, /西湖边青旅 \| 青旅/);
   assert.match(output, /湖畔民宿 \| 民宿/);
   assert.match(output, /example\.com/);

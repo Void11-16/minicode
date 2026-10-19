@@ -192,6 +192,50 @@ test("validate_itinerary: 完整行程通过核验", () => {
   assert.deepEqual(report.issue_count, { P0: 0, P1: 0, P2: 0 });
 });
 
+test("validate_itinerary: note 标记「坐标待核实」的条目按待核实提示，不催生补坐标", () => {
+  const base = {
+    title: "衢州一日",
+    days: [
+      {
+        date: "2026-10-02",
+        items: [
+          {
+            id: "v1",
+            time: "09:00",
+            end_time: "11:00",
+            type: "visit",
+            name: "杜立特行动纪念馆",
+            source: "amap",
+            confidence: "medium",
+          },
+        ],
+      },
+    ],
+  };
+
+  // 无 location + note 已标记 → unverified-coordinates（说明不参与空间核验）
+  const marked = validateItinerary(parseItinerary({
+    ...base,
+    days: [{ date: "2026-10-02", items: [{ ...base.days[0].items[0], note: "坐标待核实：geocode 未能通过省市校验" }] }],
+  }));
+  const markedCodes = marked.issues.map((item) => item.code);
+  assert.ok(markedCodes.includes("unverified-coordinates"));
+  assert.ok(!markedCodes.includes("missing-location"));
+  assert.ok(!markedCodes.includes("missing-coordinates"));
+  assert.match(renderQualityReport(marked), /不参与地图打点与顺路核验/);
+
+  // 未标记 → 仍按缺少 location 报，督促模型先去核实
+  const unmarkedCodes = validateItinerary(parseItinerary(base)).issues.map((item) => item.code);
+  assert.ok(unmarkedCodes.includes("missing-location"));
+
+  // 有 location 壳但没有坐标 + 已标记 → 同样按待核实处理
+  const shell = validateItinerary(parseItinerary({
+    ...base,
+    days: [{ date: "2026-10-02", items: [{ ...base.days[0].items[0], note: "坐标待核实", location: { source: "amap" } }] }],
+  }));
+  assert.ok(shell.issues.map((item) => item.code).includes("unverified-coordinates"));
+});
+
 test("validate_itinerary: 发现时间冲突、餐段、交通与预算问题", () => {
   const itinerary = parseItinerary({
     title: "问题行程",

@@ -270,11 +270,21 @@ function validateItem(item: ItineraryItem, dayNumber: number, weekday: string | 
   if (weekday !== undefined && item.closed_on?.includes(weekday)) {
     issues.push(issue("P0", "closed-on-date", `${item.name} 在${weekdayLabel(weekday)}闭馆/闭店`, dayNumber, item.id, meal));
   }
-  if ((item.type === "visit" || item.type === "meal") && item.location === undefined) {
-    issues.push(issue("P2", "missing-location", `${item.name} 缺少 location，无法做空间核验`, dayNumber, item.id, meal));
-  }
-  if (item.location !== undefined && (item.location.latitude === undefined || item.location.longitude === undefined)) {
-    issues.push(issue("P2", "missing-coordinates", `${item.name} 缺少经纬度，无法计算顺路程度`, dayNumber, item.id, meal));
+  const hasCoordinates =
+    item.location?.latitude !== undefined && item.location.longitude !== undefined;
+  if (!hasCoordinates && (item.type === "visit" || item.type === "meal" || item.location !== undefined)) {
+    // note 里已标记「坐标待核实」的条目是有意不带坐标，不是遗漏：
+    // 提示不参与空间核验即可，避免模型为了消 P2 而编造坐标
+    const marked = item.note?.includes("坐标待核实") === true;
+    if (marked) {
+      issues.push(issue("P2", "unverified-coordinates", `${item.name} 坐标待核实（note 已标记）：不参与地图打点与顺路核验`, dayNumber, item.id, meal));
+    } else {
+      issues.push(
+        item.location === undefined
+          ? issue("P2", "missing-location", `${item.name} 缺少 location，无法做空间核验`, dayNumber, item.id, meal)
+          : issue("P2", "missing-coordinates", `${item.name} 缺少经纬度，无法计算顺路程度`, dayNumber, item.id, meal),
+      );
+    }
   }
   if (item.source === undefined) {
     issues.push(issue("P2", "missing-source", `${item.name} 缺少数据来源`, dayNumber, item.id, meal));

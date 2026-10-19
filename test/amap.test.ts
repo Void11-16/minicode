@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { AmapClient } from "../src/tools/amap.ts";
+import { AmapClient, formatPoiCoordinates } from "../src/tools/amap.ts";
 import { setAmapKey, getAmapClient } from "../src/tools/amap-access.ts";
-import { geocodeLocation } from "../src/tools/geocoding.ts";
+import { geocodeInCity, geocodeLocation, regionMatchesCity } from "../src/tools/geocoding.ts";
+import { createGeocodeTool } from "../src/tools/geo.ts";
 import { createAttractionsTool } from "../src/tools/attractions.ts";
 import { createStayTool } from "../src/tools/stay.ts";
 
@@ -245,26 +246,169 @@ test("AmapClient: 公交路径规划解析推荐方案", async () => {
   assert.equal(requests[0].searchParams.get("origin"), "120.155,30.25");
 });
 
-test("AmapClient: poiSearchByName 城市内解析地标", async () => {
+test("AmapClient: poiSearchInCity 返回城市内 POI 候选（含省市字段）", async () => {
   const requests: URL[] = [];
   const fetchFn = amapOnlyFetch((url) => {
     requests.push(url);
     return amapResponse({
       pois: [
-        { id: "p1", name: "重庆市合川区灵隐寺", location: "106.2,29.9" },
-        { id: "p2", name: "灵隐寺", location: "120.096,30.240" },
+        { id: "p1", name: "灵隐寺停车场", location: "120.100,30.240", pname: "浙江省", cityname: "杭州市", adname: "西湖区" },
+        { id: "p2", name: "灵隐寺", location: "120.096,30.240", pname: "浙江省", cityname: "杭州市", adname: "西湖区" },
+        { id: "p3", name: "无坐标条目", location: "" },
       ],
     });
   });
   const client = new AmapClient({ apiKey: "k", fetchFn });
 
-  const poi = await client.poiSearchByName("灵隐寺", "杭州");
+  const pois = await client.poiSearchInCity("灵隐寺", "杭州");
 
-  assert.ok(poi !== null);
-  assert.equal(poi.name, "重庆市合川区灵隐寺"); // API 排序，取首个
-  assert.equal(poi.latitude, 29.9);
+  // 无坐标的条目（高德的泛化结果）被过滤，候选保持 API 顺序供上层校验
+  assert.deepEqual(pois.map((poi) => poi.name), ["灵隐寺停车场", "灵隐寺"]);
+  assert.equal(pois[1].cityname, "杭州市");
   assert.equal(requests[0].searchParams.get("city"), "杭州");
   assert.equal(requests[0].searchParams.get("keywords"), "灵隐寺");
+  assert.match(requests[0].pathname, /\/v3\/place\/text/);
+});
+
+test("AmapClient: geocodeAll 返回多个候选（去重截断）", async () => {
+  const requests: URL[] = [];
+  const fetchFn = amapOnlyFetch((url) => {
+    requests.push(url);
+    return amapResponse({
+      geocodes: [
+        { formatted_address: "新疆维吾尔自治区五家渠市", location: "87.5,44.1", province: "新疆维吾尔自治区", city: "五家渠市" },
+        { formatted_address: "新疆维吾尔自治区五家渠市", location: "87.5,44.1", province: "新疆维吾尔自治区", city: "五家渠市" },
+        { formatted_address: "北京市西城区北海公园", location: "116.391802,39.928775", province: "北京市", city: "北京市" },
+      ],
+    });
+  });
+  const client = new AmapClient({ apiKey: "k", fetchFn });
+
+  const results = await client.geocodeAll("北海公园", 3, "北京");
+
+  assert.equal(results.length, 2); // 完全重复的条目被合并
+  assert.equal(results[0].city, "五家渠市");
+  assert.equal(requests[0].searchParams.get("city"), "北京");
+});
+
+test("geocodeInCity: 剔除省市字段对不上的外地同名 POI", async () => {
+  // 实测：灵隐寺@浙江 仍可能返回重庆合川灵隐寺，必须靠 pname/cityname 校验兜底
+  setAmapKey("test-key", amapOnlyFetch(() =>
+    amapResponse({
+      pois: [
+        { id: "c1", name: "灵隐寺", location: "106.265,30.005", pname: "重庆市", cityname: "重庆市", adname: "合川区" },
+        { id: "h1", name: "灵隐寺", location: "120.096,30.240", pname: "浙江省", cityname: "杭州市", adname: "西湖区" },
+      ],
+    }),
+  ));
+
+  const geo = await geocodeInCity("灵隐寺", "杭州");
+
+  assert.ok(geo !== null);
+  assert.equal(geo.longitude, 120.096);
+  assert.equal(geo.latitude, 30.24);
+  assert.equal(geo.admin2, "杭州市");
+  assert.equal(geo.admin3, "西湖区");
+
+  setAmapKey(undefined);
+});
+
+test("geocodeInCity: POI 附属设施排前面时仍选中目的地本体", async () => {
+  // 实测：「水亭门历史文化街区」的首条是「…地下停车点」，降噪后应选中本体
+  setAmapKey("test-key", amapOnlyFetch(() =>
+    amapResponse({
+      pois: [
+        { id: "n1", name: "水亭门历史文化街区地下停车点", location: "118.867,28.962", pname: "浙江省", cityname: "衢州市", adname: "柯城区" },
+        { id: "p1", name: "水亭门历史文化街区", location: "118.867315,28.962062", pname: "浙江省", cityname: "衢州市", adname: "柯城区" },
+      ],
+    }),
+  ));
+
+  const geo = await geocodeInCity("水亭门历史文化街区", "衢州");
+
+  assert.ok(geo !== null);
+  assert.equal(geo.name, "水亭门历史文化街区");
+  assert.equal(geo.longitude, 118.867315);
+
+  setAmapKey(undefined);
+});
+
+test("geocodeInCity: 首个查询词没命中时换词重查（去括号变体）", async () => {
+  const requests: URL[] = [];
+  setAmapKey("test-key", amapOnlyFetch((url) => {
+    requests.push(url);
+    const keywords = url.searchParams.get("keywords");
+    return amapResponse({
+      pois: keywords === "灵隐寺"
+        ? [{ id: "p1", name: "灵隐寺", location: "120.096,30.240", pname: "浙江省", cityname: "杭州市", adname: "西湖区" }]
+        : [],
+    });
+  }));
+
+  const geo = await geocodeInCity("灵隐寺（飞来峰景区）", "杭州");
+
+  assert.ok(geo !== null);
+  assert.equal(geo.name, "灵隐寺");
+  assert.equal(requests.length, 2); // 原始词无结果 → 去括号重查
+  assert.equal(requests[1].searchParams.get("keywords"), "灵隐寺");
+
+  setAmapKey(undefined);
+});
+
+test("regionMatchesCity: 行政区后缀归一化", () => {
+  assert.equal(regionMatchesCity("北京市", "北京"), true);
+  assert.equal(regionMatchesCity("西双版纳傣族自治州", "西双版纳"), true);
+  assert.equal(regionMatchesCity("杭州市", "浙江"), false);
+  assert.equal(regionMatchesCity(undefined, "北京"), false);
+  assert.equal(regionMatchesCity("", "北京"), false);
+});
+
+test("formatPoiCoordinates: 高德 lng,lat 转行程用「纬度,经度」", () => {
+  assert.equal(formatPoiCoordinates("120.096,30.240"), "30.2400,120.0960");
+  assert.equal(formatPoiCoordinates("bad"), null);
+});
+
+test("geocode 工具: 传 city 核实成功时给出可写入行程的坐标", async () => {
+  setAmapKey("test-key", amapOnlyFetch(() =>
+    amapResponse({
+      pois: [
+        { id: "p1", name: "北海公园", location: "116.391802,39.928775", pname: "北京市", cityname: "北京市", adname: "西城区" },
+      ],
+    }),
+  ));
+
+  const tool = createGeocodeTool(amapOnlyFetch(() => amapResponse({})));
+  const output = await tool.execute({ location: "北海公园", city: "北京" });
+
+  assert.match(output, /坐标已核实（目标城市 北京）：北海公园（北京市西城区）/);
+  assert.match(output, /纬度 39\.9288, 经度 116\.3918/);
+
+  setAmapKey(undefined);
+});
+
+test("geocode 工具: 传 city 核实不了时给出重查路径，不返回坐标", async () => {
+  setAmapKey("test-key", amapOnlyFetch((url) => {
+    if (url.pathname.includes("place")) {
+      // 只有外地同名 POI，省市校验不通过
+      return amapResponse({
+        pois: [{ id: "x", name: "不存在的地名", location: "87.5,44.1", pname: "新疆维吾尔自治区", cityname: "五家渠市", adname: "" }],
+      });
+    }
+    return amapResponse({ geocodes: [] });
+  }));
+
+  const tool = createGeocodeTool(amapOnlyFetch(() => amapResponse({})));
+  const output = await tool.execute({ location: "不存在的地名", city: "杭州" });
+
+  assert.match(output, /未能在「杭州」核实「不存在的地名」/);
+  assert.match(output, /北京市西城区北海公园/); // 换词重查示例
+  assert.match(output, /坐标待核实/);
+  assert.doesNotMatch(output, /纬度 -?\d/); // 不给出未核实的坐标
+
+  // geocodeLocation 传 city 时同样宁缺毋滥：核实不了返回 null
+  assert.equal(await geocodeLocation("不存在的地名", amapOnlyFetch(() => amapResponse({})), "杭州"), null);
+
+  setAmapKey(undefined);
 });
 
 test("geocodeLocation: 高德主源 + Photon 兜底", async () => {

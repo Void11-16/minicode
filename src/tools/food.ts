@@ -1,7 +1,7 @@
 import type { Tool } from "./tool.ts";
 import { requireString } from "./tool.ts";
 import { haversineKm } from "./geo.ts";
-import { geocodeLocation, type GeoResult } from "./geocoding.ts";
+import { geocodeLocation, regionLabel, type GeoResult } from "./geocoding.ts";
 import { getAmapClient } from "./amap-access.ts";
 import type { AmapPoi } from "./amap.ts";
 
@@ -11,6 +11,8 @@ interface FoodInfo {
   readonly name: string;
   readonly cuisine: string;
   readonly distanceKm: number;
+  readonly latitude: number;
+  readonly longitude: number;
   readonly rating?: number;
   readonly avgCost?: number;
   readonly address?: string;
@@ -79,7 +81,7 @@ export function createFoodTool(fetchFn: FetchLike = fetch): Tool {
     name: "search_restaurants",
     description:
       "按多因子综合分搜索地点附近的餐厅（评分40% + 就近30% + 价格契合20% + 本地特色10%），" +
-      "返回评分、人均、距离、菜系、本地特色标记与综合分。规划三餐时：中心传当期景点/住宿名（不是城市名），" +
+      "返回评分、人均、距离、菜系、本地特色标记、坐标（纬度,经度，可直接写入行程 location）与综合分。规划三餐时：中心传当期景点/住宿名（不是城市名），" +
       "中心是景点名时配合 region 传所在城市（消歧，避免命中外地同名地点）；" +
       "radius_km 建议 2-3；用户预算传 max_cost；当天已吃过的菜系传 avoid_cuisines 避免重复；" +
       "默认只保留评分≥4.2 的餐厅（高分管不够时自动放宽）。口碑细节（招牌菜/排队）再对具体餐厅调 get_place_reviews。",
@@ -191,6 +193,7 @@ export function createFoodTool(fetchFn: FetchLike = fetch): Tool {
         if (f.rating !== undefined) parts.push(`评分 ${f.rating.toFixed(1)}`);
         if (f.avgCost !== undefined) parts.push(`人均 ¥${f.avgCost}`);
         parts.push(`距离 ${f.distanceKm.toFixed(1)} 公里`);
+        parts.push(`坐标 ${f.latitude.toFixed(4)},${f.longitude.toFixed(4)}`);
         if (f.address !== undefined && f.address !== "") parts.push(f.address);
         return parts.join(" | ");
       });
@@ -236,6 +239,8 @@ function toFood(poi: AmapPoi, center: GeoResult, localHints: readonly string[]):
     name: poi.name,
     cuisine,
     distanceKm: haversineKm(center.latitude, center.longitude, poiLocation[1], poiLocation[0]),
+    latitude: poiLocation[1],
+    longitude: poiLocation[0],
     rating: rating !== undefined && !Number.isNaN(rating) ? rating : undefined,
     avgCost: avgCost !== undefined && !Number.isNaN(avgCost) && avgCost > 0 ? avgCost : undefined,
     address: poi.address,
@@ -274,7 +279,7 @@ function priceFit(cost: number | undefined, maxCost: number | undefined): number
 
 /** 从地理编码结果提取省市级 token，映射出"本地菜系"关键词集合 */
 function localHintsFor(geo: GeoResult): string[] {
-  const region = `${geo.admin1 ?? ""} ${geo.name}`;
+  const region = `${regionLabel(geo)} ${geo.name}`;
   const tokens = region
     .replace(/(维吾尔|壮族自治区|回族|自治区|特别行政区|省|市|区|县|自治州)/g, " ")
     .split(/\s+/)
