@@ -23,7 +23,7 @@ test("未超阈值时不压缩", async () => {
   const summarized: Message[][] = [];
   const manager = new ContextEpochManager({
     maxPromptTokens: 100_000,
-    summarize: async (messages) => {
+    summarize: async (_session, messages) => {
       summarized.push([...messages]);
       return "摘要";
     },
@@ -43,7 +43,7 @@ test("超阈值时压缩: 摘要 + 保留近期 + 纪元 +1 + 持久化", async 
   const manager = new ContextEpochManager({
     maxPromptTokens: 500, // 强制触发
     keepRecent: 6,
-    summarize: async (messages) => {
+    summarize: async (_session, messages) => {
       received = messages;
       return "这是压缩摘要：用户计划去杭州，偏好文化景点。";
     },
@@ -70,6 +70,29 @@ test("超阈值时压缩: 摘要 + 保留近期 + 纪元 +1 + 持久化", async 
   // 纪元随会话持久化
   const restored = Session.fromData(session.toData());
   assert.equal(restored.epoch, 1);
+});
+
+test("摘要器收到的是被压缩的会话本身（多会话并发时不能借当前选中会话）", async () => {
+  const background = makeHistory(10); // 后台被压缩的会话
+  const untouched = new Session("sess_untouched");
+  untouched.add("user", "别的会话消息");
+
+  const seen: Session[] = [];
+  const manager = new ContextEpochManager({
+    maxPromptTokens: 500,
+    keepRecent: 6,
+    summarize: async (session) => {
+      seen.push(session);
+      return "摘要";
+    },
+  });
+
+  await manager.maybeCompact(background);
+
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0], background, "摘要用的必须是正在压缩的那个会话");
+  assert.equal(background.epoch, 1);
+  assert.equal(untouched.epoch, 0);
 });
 
 test("历史条数不足 keepRecent 时不压缩（即使 token 超限）", async () => {

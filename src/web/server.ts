@@ -12,7 +12,6 @@ import { ModelProfileStore, newProfileId, type ModelProfile } from "../config/mo
 import { JsonFileSessionStore } from "../storage/session-store.ts";
 import { SessionService } from "../service/session-service.ts";
 import { createDefaultRegistry } from "../tools/all.ts";
-import { ToolRegistry } from "../tools/tool.ts";
 import { AgentRuntime } from "../runtime/runtime.ts";
 import type { AgentRuntimeOptions } from "../runtime/runtime.ts";
 import { getAmapClient, setAmapKey } from "../tools/amap-access.ts";
@@ -139,8 +138,9 @@ export async function startWebServer(options: WebServerOptions = {}): Promise<Ru
     );
     return task;
   }
-  const summarize = (messages: readonly Message[]): Promise<string> =>
-    sessionProvider(currentSession).chat([
+  // 摘要走被压缩会话自己的 Provider：后台会话触发压缩时不能借当前选中会话的模型
+  const summarize = (session: Session, messages: readonly Message[]): Promise<string> =>
+    sessionProvider(session).chat([
       {
         role: "user",
         content: `请把以下对话历史压缩成要点摘要（保留关键事实、决策、用户偏好、日期和数字），直接输出摘要本身：\n\n${messages

@@ -15,8 +15,12 @@ export interface EpochOptions {
   readonly maxPromptTokens?: number;
   /** 压缩时保留最近 N 条消息不压缩，默认 8 */
   readonly keepRecent?: number;
-  /** 摘要器：把旧消息压缩成一段文字（通常由 LLM 完成） */
-  readonly summarize: (messages: readonly Message[]) => Promise<string>;
+  /**
+   * 摘要器：把旧消息压缩成一段文字（通常由 LLM 完成）。
+   * 必须带上被压缩的 session —— 后台会话压缩时要用它自己的模型配置，
+   * 不能退化成"当前选中会话"（profile/key 不同会压缩失败甚至用错模型）。
+   */
+  readonly summarize: (session: Session, messages: readonly Message[]) => Promise<string>;
   /**
    * 压缩前归档回调：在历史被替换前保存原始会话。
    * 归档失败会中止压缩（数据安全优先，宁可不做压缩也不丢数据）。
@@ -92,7 +96,7 @@ export class ContextEpochManager {
       await this.archive(session, nextEpoch);
     }
 
-    const summary = await this.summarize(oldMessages);
+    const summary = await this.summarize(session, oldMessages);
     const summaryMessage = createMessage(
       "system",
       `【上下文摘要 | 第 ${nextEpoch} 纪元】以下是对本会话较早对话的压缩摘要，代替原始消息：\n${summary}`,

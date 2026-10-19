@@ -18,8 +18,8 @@ const MAX_BUDGET_EXTENSIONS = 2;
 const ROUND_LIMIT_CEILING = 90;
 
 export interface AgentRuntimeOptions {
-  /** 上下文压缩用的摘要器（通常走 LLM） */
-  readonly summarize: (messages: readonly Message[]) => Promise<string>;
+  /** 上下文压缩用的摘要器（通常走 LLM）；session 是被压缩的会话，用于选对模型 */
+  readonly summarize: (session: Session, messages: readonly Message[]) => Promise<string>;
   readonly maxPromptTokens?: number;
   readonly keepRecent?: number;
   /**

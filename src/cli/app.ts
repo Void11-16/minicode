@@ -7,7 +7,7 @@ import { createProvider, createProviderFromProfile } from "../llm/factory.ts";
 import type { ChatProvider } from "../llm/provider.ts";
 import { JsonFileSessionStore } from "../storage/session-store.ts";
 import { ConfigStore, type AppConfig } from "../config/config.ts";
-import { ModelProfileStore, newProfileId, type ModelProfile } from "../config/models.ts";
+import { ModelProfileStore, type ModelProfile } from "../config/models.ts";
 import { createDefaultRegistry } from "../tools/all.ts";
 import { ToolRegistry } from "../tools/tool.ts";
 import { estimateCostYuan, formatUsage, isOverBudget } from "../core/usage.ts";
@@ -21,7 +21,7 @@ import { debugLog } from "../util/logger.ts";
 import { setAmapKey } from "../tools/amap-access.ts";
 import { briefForSessionTitle, toolRoundsForBrief } from "../tools/brief.ts";
 import { createPermissionMemory, decidePermission, permissionModeOf } from "../service/permission-policy.ts";
-import type { ApprovalMode, PermissionMemory } from "../service/permission-policy.ts";
+import type { PermissionMemory } from "../service/permission-policy.ts";
 import { appendFile, mkdir } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 
@@ -143,13 +143,13 @@ export class CliApp {
     this.switchSession(this.currentAgent().session);
   }
 
-  summarizeForCompact = async (messages: readonly Message[]): Promise<string> => {
+  // 摘要走被压缩会话自己的 Provider：后台会话触发压缩时不能借当前选中会话的模型
+  summarizeForCompact = async (session: Session, messages: readonly Message[]): Promise<string> => {
     const transcript = messages
       .map((m) => `[${m.role}] ${m.content}`)
       .join("\n")
       .slice(0, 20_000);
-    const session = this.runtime.getAgent(this.currentSessionId)?.session;
-    return (session === undefined ? this.provider : this.providerForSession(session)).chat([
+    return this.providerForSession(session).chat([
       { role: "user", content: `请把以下对话历史压缩成要点摘要（保留关键事实、决策、用户偏好、日期和数字），直接输出摘要本身：\n\n${transcript}` },
     ]);
   };

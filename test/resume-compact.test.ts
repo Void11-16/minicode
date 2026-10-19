@@ -30,7 +30,7 @@ test("压缩机制: 长会话压缩为摘要+最近消息，压缩结果可持�
   const manager = new ContextEpochManager({
     maxPromptTokens: resumeMaxTokens,
     keepRecent: 8,
-    summarize: async (messages) => {
+    summarize: async (_session, messages) => {
       summarized.push(messages);
       return "用户讨论了杭州和上海的多轮旅行规划，已确定预算和日期。";
     },

@@ -264,6 +264,35 @@ test("checkpoint: 运行时向 Agent 透传安全边界回调（带 sessionId）
   assert.deepEqual(checkpoints, ["sess_cp", "sess_cp"]);
 });
 
+test("上下文压缩: 摘要器收到被压缩的会话（后台会话用自己的模型，而非当前选中会话）", async () => {
+  const provider = new ManualProvider();
+  const compacted: Session[] = [];
+  const runtime = new AgentRuntime({
+    summarize: async (session) => {
+      compacted.push(session);
+      return "摘要";
+    },
+    maxPromptTokens: 100, // 强制触发压缩
+    keepRecent: 2,
+    maxToolRounds: 5,
+  });
+  const session = new Session("sess_compact");
+  session.add("user", "旧问题 " + "细节".repeat(200));
+  session.add("assistant", "旧回答 " + "内容".repeat(200));
+  session.add("user", "最近的问题");
+  session.add("assistant", "最近的回答");
+  runtime.registerAgent("sess_compact", new ChatAgent(session, provider, echoRegistry()));
+
+  const turn = runtime.send("sess_compact", "新问题", "queue");
+  await waitFor(() => provider.pending.length === 1);
+  provider.complete(0, { type: "text", content: "回答" });
+  await turn;
+
+  assert.equal(compacted.length, 1);
+  assert.equal(compacted[0], session, "摘要必须使用被压缩会话自身的模型配置");
+  assert.equal(session.epoch, 1);
+});
+
 test("轮次预算: 按会话动态解析，用尽后自动续期并通知宿主", async () => {
   const provider = new ManualProvider();
   const extended: Array<{ from: number; to: number }> = [];
