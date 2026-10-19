@@ -194,9 +194,12 @@ export class CliApp {
     this.runtime = new AgentRuntime({
       summarize: this.summarizeForCompact,
       archive: (session, epoch) => this.store.archive(session, epoch),
-      // 工具轮次按行程需求动态给：多天行程的搜索/口碑/餐饮/逐日保存+校验远超默认 30 轮
-      maxToolRounds: async (session, input) =>
-        toolRoundsForBrief(await briefForSessionTitle(process.cwd(), `${session.title}\n${input}`), 30),
+      // 工具轮次按行程需求动态给：多天行程的搜索/口碑/餐饮/逐日保存+校验远超默认 30 轮；
+      // 需求单还没落盘的首轮按会话文本里的天数估算
+      maxToolRounds: async (session, input) => {
+        const text = `${session.title}\n${input}`;
+        return toolRoundsForBrief(await briefForSessionTitle(process.cwd(), text), 30, text);
+      },
       onBudgetExtended: (sessionId, info) => {
         if (sessionId !== this.currentSessionId) return;
         console.log(`⚙️ 工具轮次不够用，预算从 ${info.from} 提到 ${info.to} 轮继续（按行程需求自动续期）\n`);

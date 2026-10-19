@@ -175,12 +175,12 @@ export async function startWebServer(options: WebServerOptions = {}): Promise<Ru
     return {
       summarize,
       archive: (session, epoch) => store.archive(session, epoch),
-      // 工具轮次按行程需求动态给：7 天游的搜索+口碑+餐饮+逐日保存+校验远超默认 30 轮
-      maxToolRounds: async (session, input) =>
-        toolRoundsForBrief(
-          await briefForSessionTitle(rootDir, `${session.title}\n${input}`),
-          FALLBACK_TOOL_ROUNDS,
-        ),
+      // 工具轮次按行程需求动态给：7 天游的搜索+口碑+餐饮+逐日保存+校验远超默认 30 轮；
+      // 需求单还没落盘的首轮按会话文本里的天数估算
+      maxToolRounds: async (session, input) => {
+        const text = `${session.title}\n${input}`;
+        return toolRoundsForBrief(await briefForSessionTitle(rootDir, text), FALLBACK_TOOL_ROUNDS, text);
+      },
       onBudgetExtended: (sessionId, info) => {
         write(sessionId, {
           type: "budget",

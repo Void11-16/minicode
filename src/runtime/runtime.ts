@@ -12,10 +12,14 @@ export const STEERED_NOTE = "↪ 已注入当前执行轮";
 
 /** 工具轮次默认预算（未按会话解析时） */
 const DEFAULT_MAX_TOOL_ROUNDS = 30;
-/** 预算用尽后的续期步长与次数上限，以及绝对上限：防止模型无限刷轮次 */
+/**
+ * 预算用尽后的续期步长与次数上限，以及绝对上限（防止模型无限刷轮次）。
+ * 长线行程（10 天以上）逐日搜索+保存+校验实测能用到 80+ 轮，
+ * 所以上限放到 150：真不够时按 +15 续期三次，够用就不再续。
+ */
 const BUDGET_EXTENSION_STEP = 15;
-const MAX_BUDGET_EXTENSIONS = 2;
-const ROUND_LIMIT_CEILING = 90;
+const MAX_BUDGET_EXTENSIONS = 3;
+const ROUND_LIMIT_CEILING = 150;
 
 export interface AgentRuntimeOptions {
   /** 上下文压缩用的摘要器（通常走 LLM）；session 是被压缩的会话，用于选对模型 */
@@ -163,7 +167,7 @@ export class AgentRuntime {
       }
 
       // 工具轮次预算：先按会话需求解析（例如 7 天行程给更多轮），
-      // 用尽后最多再续期两次，每次 +15 轮，绝对上限 90 轮
+      // 用尽后最多再续期三次，每次 +15 轮，绝对上限 150 轮
       const resolvedLimit = await this.resolveRoundLimit(agent.session, input);
       let limit = resolvedLimit;
       let extensions = 0;

@@ -51,7 +51,8 @@ export function createSaveTravelBriefTool(rootDir: string = process.cwd()): Tool
     description:
       "保存旅行需求单（结构化）。用户提供需求文本（模板或自由描述）后，解析成此结构保存，" +
       "并向用户列出解析结果与默认值做一次性确认；后续规划的所有工具参数从需求单取：" +
-      "region/目的地=destination、餐厅 max_cost=budgetPerMealYuan、天气预报天数=行程天数、" +
+      "region/目的地=destination、餐厅 max_cost=budgetPerMealYuan、" +
+      "天气=get_weather 按行程起止日期（start_date/end_date；超 16 天预报范围的部分拿不到）、" +
       "avoid_cuisines=avoid、口味=tastePreferences。用户补充/修改需求时更新保存。",
     parameters: {
       type: "object",
@@ -200,20 +201,63 @@ export function briefDays(brief: TravelBrief): number | undefined {
 
 /**
  * 按需求单换算工具轮次预算：天数越多越费轮次（每天要搜索+口碑+餐饮+保存+校验）。
- * 没有日期时无法估算，返回 fallback；结果夹在 [12, 60]——再多由运行时续期兜底。
+ * 天数取需求单日期与会话文本（「7日游/七天」）里的较大值：需求单还没落盘的首轮也能估准，
+ * 预算是上限不是配额，估宽只会让长行程不至于中途断供。认不出天数返回 fallback。
+ * 结果夹在 [12, 120]——再多由运行时续期兜底。
  */
-export function toolRoundsForBrief(brief: TravelBrief | null, fallback: number): number {
-  if (brief === null) return fallback;
-  const days = briefDays(brief);
-  if (days === undefined) return fallback;
-  const pace = brief.pace ?? "";
-  const notes = brief.notes ?? "";
+export function toolRoundsForBrief(brief: TravelBrief | null, fallback: number, text?: string): number {
+  const fromBrief = brief === null ? undefined : briefDays(brief);
+  const fromText = text === undefined ? undefined : daysFromText(text);
+  if (fromBrief === undefined) {
+    // 需求单没落盘（新会话首轮）：文本估算只用来抬高预算，不该压低默认值
+    return fromText === undefined ? fallback : Math.max(fallback, roundsForDays(fromText, brief));
+  }
+  return roundsForDays(Math.max(fromBrief, fromText ?? 0), brief);
+}
+
+/** 天数 → 轮次：10 轮打底 + 每天 6 轮（搜索/口碑/餐饮/交通/保存/校验），按节奏与其他要求微调 */
+function roundsForDays(days: number, brief: TravelBrief | null): number {
+  const pace = brief?.pace ?? "";
+  const notes = brief?.notes ?? "";
   const budget =
     10 +
     6 * days +
     (pace.includes("紧凑") ? 8 : pace.includes("慢") ? -4 : 0) +
-    (/自驾|包车|远郊|长线|徒步/.test(notes) ? 6 : 0);
-  return Math.max(12, Math.min(60, budget));
+    (/自驾|包车|远郊|长线|徒步/.test(notes) ? 6 : 0) +
+    // 每个必去点都要单独核实坐标/口碑再插进某一天，按 2 轮计，封顶 8
+    Math.min(8, (brief?.mustVisit?.length ?? 0) * 2);
+  return Math.max(12, Math.min(120, budget));
+}
+
+/**
+ * 从会话文本里认出行天数：先认日期区间（「10月20日至10月27日」「10-20 至 10-27」——需求单模板的写法），
+ * 再认天数（「7日游 / 7天 / 七天 / 十日游」）；认不出返回 undefined。
+ */
+function daysFromText(text: string): number | undefined {
+  const range = /(\d{1,2})[月/-](\d{1,2})日?\s*[至到~—–-]\s*(\d{1,2})[月/-](\d{1,2})日?/.exec(text);
+  if (range !== null) {
+    // 跨月按每月 31 天粗算：预算是上限，差一天不影响用途
+    const days = (Number(range[3]) - Number(range[1])) * 31 + Number(range[4]) - Number(range[2]) + 1;
+    if (days >= 1 && days <= 60) return days;
+  }
+  // 「月」后面的数字是日期不是天数（10月20日 ≠ 20 天），用后顾断言排除
+  const match = /(?<![\d月])(\d{1,2}|[一二两三四五六七八九]?十[一二三四五六七八九]?|[一二两三四五六七八九])\s*(?:日|天)/.exec(text);
+  if (match === null) return undefined;
+  const days = /^\d+$/.test(match[1]) ? Number(match[1]) : chineseNumber(match[1]);
+  if (days === undefined || days < 1 || days > 30) return undefined;
+  return days;
+}
+
+const CN_DIGITS: Record<string, number> = { 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+
+/** 中文数字（一~九十九）转阿拉伯数字；「一三」这类无意义组合返回 undefined */
+function chineseNumber(text: string): number | undefined {
+  const match = /^([一二两三四五六七八九]?)(十?)([一二三四五六七八九]?)$/.exec(text);
+  if (match === null) return undefined;
+  const high = match[1] === "" ? undefined : CN_DIGITS[match[1]];
+  const low = match[3] === "" ? undefined : CN_DIGITS[match[3]];
+  if (match[2] === "") return high === undefined || low !== undefined ? undefined : high;
+  return (high ?? 1) * 10 + (low ?? 0);
 }
 
 /** 已保存的需求单，按修改时间从新到旧；损坏或缺少目的地的文件跳过 */
