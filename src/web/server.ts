@@ -155,7 +155,20 @@ export async function startWebServer(options: WebServerOptions = {}): Promise<Ru
   // 用户切走后它就成了"打不开也删不掉"的空会话幽灵（从未落盘，无法恢复）
   const latestMeta = (await store.list())[0];
   let currentSession = latestMeta === undefined ? new Session() : ((await store.load(latestMeta.id)) ?? new Session());
-  let indexHtml = await readFile(join(import.meta.dirname, "index.html"), "utf8");
+  // 前端页面按 mtime 热读：否则改完 index.html 还得重启服务，页面一直用启动那一刻的旧版本
+  const indexPath = join(import.meta.dirname, "index.html");
+  let indexHtml = await readFile(indexPath, "utf8");
+  let indexMtimeMs = (await stat(indexPath)).mtimeMs;
+
+  /** 页面最新内容：文件没改就复用缓存，改了立即生效 */
+  async function currentIndexPage(): Promise<string> {
+    const mtimeMs = (await stat(indexPath).catch(() => null))?.mtimeMs ?? 0;
+    if (mtimeMs !== indexMtimeMs) {
+      indexHtml = await readFile(indexPath, "utf8");
+      indexMtimeMs = mtimeMs;
+    }
+    return indexHtml;
+  }
 
   // 每个会话独立的 SSE 输出流：多会话可并行执行，切换查看不打断后台任务
   const streams = new Map<string, (event: Record<string, unknown>) => void>();
@@ -353,7 +366,7 @@ export async function startWebServer(options: WebServerOptions = {}): Promise<Ru
 
     if ((req.method === "GET" || req.method === "HEAD") && (url.pathname === "/" || url.pathname === "/index.html")) {
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-      res.end(req.method === "HEAD" ? undefined : indexHtml);
+      res.end(req.method === "HEAD" ? undefined : await currentIndexPage());
       return;
     }
     if (req.method === "GET" && url.pathname === "/api/state") {

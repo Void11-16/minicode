@@ -138,12 +138,23 @@
     .msg.ai .content table { border-collapse: collapse; margin: 12px 0; font-size: 14px; }
     .msg.ai .content th, .msg.ai .content td { border: 1px solid var(--border); padding: 7px 12px; text-align: left; }
 
-    .tool { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); background: #f7f9fc; border: 1px solid var(--border); border-radius: 999px; padding: 7px 14px; max-width: 100%; }
+    /* 工具执行与思考计时都放在 steps 区：工具成功即淡出移除，只留思考耗时 */
+    .steps { display: flex; flex-direction: column; align-items: flex-start; }
+    .steps:empty { display: none; }
+    .steps > * { margin-bottom: 10px; }
+    .tool { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); background: #f7f9fc; border: 1px solid var(--border); border-radius: 999px; padding: 7px 14px; max-width: 100%; max-height: 40px; overflow: hidden; transition: opacity .3s ease, transform .3s ease, max-height .3s ease, margin .3s ease, padding .3s ease, border-width .3s ease; }
     .tool .name { color: var(--primary); font-weight: 600; }
     .tool .args { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 380px; }
     .tool.error { color: var(--err); border-color: #fecaca; background: #fef2f2; }
-    .tool .spinner { width: 13px; height: 13px; border: 2px solid #cbd5e1; border-top-color: var(--primary); border-radius: 50%; animation: spin .7s linear infinite; }
+    .tool .check { color: var(--ok); font-weight: 700; }
+    .tool.leaving { opacity: 0; transform: translateY(-3px); max-height: 0; margin-bottom: 0; padding-top: 0; padding-bottom: 0; border-width: 0; }
+    .tool .spinner { width: 13px; height: 13px; border: 2px solid #cbd5e1; border-top-color: var(--primary); border-radius: 50%; animation: spin .7s linear infinite; flex-shrink: 0; }
     @keyframes spin { to { transform: rotate(360deg); } }
+    .thinking { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); background: #f8fafd; border: 1px dashed #dbe3ee; border-radius: 999px; padding: 6px 13px; }
+    .thinking[hidden] { display: none; }
+    .thinking .dot { width: 7px; height: 7px; border-radius: 50%; background: #cbd5e1; flex-shrink: 0; }
+    .thinking.live .dot { background: var(--primary); animation: breathe 1.1s ease-in-out infinite; }
+    @keyframes breathe { 50% { opacity: .2; transform: scale(.7); } }
     .meta { font-size: 12.5px; color: var(--muted); }
     .note { text-align: center; font-size: 13px; color: var(--muted); padding: 4px 0; }
 
@@ -635,7 +646,7 @@
     function addAiCard(view) {
       const wrap = document.createElement("div");
       wrap.className = "msg ai";
-      wrap.innerHTML = `<div class="card"><div class="content"></div></div>`;
+      wrap.innerHTML = `<div class="card"><div class="steps"></div><div class="content"></div></div>`;
       view.appendChild(wrap);
       return wrap;
     }
@@ -647,10 +658,59 @@
       chip.querySelector(".name").textContent = name;
       chip.querySelector(".args").textContent = args ?? "{}";
       const card = view.querySelector(".msg.ai:last-child .card") ?? view.appendChild(addAiCard(view)).querySelector(".card");
-      card.insertBefore(chip, card.querySelector(".content"));
-      card._lastTool = chip;
+      card.querySelector(".steps").appendChild(chip);
       scrollToBottom();
       return chip;
+    }
+
+    /**
+     * 工具收尾：成功打勾后淡出移除（不占聊天空间）；失败/拒绝保留红色 chip 说明原因。
+     * 之前按 `.tool:last-child` 找 spinner，chip 后面跟着 .content 永远不命中，转圈停不下来。
+     */
+    function finishToolChip(chip, error) {
+      if (chip === null) return;
+      chip.querySelector(".spinner")?.remove();
+      if (error !== undefined) {
+        chip.classList.add("error");
+        chip.querySelector(".args").textContent = error;
+        scrollToBottom();
+        return;
+      }
+      const check = document.createElement("span");
+      check.className = "check";
+      check.textContent = "✓";
+      chip.prepend(check);
+      setTimeout(() => {
+        chip.classList.add("leaving");
+        setTimeout(() => chip.remove(), 320);
+      }, 320);
+    }
+
+    /**
+     * 思考计时行：模型开始生成 → 首个 delta 之间算思考，工具执行与等待授权不计入；
+     * 同一张卡片里跨多个工具轮累计，最终定格显示总耗时（不足 0.6s 不显示，避免闪一下）。
+     */
+    function createThinking(card) {
+      const el = document.createElement("div");
+      el.className = "thinking";
+      el.hidden = true;
+      el.innerHTML = `<span class="dot"></span><span class="label"></span>`;
+      card.querySelector(".steps").appendChild(el);
+      const label = el.querySelector(".label");
+      let startedAt = null;
+      let total = 0;
+      const render = () => {
+        const ms = total + (startedAt === null ? 0 : performance.now() - startedAt);
+        el.hidden = startedAt === null && total < 600;
+        el.classList.toggle("live", startedAt !== null);
+        label.textContent = `${startedAt === null ? "思考" : "思考中"} ${(ms / 1000).toFixed(1)}s`;
+      };
+      return {
+        el,
+        start() { if (startedAt !== null) return; startedAt = performance.now(); render(); },
+        stop() { if (startedAt === null) return; total += performance.now() - startedAt; startedAt = null; render(); },
+        tick() { if (startedAt !== null) render(); },
+      };
     }
 
     function addMeta(view, text, cls) {
@@ -692,10 +752,12 @@
             lastWrap.querySelector(".content").innerHTML = renderMarkdown(message.content);
           }
         } else if (message.role === "tool") {
-          const wrap = lastWrap ?? addAiCard(view);
-          lastWrap = wrap;
-          const chip = addToolChip(view, message.toolName ?? "工具", message.content.slice(0, 80));
-          chip.querySelector(".spinner")?.remove();
+          // 成功的工具调用不回放历史（与实时行为一致），只留失败/拒绝，避免刷屏
+          const output = message.content ?? "";
+          if (!output.startsWith("工具执行失败:") && !output.startsWith("用户拒绝授权")) continue;
+          lastWrap = lastWrap ?? addAiCard(view);
+          const chip = addToolChip(view, `⚠ ${message.toolName ?? "工具"}`, output.slice(0, 200));
+          finishToolChip(chip, output.slice(0, 200));
         }
       }
     }
@@ -762,6 +824,7 @@
       if (message === "") return;
       const view = activeView();
       const sid = activeSessionId;
+      view.querySelector(".welcome")?.remove(); // 开聊后不再保留欢迎块
       if (busy) {
         addUserBubble(view, message);
         const res = await fetch(`${API_BASE}/api/chat`, {
@@ -781,8 +844,11 @@
       busy = true;
       updateBusyUI();
       addUserBubble(view, message);
-      const turn = { wrap: addAiCard(view), contentEl: null, raw: "" };
+      const turn = { wrap: addAiCard(view), contentEl: null, raw: "", pending: null };
       turn.contentEl = turn.wrap.querySelector(".content");
+      let thinking = createThinking(turn.wrap.querySelector(".card"));
+      thinking.start();
+      const thinkTicker = setInterval(() => thinking.tick(), 200);
 
       /** 流式结束后把原始 Markdown 渲染为 HTML（期间保持纯文本 + 保留换行） */
       const finalizeTurn = () => {
@@ -793,6 +859,8 @@
 
       const onEvent = (event) => {
         if (event.type === "delta") {
+          if (event.text === "") return;
+          thinking.stop();
           turn.raw += event.text;
           turn.contentEl.classList.add("streaming");
           turn.contentEl.textContent = turn.raw;
@@ -803,28 +871,37 @@
             turn.wrap = addAiCard(view);
             turn.contentEl = turn.wrap.querySelector(".content");
             turn.raw = "";
+            turn.pending = null;
+            thinking = createThinking(turn.wrap.querySelector(".card"));
           }
+          thinking.start();
         } else if (event.type === "reply") {
           if (turn.raw === "") {
+            thinking.stop();
             turn.raw = event.text;
             turn.contentEl.innerHTML = renderMarkdown(event.text);
           }
         } else if (event.type === "done") {
           finalizeTurn();
+          thinking.stop();
         } else if (event.type === "tool_start") {
-          addToolChip(view, `⚡ ${event.name}`, event.arguments);
+          // 工具执行期间不算思考，也不该让"思考中"和工具 spinner 同时转
+          thinking.stop();
+          thinking.el.hidden = true;
+          turn.pending = addToolChip(view, `⚡ ${event.name}`, event.arguments);
         } else if (event.type === "tool_end") {
-          const chip = view.querySelector(".tool:last-child .spinner");
-          chip?.remove();
+          finishToolChip(turn.pending);
+          turn.pending = null;
+          thinking.start();
         } else if (event.type === "tool_error") {
-          const chips = view.querySelectorAll(".tool");
-          const last = chips[chips.length - 1];
-          if (last !== undefined) {
-            last.classList.add("error");
-            last.querySelector(".spinner")?.remove();
-            last.querySelector(".args").textContent = event.error ?? "";
-          }
+          finishToolChip(turn.pending, event.error ?? "工具执行失败");
+          turn.pending = null;
+          thinking.start();
+        } else if (event.type === "tool_denied") {
+          finishToolChip(addToolChip(view, `⛔ ${event.name}`, "用户拒绝执行"), "用户拒绝执行，已跳过该工具");
+          thinking.start();
         } else if (event.type === "permission") {
+          thinking.stop();
           showPermission(view, event);
           refreshSidebar();
         } else if (event.type === "usage") {
@@ -879,6 +956,11 @@
         }
       } finally {
         finalizeTurn(); // 保险：确保任何结束路径都已渲染
+        clearInterval(thinkTicker);
+        thinking.stop();
+        // 流中断时工具不会有 tool_end：直接清掉 pending chip，别把 spinner 留在页面上
+        turn.pending?.remove();
+        turn.pending = null;
         if (sid === activeSessionId) { busy = false; updateBusyUI(); }
         refreshState();
         refreshSidebar();
