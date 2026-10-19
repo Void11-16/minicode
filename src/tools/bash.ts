@@ -75,7 +75,7 @@ export function matchesBashApprovalKey(command: string, key: string): boolean {
 
 /**
  * bash 工具 —— 在工作区执行 shell 命令。
- * - zsh -lc：登录 shell，继承用户 PATH（brew 等安装的工具可用）
+ * - 用户默认 shell -lc：登录 shell，继承用户 PATH（brew 等安装的工具可用）
  * - 只读命令自动放行；其余（含管道/重定向/未知命令）走确认（needsConfirmation）
  * - 中断（/stop）与超时：先 SIGTERM 进程组，3 秒后 SIGKILL 兜底
  */
@@ -83,7 +83,7 @@ export function createBashTool(defaultWorkspace: string = process.cwd()): Tool {
   return {
     name: "bash",
     description:
-      "在工作区执行 shell 命令（zsh 登录 shell，继承用户 PATH），返回退出码与输出。用于跑测试、构建、git 操作、装依赖等。" +
+      "在工作区执行 shell 命令（默认登录 shell，继承用户 PATH），返回退出码与输出。用于跑测试、构建、git 操作、装依赖等。" +
       "只读命令（ls/cat/git status 等）自动放行；含管道/重定向/命令链接的命令与变更类命令会先请求确认。" +
       "需要切换目录时用 `cd dir && cmd` 形式（会请求确认）。输出上限 30KB。",
     parameters: {
@@ -112,7 +112,7 @@ export function createBashTool(defaultWorkspace: string = process.cwd()): Tool {
       );
 
       return await new Promise<string>((resolvePromise) => {
-        const child = spawn("/bin/zsh", ["-lc", command], {
+        const child = spawn(process.env.SHELL ?? "/bin/sh", ["-lc", command], {
           cwd: workspace,
           env: process.env,
           detached: true, // 独立进程组：kill(-pid) 可连同子进程一起终止
