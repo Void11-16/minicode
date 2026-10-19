@@ -33,13 +33,14 @@ function resolveInWorkspace(workspace: string, path: string, allowRoot = false):
 /** glob → RegExp；`**` 匹配任意层级（可为空），`*`/`?` 不跨目录 */
 function globMatches(relPath: string, pattern: string): boolean {
   const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+  // \u0001 / \u0002 是占位哨兵：先把 ** 保护起来，避免被后面的单 * 替换拆散
   const source = escaped
     .replace(/\*\*\//g, "\u0001")
     .replace(/\*\*/g, "\u0002")
     .replace(/\*/g, "[^/]*")
     .replace(/\?/g, "[^/]")
-    .replace(/\u0001/g, "(?:.*/)?")
-    .replace(/\u0002/g, ".*");
+    .replaceAll("\u0001", "(?:.*/)?")
+    .replaceAll("\u0002", ".*");
   const regex = new RegExp(`^${source}$`);
   // 不含 / 的模式按文件名匹配（*.ts 能命中任意层级），含 / 的按工作区相对路径匹配
   return pattern.includes("/") ? regex.test(relPath) : regex.test(relPath.split("/").pop() ?? relPath);

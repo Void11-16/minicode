@@ -77,9 +77,14 @@ export function createPlanRoutesTool(fetchFn: FetchLike = fetch): Tool {
       });
       const totalMin = legs.reduce((sum, leg) => sum + leg.durationMin, 0);
       const longCount = legs.filter((leg) => leg.durationMin > LONG_LEG_MINUTES).length;
+      // 取整后按整体进位换算：41 分钟不能被 Math.round(41/60) 显示成"1 小时"
+      const totalRounded = Math.round(totalMin);
+      const totalLabelValue = totalRounded >= 60
+        ? `${Math.floor(totalRounded / 60)} 小时 ${totalRounded % 60} 分钟`
+        : `${totalRounded} 分钟`;
       const summary = longCount > 0
-        ? `全天通勤合计约 ${Math.round(totalMin / 60)} 小时 ${Math.round(totalMin % 60)} 分钟，其中 ${longCount} 段过长，建议重新排序或调整住宿位置。`
-        : `全天通勤合计约 ${Math.round(totalMin / 60)} 小时 ${Math.round(totalMin % 60)} 分钟，节奏可行。`;
+        ? `全天通勤合计约 ${totalLabelValue}，其中 ${longCount} 段过长，建议重新排序或调整住宿位置。`
+        : `全天通勤合计约 ${totalLabelValue}，节奏可行。`;
 
       return `${city} 行程通勤规划（${stops.length} 个地点，${legs.length} 段）:\n${lines.join("\n")}\n${summary}`;
     },

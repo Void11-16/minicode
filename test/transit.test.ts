@@ -61,6 +61,41 @@ test("plan_day_routes: 公交/地铁逐段规划并标记过长路段", async ()
   setAmapKey(undefined);
 });
 
+test("plan_day_routes: 合计不足 1 小时时只显示分钟（41 分钟不写成 1 小时 41 分钟）", async () => {
+  setAmapKey("test-key", (async (url: string | URL | Request) => {
+    const parsed = url instanceof URL ? url : new URL(String(url));
+    if (parsed.pathname.includes("place/text")) {
+      const keywords = parsed.searchParams.get("keywords") ?? "";
+      return amapResponse({
+        pois: [{ id: "p1", name: keywords, type: "风景名胜", location: GEOCODINGS[keywords] }],
+      });
+    }
+    if (parsed.pathname.includes("transit")) {
+      // 单段 41 分钟：旧实现 Math.round(41/60) 会显示成"1 小时 41 分钟"
+      return amapResponse({
+        route: {
+          transits: [{
+            duration: "2460",
+            walking_distance: "1180",
+            segments: [
+              { walking: { distance: "1180" }, bus: { buslines: [{ name: "衢州古城景区直通车A线" }] } },
+            ],
+          }],
+        },
+      });
+    }
+    return amapResponse({});
+  }) as typeof fetch);
+
+  const output = await createPlanRoutesTool().execute({ stops: ["灵隐寺", "西湖"], city: "杭州" });
+
+  assert.match(output, /公交\/地铁约 41 分钟/);
+  assert.match(output, /全天通勤合计约 41 分钟，节奏可行/);
+  assert.doesNotMatch(output, /1 小时/);
+
+  setAmapKey(undefined);
+});
+
 test("plan_day_routes: 未配置高德时降级 OSRM 驾车", async () => {
   setAmapKey(undefined);
   const fetchFn = (async (url: string | URL) => {
