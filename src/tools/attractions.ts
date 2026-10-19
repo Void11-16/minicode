@@ -2,9 +2,9 @@ import type { Tool } from "./tool.ts";
 import { geocodeLocation, type GeoResult } from "./geocoding.ts";
 import { haversineKm } from "./geo.ts";
 import { requireString } from "./tool.ts";
-import { overpassQuery, type OsmElement } from "./overpass.ts";
+import { overpassFallback, type OsmElement } from "./overpass.ts";
 import { getAmapClient } from "./amap-access.ts";
-import { rankPoisByRating } from "./amap.ts";
+import { formatPoiCoordinates, rankPoisByRating } from "./amap.ts";
 
 type FetchLike = typeof fetch;
 
@@ -21,7 +21,7 @@ export function createAttractionsTool(fetchFn: FetchLike = fetch): Tool {
   return {
     name: "search_attractions",
     description:
-      "搜索某个地点周边的旅游景点和博物馆/纪念馆，返回名称、类型、距离、真实评分（高德数据）。" +
+      "搜索某个地点周边的旅游景点和博物馆/纪念馆，返回名称、类型、距离、真实评分（高德数据）与坐标（纬度,经度，可直接写入行程 location）。" +
       "结果按评分降序排列，同一景区的子景点最多保留 2 个避免淹没列表。" +
       "先用它获取候选景点列表，再用 get_place_reviews 查口碑做筛选。",
     parameters: {
@@ -48,6 +48,7 @@ export function createAttractionsTool(fetchFn: FetchLike = fetch): Tool {
 
       // 高德主源（配置了 Key 时）：国内 POI 全 + 真实评分
       const amap = getAmapClient();
+      let amapError: string | undefined;
       if (amap !== undefined && geo.country === "中国") {
         try {
           // 实测: 高德 POI 的 distance 字段经常为空，用坐标自算
@@ -90,6 +91,8 @@ export function createAttractionsTool(fetchFn: FetchLike = fetch): Tool {
               const parts = [`${index + 1}. ${entry.poi.name}`, entry.poi.type ?? ""];
               parts.push(`距中心 ${entry.distanceKm.toFixed(1)} 公里`);
               if (entry.rating !== undefined) parts.push(`评分 ${entry.rating.toFixed(1)}`);
+              const coords = formatPoiCoordinates(entry.poi.location);
+              if (coords !== null) parts.push(`坐标 ${coords}`);
               if (entry.poi.address !== undefined && entry.poi.address !== "") parts.push(entry.poi.address);
               return parts.filter(Boolean).join(" | ");
             });
@@ -105,8 +108,9 @@ export function createAttractionsTool(fetchFn: FetchLike = fetch): Tool {
               warning
             );
           }
-        } catch {
-          // 高德失败（配额/网络）→ 降级 OSM
+        } catch (error) {
+          // 高德失败（限流/配额/网络）→ 降级 OSM；原因要留给用户看，否则像 OSM 的锅
+          amapError = error instanceof Error ? error.message : String(error);
         }
       }
 
@@ -123,7 +127,7 @@ export function createAttractionsTool(fetchFn: FetchLike = fetch): Tool {
         `);` +
         `out center ${limit * 4};`;
 
-      const data = await overpassQuery(query, fetchFn);
+      const data = await overpassFallback(query, amapError, fetchFn);
       const attractions = (data.elements ?? [])
         .map((element) => toAttraction(element, geo))
         .filter((a): a is NonNullable<typeof a> => a !== null)
@@ -138,21 +142,35 @@ export function createAttractionsTool(fetchFn: FetchLike = fetch): Tool {
       });
 
       if (unique.length === 0) {
-        return `在 ${geo.name} 周边 ${radiusKm} 公里内没有找到有名称的景点。`;
+        return `在 ${geo.name} 周边 ${radiusKm} 公里内没有找到有名称的景点。${degradedNote(amapError)}`;
       }
 
       const lines = unique.slice(0, limit).map(
-        (a) => `${a.name} | ${a.type} | 距市中心 ${a.distanceKm.toFixed(1)} 公里${a.website === undefined ? "" : ` | ${a.website}`}`,
+        (a) =>
+          `${a.name} | ${a.type} | 距市中心 ${a.distanceKm.toFixed(1)} 公里` +
+          ` | 坐标 ${a.latitude.toFixed(4)},${a.longitude.toFixed(4)}` +
+          `${a.website === undefined ? "" : ` | ${a.website}`}`,
       );
-      return `${geo.name} 周边景点（前 ${Math.min(limit, unique.length)} / 共 ${unique.length} 个）:\n${lines.join("\n")}`;
+      return (
+        `${geo.name} 周边景点（前 ${Math.min(limit, unique.length)} / 共 ${unique.length} 个）:\n` +
+        lines.join("\n") + degradedNote(amapError)
+      );
     },
   };
+}
+
+/** 降级说明：OSM 数据没有评分，得让用户知道为什么 */
+function degradedNote(amapError: string | undefined): string {
+  if (amapError === undefined) return "";
+  return `\n⚠️ 高德数据源失败（${amapError}），以上为 OpenStreetMap 数据（无评分）`;
 }
 
 interface AttractionInfo {
   readonly name: string;
   readonly type: string;
   readonly distanceKm: number;
+  readonly latitude: number;
+  readonly longitude: number;
   readonly website?: string;
 }
 
@@ -172,6 +190,8 @@ function toAttraction(element: OsmElement, center: GeoResult): AttractionInfo | 
     name,
     type,
     distanceKm: haversineKm(center.latitude, center.longitude, lat, lon),
+    latitude: lat,
+    longitude: lon,
     website: tags.website ?? tags["contact:website"],
   };
 }

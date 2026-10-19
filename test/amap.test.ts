@@ -40,6 +40,45 @@ test("AmapClient: 错误 infocode 转可读信息", async () => {
   await assert.rejects(() => concurrent.geocode("杭州"), /并发\/QPS 超限/);
 });
 
+test("AmapClient: 并行请求被全局闸门串行化（避免整批撞 10021）", async () => {
+  let active = 0;
+  let peak = 0;
+  const fetchFn = (async (url: string | URL | Request) => {
+    const parsed = url instanceof URL ? url : new URL(String(url));
+    assert.ok(parsed.hostname.includes("amap.com"));
+    active += 1;
+    peak = Math.max(peak, active);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    active -= 1;
+    return amapResponse({ geocodes: [{ formatted_address: "杭州", location: "120.15,30.27" }] });
+  }) as typeof fetch;
+
+  const client = new AmapClient({ apiKey: "k", fetchFn });
+  const results = await Promise.all([client.geocode("a"), client.geocode("b"), client.geocode("c")]);
+
+  assert.equal(results.length, 3);
+  assert.equal(peak, 1, "同一时刻只应有一个高德请求在途");
+});
+
+test("AmapClient: 撞到 10021 先退避重试一次，别整条链路降级到 OSM", async () => {
+  let calls = 0;
+  const client = new AmapClient({
+    apiKey: "k",
+    fetchFn: amapOnlyFetch(() => {
+      calls += 1;
+      if (calls === 1) {
+        return amapResponse({ status: "0", infocode: "10021", info: "CUQPS_HAS_EXCEEDED_THE_LIMIT" });
+      }
+      return amapResponse({ geocodes: [{ formatted_address: "杭州", location: "120.15,30.27" }] });
+    }),
+  });
+
+  const result = await client.geocode("杭州");
+
+  assert.equal(result?.formatted_address, "杭州");
+  assert.equal(calls, 2, "10021 应重试一次");
+});
+
 test("AmapClient: geocode 解析坐标", async () => {
   const fetchFn = amapOnlyFetch(() =>
     amapResponse({
@@ -282,7 +321,7 @@ test("search_attractions: 高德路径（含评分与自算距离）", async () 
   const output = await tool.execute({ location: "杭州西湖", radius_km: 10, limit: 5 });
 
   assert.match(output, /高德数据/);
-  assert.match(output, /雷峰塔 \| 风景名胜;风景名胜 \| 距中心 \d+\.\d 公里 \| 评分 4\.7 \| 南山路15号/);
+  assert.match(output, /雷峰塔 \| 风景名胜;风景名胜 \| 距中心 \d+\.\d 公里 \| 评分 4\.7 \| 坐标 30\.2310,120\.1500 \| 南山路15号/);
   assert.match(output, /断桥残雪/);
 
   setAmapKey(undefined);

@@ -2,9 +2,9 @@ import type { Tool } from "./tool.ts";
 import { geocodeLocation, type GeoResult } from "./geocoding.ts";
 import { haversineKm } from "./geo.ts";
 import { requireString } from "./tool.ts";
-import { overpassQuery, type OsmElement } from "./overpass.ts";
+import { overpassFallback, type OsmElement } from "./overpass.ts";
 import { getAmapClient } from "./amap-access.ts";
-import { rankPoisByRating } from "./amap.ts";
+import { formatPoiCoordinates, rankPoisByRating } from "./amap.ts";
 
 type FetchLike = typeof fetch;
 
@@ -20,6 +20,8 @@ interface StayInfo {
   readonly name: string;
   readonly type: string;
   readonly distanceKm: number;
+  readonly latitude: number;
+  readonly longitude: number;
   readonly stars?: string;
   readonly phone?: string;
   readonly website?: string;
@@ -34,7 +36,7 @@ export function createStayTool(fetchFn: FetchLike = fetch): Tool {
   return {
     name: "search_stays",
     description:
-      "搜索某个城市的真实住宿：酒店/民宿/青旅，返回名称、地址、距离，" +
+      "搜索某个城市的真实住宿：酒店/民宿/青旅，返回名称、地址、距离、坐标（纬度,经度，可直接写入行程 location），" +
       "高德数据源还包含真实评分与参考价格，结果按评分降序排列。未配置高德或查询失败时使用 OpenStreetMap（无价格评分）。",
     parameters: {
       type: "object",
@@ -57,6 +59,7 @@ export function createStayTool(fetchFn: FetchLike = fetch): Tool {
 
       // 高德主源（配置了 Key 时）：真实评分 + 参考价格
       const amap = getAmapClient();
+      let amapError: string | undefined;
       if (amap !== undefined && geo.country === "中国") {
         try {
           // 实测: 高德 POI 的 distance 字段经常为空，用坐标自算
@@ -74,6 +77,8 @@ export function createStayTool(fetchFn: FetchLike = fetch): Tool {
               if (entry.poi.type !== undefined && entry.poi.type !== "") parts.push(entry.poi.type);
               parts.push(`距中心 ${entry.distanceKm.toFixed(1)} 公里`);
               if (entry.rating !== undefined) parts.push(`评分 ${entry.rating.toFixed(1)}`);
+              const coords = formatPoiCoordinates(entry.poi.location);
+              if (coords !== null) parts.push(`坐标 ${coords}`);
               const cost = entry.poi.biz_ext?.cost;
               if (cost !== undefined && cost !== "" && cost !== "0") parts.push(`参考价 ¥${cost}起`);
               if (entry.poi.address !== undefined && entry.poi.address !== "") parts.push(entry.poi.address);
@@ -84,8 +89,9 @@ export function createStayTool(fetchFn: FetchLike = fetch): Tool {
               lines.join("\n")
             );
           }
-        } catch {
-          // 高德失败（配额/网络）→ 降级 OSM
+        } catch (error) {
+          // 高德失败（限流/配额/网络）→ 降级 OSM；原因要留给用户看，否则像 OSM 的锅
+          amapError = error instanceof Error ? error.message : String(error);
         }
       }
 
@@ -97,7 +103,7 @@ export function createStayTool(fetchFn: FetchLike = fetch): Tool {
         ");" +
         `out center ${limit * 3};`;
 
-      const data = await overpassQuery(query, fetchFn);
+      const data = await overpassFallback(query, amapError, fetchFn);
       const stays = (data.elements ?? [])
         .map((element) => toStay(element, geo))
         .filter((s): s is StayInfo => s !== null)
@@ -114,7 +120,8 @@ export function createStayTool(fetchFn: FetchLike = fetch): Tool {
       if (unique.length === 0) {
         return (
           `在 ${geo.name} 周边 ${radiusKm} 公里内没有找到有名称的住宿。` +
-          "可能该区域地图数据较少，可尝试扩大 radius_km 或换更具体的地点名。"
+          "可能该区域地图数据较少，可尝试扩大 radius_km 或换更具体的地点名。" +
+          degradedNote(amapError)
         );
       }
 
@@ -123,6 +130,7 @@ export function createStayTool(fetchFn: FetchLike = fetch): Tool {
           s.name,
           s.type,
           `距市中心 ${s.distanceKm.toFixed(1)} 公里`,
+          `坐标 ${s.latitude.toFixed(4)},${s.longitude.toFixed(4)}`,
         ];
         if (s.stars !== undefined) parts.push(`${s.stars}星`);
         if (s.phone !== undefined) parts.push(`电话 ${s.phone}`);
@@ -133,10 +141,17 @@ export function createStayTool(fetchFn: FetchLike = fetch): Tool {
       return (
         `${geo.name} 的真实住宿（前 ${Math.min(limit, unique.length)} / 共 ${unique.length} 家，OpenStreetMap 数据）：\n` +
         lines.join("\n") +
-        "\n注：以上为真实存在的住宿，但不含价格；口碑可用 get_place_reviews 查询。"
+        "\n注：以上为真实存在的住宿，但不含价格；口碑可用 get_place_reviews 查询。" +
+        degradedNote(amapError)
       );
     },
   };
+}
+
+/** 降级说明：OSM 数据没有评分/价格，得让用户知道为什么 */
+function degradedNote(amapError: string | undefined): string {
+  if (amapError === undefined) return "";
+  return `\n⚠️ 高德数据源失败（${amapError}），以上为 OpenStreetMap 数据（无评分/价格）`;
 }
 
 function toStay(element: OsmElement, center: GeoResult): StayInfo | null {
@@ -154,6 +169,8 @@ function toStay(element: OsmElement, center: GeoResult): StayInfo | null {
     name,
     type,
     distanceKm: haversineKm(center.latitude, center.longitude, lat, lon),
+    latitude: lat,
+    longitude: lon,
     stars: tags.stars ?? tags["stars:zh"],
     phone: tags.phone ?? tags["contact:phone"],
     website: tags.website ?? tags["contact:website"],

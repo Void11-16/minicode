@@ -1,12 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtemp, readFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+
 import { createAttractionsTool } from "../src/tools/attractions.ts";
 import { setAmapKey } from "../src/tools/amap-access.ts";
 import { createReviewsTool } from "../src/tools/reviews.ts";
-import { overpassQuery } from "../src/tools/overpass.ts";
+import { overpassFallback, overpassQuery } from "../src/tools/overpass.ts";
 import { geocodeLocation } from "../src/tools/geocoding.ts";
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -23,7 +21,7 @@ test("search_attractions: 解析 OSM 数据并按距离排序去重", async () =
     if (u.includes("geocoding-api")) {
       return jsonResponse({ results: [{ name: "杭州", latitude: 30.27, longitude: 120.15, country: "中国" }] });
     }
-    if (u.includes("overpass-api.de")) {
+    if (u.includes("/api/interpreter")) {
       const headers = init?.headers as Record<string, string>;
       assert.match(headers["User-Agent"], /minicode/); // 服务拒绝默认 UA
       const body = String(init?.body);
@@ -283,7 +281,7 @@ test("overpassQuery: 主镜像返回 XML 错误页时自动切换下一个镜像
   const fetchFn = (async (url: string | URL) => {
     const host = String(url).replace("https://", "").split("/")[0];
     calls.push(host);
-    if (host === "overpass-api.de") {
+    if (calls.length === 1) {
       // 504 错误可能以 200 状态 + XML 体出现（实测行为）
       return new Response('<?xml version="1.0"?><html>gateway timeout</html>', {
         status: 200,
@@ -298,8 +296,54 @@ test("overpassQuery: 主镜像返回 XML 错误页时自动切换下一个镜像
   const data = await overpassQuery(query, fetchFn);
 
   assert.equal(data.elements?.length, 1);
-  assert.equal(calls[0], "overpass-api.de");
-  assert.equal(calls[1], "z.overpass-api.de");
+  assert.equal(calls.length, 2, `应换镜像重试，实际请求了 ${calls.join(", ")}`);
+});
+
+test("overpassQuery: 刚失败的镜像排到最后（不再每次先在同一个坏节点上耗超时）", async () => {
+  const failed: string[] = [];
+  const firstFetch = (async (url: string | URL) => {
+    const host = String(url).replace("https://", "").split("/")[0];
+    if (failed.length === 0) {
+      failed.push(host);
+      return new Response("# 502 Gateway Timeout", { status: 502 });
+    }
+    return jsonResponse({ elements: [] });
+  }) as typeof fetch;
+  await overpassQuery("[out:json];out center 1; /*cooldown-test-1*/", firstFetch);
+  assert.equal(failed.length, 1, "应记录首个失败的镜像");
+
+  const second: string[] = [];
+  const secondFetch = (async (url: string | URL) => {
+    second.push(String(url).replace("https://", "").split("/")[0]);
+    return jsonResponse({ elements: [] });
+  }) as typeof fetch;
+  await overpassQuery("[out:json];out center 1; /*cooldown-test-2*/", secondFetch);
+
+  assert.equal(second.length, 1, "健康镜像应一次命中");
+  assert.notEqual(second[0], failed[0], "上一轮失败的镜像不该再排第一");
+});
+
+test("overpassQuery: 镜像表里的节点都会被尝试（不再固定只试前 3 个）", async () => {
+  const calls: string[] = [];
+  const fetchFn = (async (url: string | URL) => {
+    calls.push(String(url));
+    return new Response("# 502 Gateway Timeout", { status: 502 });
+  }) as typeof fetch;
+
+  await assert.rejects(
+    () => overpassQuery("[out:json][timeout:25];out center 1; /*all-mirrors*/", fetchFn),
+    /已尝试 \d+ 个镜像/,
+  );
+  assert.ok(calls.length >= 5, `镜像表应被完整尝试，实际只试了 ${calls.length} 个`);
+});
+
+test("overpassFallback: 主源先失败时，错误信息要说明是降级后才轮到 OSM", async () => {
+  const fetchFn = (async () => new Response("# 502 Gateway Timeout", { status: 502 })) as typeof fetch;
+
+  await assert.rejects(
+    () => overpassFallback("[out:json];out center 1; /*fallback-msg*/", "高德 API 失败: 并发/QPS 超限", fetchFn),
+    /高德请求失败（高德 API 失败: 并发\/QPS 超限）后转 OpenStreetMap 兜底，OSM 也不可用/,
+  );
 });
 
 test("overpassQuery: 相同查询走缓存（LLM 重试不再打服务）", async () => {
@@ -395,7 +439,7 @@ test("search_attractions: 博物馆搜索失败时输出可见警告", async () 
   const output = await tool.execute({ location: "杭州" });
 
   assert.match(output, /西湖/);
-  assert.match(output, /⚠️ 博物馆[\/]纪念馆搜索失败（quota exceeded），以上仅为风景名胜结果/);
+  assert.match(output, /⚠️ 博物馆[/]纪念馆搜索失败（quota exceeded），以上仅为风景名胜结果/);
 
   setAmapKey(undefined);
 });

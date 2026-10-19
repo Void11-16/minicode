@@ -4,6 +4,44 @@ import { haversineKm } from "./geo.ts";
 
 const AMAP_BASE = "https://restapi.amap.com";
 
+/** 并发/QPS 超限：个人 Key 的并发极低（实测并行 4 个 POI 查询全被拒），退避重试后多数能过 */
+const QPS_INFOCODE = "10021";
+/** 全局请求闸门的最小间隔：再密会被 10021 拒，250ms 实测稳 */
+const REQUEST_GAP_MS = 250;
+/** 撞到 10021 后的退避时长（重试两次：闸门后仍偶发超限，重试比整条链路降级划算） */
+const QPS_RETRY_DELAY_MS = 700;
+const QPS_RETRY_COUNT = 2;
+
+/** 全局闸门状态：所有高德请求共用（工具并行调用时上游仍是串行） */
+let lastRequestAt = 0;
+let gateTail: Promise<unknown> = Promise.resolve();
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+/**
+ * 串行闸门：同一时刻只放行一个请求，并在两次请求之间补足最小间隔。
+ * 模型常在一轮里并行发多个 search_* 工具，每个工具又要打 3~4 个接口，
+ * 不限速就会整批被 10021 拒掉，然后静默降级到 OSM——那正是 Overpass 报错的来源。
+ */
+function scheduleAmapRequest<T>(task: () => Promise<T>): Promise<T> {
+  const run = gateTail.then(async () => {
+    const wait = lastRequestAt + REQUEST_GAP_MS - Date.now();
+    if (wait > 0) await delay(wait);
+    lastRequestAt = Date.now();
+    return task();
+  });
+  // 闸门只关心"上一个请求结束"，失败不阻塞后续
+  gateTail = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
 /** 高德错误码 → 可读信息（常见子集） */
 const ERROR_MESSAGES: Record<string, string> = {
   "10001": "Key 不正确",
@@ -38,6 +76,10 @@ export interface AmapPoi {
   readonly location: string; // "lng,lat"
   readonly distance?: string;
   readonly tel?: string;
+  /** 行政区划字段（用于省市校验，拦截外地同名地点） */
+  readonly pname?: string;
+  readonly cityname?: string;
+  readonly adname?: string;
   readonly biz_ext?: { rating?: string; cost?: string; open_time?: string };
   readonly photos?: ReadonlyArray<{ title?: string; url?: string }>;
 }
@@ -96,23 +138,29 @@ export class AmapClient {
     this.fetchFn = config.fetchFn ?? fetch;
   }
 
-  /** GET 请求并校验高德 status/infocode；失败抛错（上层决定降级） */
-  private async getJson<T>(url: URL): Promise<T> {
-    const response = await this.fetchFn(url, { signal: AbortSignal.timeout(15_000) });
+  /**
+   * GET 请求并校验高德 status/infocode；失败抛错（上层决定降级）。
+   * 走全局闸门限速；撞到 10021（并发/QPS 超限）退避后重试，仍失败才放弃（交给上层降级）。
+   */
+  private async getJson<T>(url: URL, retriesLeft = QPS_RETRY_COUNT): Promise<T> {
+    const response = await scheduleAmapRequest(() => this.fetchFn(url, { signal: AbortSignal.timeout(15_000) }));
     if (!response.ok) {
       throw new Error(`高德服务 HTTP ${response.status}`);
     }
 
     const data = (await response.json()) as { status?: string; infocode?: string; info?: string };
     // 高德约定: status "1" + infocode "10000" = 成功
-    if (data.status !== "1" || data.infocode !== "10000") {
-      const reason =
-        (data.infocode !== undefined ? ERROR_MESSAGES[data.infocode] : undefined) ??
-        data.info ??
-        `infocode ${data.infocode ?? "?"}`;
-      throw new Error(`高德 API 失败: ${reason}`);
+    if (data.status === "1" && data.infocode === "10000") return data as T;
+
+    if (data.infocode === QPS_INFOCODE && retriesLeft > 0) {
+      await delay(QPS_RETRY_DELAY_MS);
+      return this.getJson<T>(url, retriesLeft - 1);
     }
-    return data as T;
+    const reason =
+      (data.infocode !== undefined ? ERROR_MESSAGES[data.infocode] : undefined) ??
+      data.info ??
+      `infocode ${data.infocode ?? "?"}`;
+    throw new Error(`高德 API 失败: ${reason}`);
   }
 
   private buildUrl(path: string, params: Record<string, string>): URL {
@@ -130,6 +178,27 @@ export class AmapClient {
     if (city !== undefined && city !== "") params.city = city;
     const data = await this.getJson<AmapGeocodeResponse>(this.buildUrl("/v3/geocode/geo", params));
     return data.geocodes?.[0] ?? null;
+  }
+
+  /**
+   * 地理编码的全部候选（按 API 顺序去重截断）。
+   * 无城市上下文时同名地点会返回一长串（实测「北海公园」10 条、北京那条排第 10），
+   * 调用方应展示带省市字段的候选并提示传 city 重查，而不是只取第一条。
+   */
+  async geocodeAll(address: string, limit = 3, city?: string): Promise<AmapGeocodeResult[]> {
+    const params: Record<string, string> = { address };
+    if (city !== undefined && city !== "") params.city = city;
+    const data = await this.getJson<AmapGeocodeResponse>(this.buildUrl("/v3/geocode/geo", params));
+    const seen = new Set<string>();
+    const results: AmapGeocodeResult[] = [];
+    for (const result of data.geocodes ?? []) {
+      const key = `${result.formatted_address}@${result.location}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      results.push(result);
+      if (results.length >= limit) break;
+    }
+    return results;
   }
 
   /**
@@ -227,26 +296,22 @@ export class AmapClient {
   }
 
   /**
-   * 按名称在城市内搜 POI，返回首个结果。
-   * 解析地标名（灵隐寺/西湖）的坐标比地理编码准确——geocode 经常命中外地同名地点。
+   * 在城市内按关键词搜 POI，返回候选列表（含 pname/cityname/adname）。
+   * 解析地标名（灵隐寺/西湖）的坐标比地理编码准确——geocode 即使带 city
+   * 也可能命中外地同名地点（实测 灵隐寺@浙江 → 重庆合川灵隐寺）。
+   * city 参数大体能把结果约束在城市内，但调用方仍需校验省市字段。
    */
-  async poiSearchByName(
-    keywords: string,
-    city: string,
-  ): Promise<{ name: string; latitude: number; longitude: number } | null> {
+  async poiSearchInCity(keywords: string, city: string, offset = 5): Promise<AmapPoi[]> {
     const data = await this.getJson<{ pois?: AmapPoi[] }>(
       this.buildUrl("/v3/place/text", {
         keywords,
         city,
-        offset: "5",
+        offset: String(offset),
         page: "1",
         extensions: "base",
       }),
     );
-    const poi = data.pois?.find((p) => p.location.includes(","));
-    if (poi === undefined) return null;
-    const [longitude, latitude] = poi.location.split(",").map(Number);
-    return { name: poi.name ?? keywords, latitude, longitude };
+    return (data.pois ?? []).filter((poi) => poi.location.includes(","));
   }
 
   /**
@@ -367,4 +432,43 @@ export function rankPoisByName(pois: readonly AmapPoi[], keywords: string): Amap
     .filter((entry) => entry.name !== "" && (entry.relation < 2 || entry.similarity >= POI_NAME_SIMILARITY_MIN))
     .sort((a, b) => a.relation - b.relation || b.similarity - a.similarity || a.name.length - b.name.length)
     .map((entry) => entry.poi);
+}
+
+/** 附属设施类关键词：停车场/售票处/入口等衍生 POI 不是目的地本体 */
+const POI_NOISE_PATTERN = /(停车|售票|检票|出入口|入口|出口|大门|门岗|码头|厕所|卫生间|警务|派出所|游客中心|咨询点|服务点|公交站|地铁站|车站)/;
+
+/**
+ * 按名称挑最像目标的一个 POI（不做城市校验，调用方负责）。
+ * 高德对地标名会混出大量衍生 POI：实测「水亭门历史文化街区」的首条是
+ * 「…地下停车点」、「鹿鸣大草坪」首条是「…驿站厕所」——先降噪再按
+ * 同名 > 包含 > 相似度 分级比较，避免坐标虽近、名称却指向附属设施。
+ */
+export function bestPoiByName(pois: readonly AmapPoi[], keywords: string): AmapPoi | null {
+  const key = normalizePoiName(keywords);
+  if (key === "") return null;
+  const scored = pois
+    .map((poi) => {
+      const name = normalizePoiName(poi.name);
+      if (name === "") return null;
+      const relation = name === key ? 0 : name.includes(key) || key.includes(name) ? 1 : 2;
+      const similarity = relation === 2 ? lcsLength(name, key) / Math.max(name.length, key.length, 1) : 1;
+      if (relation === 2 && similarity < POI_NAME_SIMILARITY_MIN) return null;
+      return { poi, relation, noise: POI_NOISE_PATTERN.test(poi.name) ? 1 : 0, similarity };
+    })
+    .filter((entry): entry is NonNullable<typeof entry> => entry !== null)
+    .sort(
+      (a, b) =>
+        a.relation - b.relation ||
+        a.noise - b.noise ||
+        b.similarity - a.similarity ||
+        a.poi.name.length - b.poi.name.length,
+    );
+  return scored[0]?.poi ?? null;
+}
+
+/** 高德 "lng,lat" → 行程条目用的「纬度,经度」显示串（4 位小数约 10 米精度） */
+export function formatPoiCoordinates(location: string): string | null {
+  const [longitude, latitude] = location.split(",").map(Number);
+  if (Number.isNaN(longitude) || Number.isNaN(latitude)) return null;
+  return `${latitude.toFixed(4)},${longitude.toFixed(4)}`;
 }
