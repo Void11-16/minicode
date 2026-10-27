@@ -1,3 +1,6 @@
+import { convertPoint, type GeoPoint } from "./coordinates.ts";
+import { cancellableFetch } from "./travel-request.ts";
+import { setTimeout as abortableDelay } from "node:timers/promises";
 type FetchLike = typeof fetch;
 
 import { haversineKm } from "./geo.ts";
@@ -16,21 +19,16 @@ const QPS_RETRY_COUNT = 2;
 let lastRequestAt = 0;
 let gateTail: Promise<unknown> = Promise.resolve();
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
-
 /**
  * 串行闸门：同一时刻只放行一个请求，并在两次请求之间补足最小间隔。
  * 模型常在一轮里并行发多个 search_* 工具，每个工具又要打 3~4 个接口，
  * 不限速就会整批被 10021 拒掉，然后静默降级到 OSM——那正是 Overpass 报错的来源。
  */
-function scheduleAmapRequest<T>(task: () => Promise<T>): Promise<T> {
+function scheduleAmapRequest<T>(task: () => Promise<T>, signal?: AbortSignal): Promise<T> {
   const run = gateTail.then(async () => {
+    signal?.throwIfAborted();
     const wait = lastRequestAt + REQUEST_GAP_MS - Date.now();
-    if (wait > 0) await delay(wait);
+    if (wait > 0) await abortableDelay(wait, undefined, { signal });
     lastRequestAt = Date.now();
     return task();
   });
@@ -39,8 +37,23 @@ function scheduleAmapRequest<T>(task: () => Promise<T>): Promise<T> {
     () => undefined,
     () => undefined,
   );
-  return run;
+  if (signal === undefined) return run;
+  // 队列中的取消立即返回；排到队首后检查信号，避免仍发送请求。
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
+    void run.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
 }
+
+/** 保留原始错误码，调用者不必依赖中文文案识别不可重试错误。 */
+export class AmapServiceError extends Error {
+  readonly code: string;
+  constructor(code: string, reason: string) { super(`高德 API 失败: ${reason} [${code}]`); this.name = "AmapServiceError"; this.code = code; }
+}
+interface AmapCircuit { error?: AmapServiceError; day?: string }
+function serviceDay(): string { return new Date(Date.now() + 8 * 3600000).toISOString().slice(0, 10); }
 
 /** 高德错误码 → 可读信息（常见子集） */
 const ERROR_MESSAGES: Record<string, string> = {
@@ -54,6 +67,7 @@ const ERROR_MESSAGES: Record<string, string> = {
 export interface AmapConfig {
   readonly apiKey: string;
   readonly fetchFn?: FetchLike;
+  readonly signal?: AbortSignal;
 }
 
 export interface AmapGeocodeResult {
@@ -132,10 +146,25 @@ interface AmapTransitResponse {
 export class AmapClient {
   private readonly apiKey: string;
   private readonly fetchFn: FetchLike;
+  private readonly signal?: AbortSignal;
+  private circuit: AmapCircuit = {};
 
   constructor(config: AmapConfig) {
     this.apiKey = config.apiKey;
     this.fetchFn = config.fetchFn ?? fetch;
+    this.signal = config.signal;
+  }
+
+  withSignal(signal: AbortSignal): AmapClient {
+    const scoped = new AmapClient({ apiKey: this.apiKey, fetchFn: this.fetchFn, signal });
+    scoped.circuit = this.circuit;
+    return scoped;
+  }
+
+  private checkAvailable(): void {
+    this.signal?.throwIfAborted();
+    if (this.circuit.day !== undefined && this.circuit.day !== serviceDay()) { this.circuit.error = undefined; this.circuit.day = undefined; }
+    if (this.circuit.error !== undefined) throw this.circuit.error;
   }
 
   /**
@@ -143,7 +172,11 @@ export class AmapClient {
    * 走全局闸门限速；撞到 10021（并发/QPS 超限）退避后重试，仍失败才放弃（交给上层降级）。
    */
   private async getJson<T>(url: URL, retriesLeft = QPS_RETRY_COUNT): Promise<T> {
-    const response = await scheduleAmapRequest(() => this.fetchFn(url, { signal: AbortSignal.timeout(15_000) }));
+    this.checkAvailable();
+    const response = await scheduleAmapRequest(() => {
+      this.checkAvailable();
+      return cancellableFetch(this.fetchFn, this.signal)(url, { signal: AbortSignal.timeout(15_000) });
+    }, this.signal);
     if (!response.ok) {
       throw new Error(`高德服务 HTTP ${response.status}`);
     }
@@ -153,14 +186,16 @@ export class AmapClient {
     if (data.status === "1" && data.infocode === "10000") return data as T;
 
     if (data.infocode === QPS_INFOCODE && retriesLeft > 0) {
-      await delay(QPS_RETRY_DELAY_MS);
+      await abortableDelay(QPS_RETRY_DELAY_MS, undefined, { signal: this.signal });
       return this.getJson<T>(url, retriesLeft - 1);
     }
     const reason =
       (data.infocode !== undefined ? ERROR_MESSAGES[data.infocode] : undefined) ??
       data.info ??
       `infocode ${data.infocode ?? "?"}`;
-    throw new Error(`高德 API 失败: ${reason}`);
+    const error = new AmapServiceError(data.infocode ?? "UNKNOWN", reason);
+    if (["10001", "10003", "10019", "10044"].includes(error.code)) { this.circuit.error = error; this.circuit.day = ["10003", "10044"].includes(error.code) ? serviceDay() : undefined; }
+    throw error;
   }
 
   private buildUrl(path: string, params: Record<string, string>): URL {
@@ -207,11 +242,12 @@ export class AmapClient {
    */
   async poiSearch(
     keywords: string,
-    center: { latitude: number; longitude: number },
+    center: GeoPoint,
     radiusMeters: number,
     poiTypes?: string,
     pages = 1,
   ): Promise<AmapPoi[]> {
+    center = convertPoint({ ...center, crs: center.crs ?? "gcj02" }, "gcj02");
     // v3 单页上限 25；pages > 1 时逐页拉取，不足一页说明没有更多
     const allPois: AmapPoi[] = [];
     for (let page = 1; page <= pages; page += 1) {
@@ -240,10 +276,12 @@ export class AmapClient {
    * 返回推荐方案（第一个）；无方案或失败返回 null，由调用方降级驾车/步行。
    */
   async transitRoute(
-    origin: { latitude: number; longitude: number },
-    destination: { latitude: number; longitude: number },
+    origin: GeoPoint,
+    destination: GeoPoint,
     city: string,
   ): Promise<TransitRouteResult | null> {
+    origin = convertPoint({ ...origin, crs: origin.crs ?? "gcj02" }, "gcj02");
+    destination = convertPoint({ ...destination, crs: destination.crs ?? "gcj02" }, "gcj02");
     const data = await this.getJson<AmapTransitResponse>(
       this.buildUrl("/v3/direction/transit/integrated", {
         origin: `${origin.longitude},${origin.latitude}`,
@@ -282,7 +320,7 @@ export class AmapClient {
    */
   async poiPhotos(
     keywords: string,
-    center: { latitude: number; longitude: number },
+    center: GeoPoint,
     radiusMeters = 3000,
     limit = 4,
   ): Promise<string[]> {
@@ -320,9 +358,11 @@ export class AmapClient {
    */
   async directionRoute(
     mode: "walking" | "driving",
-    origin: { latitude: number; longitude: number },
-    destination: { latitude: number; longitude: number },
+    origin: GeoPoint,
+    destination: GeoPoint,
   ): Promise<RouteGeometry | null> {
+    origin = convertPoint({ ...origin, crs: origin.crs ?? "gcj02" }, "gcj02");
+    destination = convertPoint({ ...destination, crs: destination.crs ?? "gcj02" }, "gcj02");
     const data = await this.getJson<AmapDirectionResponse>(
       this.buildUrl(`/v3/direction/${mode}`, {
         origin: `${origin.longitude},${origin.latitude}`,
@@ -364,7 +404,7 @@ export interface RankedPoi {
  */
 export function rankPoisByRating(
   pois: readonly AmapPoi[],
-  center: { latitude: number; longitude: number },
+  center: GeoPoint,
 ): RankedPoi[] {
   return pois
     .map((poi) => {

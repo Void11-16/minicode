@@ -8,10 +8,12 @@ import type { ChatProvider } from "../llm/provider.ts";
 import { JsonFileSessionStore } from "../storage/session-store.ts";
 import { ConfigStore, type AppConfig } from "../config/config.ts";
 import { ModelProfileStore, type ModelProfile } from "../config/models.ts";
+import { resolvePricing, type ModelPricing } from "../config/pricing.ts";
 import { createDefaultRegistry } from "../tools/all.ts";
 import { ToolRegistry } from "../tools/tool.ts";
 import { estimateCostYuan, formatUsage, isOverBudget } from "../core/usage.ts";
 import { AgentRuntime, STEERED_NOTE } from "../runtime/runtime.ts";
+import { renderToolBudgetAssessment, type ToolBudgetAssessment } from "../runtime/tool-budget.ts";
 import type { Message } from "../core/message.ts";
 import { LineQueue } from "./line-queue.ts";
 import { printBanner, StreamPrinter } from "./ui.ts";
@@ -24,6 +26,7 @@ import { createPermissionMemory, decidePermission, permissionModeOf } from "../s
 import type { PermissionMemory } from "../service/permission-policy.ts";
 import { appendFile, mkdir } from "node:fs/promises";
 import { readFileSync } from "node:fs";
+import { renderHistoryForSummary } from "../context/epoch.ts";
 
 
 /**
@@ -57,6 +60,8 @@ export class CliApp {
   private readonly trustedSessions = new Set<string>();
   private rl: readline.Interface;
   private readonly historyFile = join(process.cwd(), ".minicode", "history.txt");
+  /** 审批/预算选择共用同一行输入通道，避免主循环把回答当成 steer 消息 */
+  private interactiveLineWaiter: ((line: string | null) => void) | undefined;
 
   constructor(options: { debug?: boolean } = {}) {
     this.debug = options.debug === true;
@@ -83,6 +88,11 @@ export class CliApp {
 
   get priceOut(): number {
     return Number.parseFloat(this.config.priceOut ?? "3");
+  }
+
+  pricingFor(session: Session): ModelPricing {
+    const profile = this.profiles.find((item) => item.id === (session.modelProfile ?? this.defaultProfileId));
+    return resolvePricing(this.config, profile);
   }
 
   /** 会话级系统提示词：模式基线 + 日期/工作区 + 规则文件 + 口味偏好 */
@@ -145,12 +155,15 @@ export class CliApp {
 
   // 摘要走被压缩会话自己的 Provider：后台会话触发压缩时不能借当前选中会话的模型
   summarizeForCompact = async (session: Session, messages: readonly Message[]): Promise<string> => {
-    const transcript = messages
-      .map((m) => `[${m.role}] ${m.content}`)
-      .join("\n")
-      .slice(0, 20_000);
+    const transcript = renderHistoryForSummary(messages, session.travelState);
     return this.providerForSession(session).chat([
-      { role: "user", content: `请把以下对话历史压缩成要点摘要（保留关键事实、决策、用户偏好、日期和数字），直接输出摘要本身：\n\n${transcript}` },
+      {
+        role: "user",
+        content:
+          "请把以下对话历史压缩成可继续执行任务的摘要。保留用户约束、日期、预算、已访问地点及类型、" +
+          "已保存行程、质量问题和 artifact 路径；删除寒暄、重复工具过程和不影响后续决策的原文。" +
+          `直接输出摘要本身：\n\n${transcript}`,
+      },
     ]);
   };
 
@@ -200,10 +213,9 @@ export class CliApp {
         const text = `${session.title}\n${input}`;
         return toolRoundsForBrief(await briefForSessionTitle(process.cwd(), text), 30, text);
       },
-      onBudgetExtended: (sessionId, info) => {
-        if (sessionId !== this.currentSessionId) return;
-        console.log(`⚙️ 工具轮次不够用，预算从 ${info.from} 提到 ${info.to} 轮继续（按行程需求自动续期）\n`);
-      },
+      onToolBudgetExhausted: async (sessionId, assessment) =>
+        this.askToolBudget(sessionId, assessment),
+      rootDir: process.cwd(),
       onCheckpoint: (sessionId) => {
         const checkpointAgent = this.runtime.getAgent(sessionId);
         if (checkpointAgent === undefined) return;
@@ -252,7 +264,11 @@ export class CliApp {
       const prompt = this.runtime.hasActiveTurn(this.currentSessionId) ? "steer> " : "you> ";
       process.stdout.write(prompt);
       const input = await this.lines.next();
-      if (input === null) break; // stdin 关闭（EOF）
+      if (input === null) {
+        this.answerInteractivePrompt(null);
+        break; // stdin 关闭（EOF）
+      }
+      if (this.answerInteractivePrompt(input)) continue;
       const line = input.trim();
       if (line === "") continue;
 
@@ -261,8 +277,21 @@ export class CliApp {
 
       // —— 消息投递 ——
       // 预算守卫：单会话估算花费达到上限时暂停发送（/new 或调预算后继续）
-      if (isOverBudget(this.currentAgent().session.usage, this.priceIn, this.priceOut, this.budgetYuan)) {
-        const cost = estimateCostYuan(this.currentAgent().session.usage, this.priceIn, this.priceOut);
+      const session = this.currentAgent().session;
+      const pricing = this.pricingFor(session);
+      if (isOverBudget(
+        session.usage,
+        pricing.inputPerM,
+        pricing.outputPerM,
+        this.budgetYuan,
+        pricing.cacheInputPerM,
+      )) {
+        const cost = estimateCostYuan(
+          session.usage,
+          pricing.inputPerM,
+          pricing.outputPerM,
+          pricing.cacheInputPerM,
+        );
         console.log(
           `⛔ 本会话估算花费已达 ¥${cost.toFixed(4)}，超过预算 ¥${this.budgetYuan}。` +
           `可 /config set budget_yuan <新值> 调整，或 /new 开始新会话（预算按会话计算）。\n`,
@@ -335,7 +364,15 @@ export class CliApp {
     }
     const agent = this.runtime.getAgent(sessionId);
     if (agent !== undefined) {
-      console.log(`📊 ${formatUsage(agent.session.usage, this.priceIn, this.priceOut)} | 纪元 ${agent.session.epoch}\n`);
+      const pricing = this.pricingFor(agent.session);
+      console.log(
+        `📊 ${formatUsage(
+          agent.session.usage,
+          pricing.inputPerM,
+          pricing.outputPerM,
+          pricing.cacheInputPerM,
+        )} | 纪元 ${agent.session.epoch}\n`,
+      );
       void this.sessionService.persist(agent.session);
     }
   }
@@ -361,7 +398,7 @@ export class CliApp {
         ? "允许执行? (y=本次 / a=本次会话总是 / n=拒绝) "
         : "允许执行? (y=本次 / n=拒绝) ";
     process.stdout.write(hint);
-    const answer = (await this.lines.next()) ?? "n";
+    const answer = (await this.requestInteractiveLine()) ?? "n";
     const choice = answer.trim().toLowerCase();
     console.log("");
     if (choice === "a" && decision.commandKey !== "") {
@@ -370,6 +407,55 @@ export class CliApp {
       memory.alwaysTools.add(request.tool);
     }
     return choice === "y" || (choice === "a" && (decision.commandKey !== "" || decision.canAlways));
+  }
+
+  private async askToolBudget(
+    sessionId: string,
+    assessment: ToolBudgetAssessment,
+  ): Promise<{ readonly continue: boolean; readonly guidance?: string }> {
+    if (sessionId !== this.currentSessionId) {
+      return {
+        continue: false,
+        guidance:
+          "该会话在后台运行，当前 CLI 无法交互确认追加轮次。请说明已保存到哪一步和剩余质量问题。",
+      };
+    }
+
+    this.streamPrinter.endLine();
+    console.log(`\n${renderToolBudgetAssessment(assessment)}\n`);
+    if (!assessment.canContinue) return { continue: false };
+
+    process.stdout.write(
+      `继续调用工具完善规划? (y=追加 ${assessment.suggestedAdditionalRounds} 轮 / n=按当前结果交付) `,
+    );
+    const answer = ((await this.requestInteractiveLine()) ?? "n").trim().toLowerCase();
+    console.log("");
+    const shouldContinue = ["y", "yes", "继续", "1"].includes(answer);
+    return {
+      continue: shouldContinue,
+      ...(shouldContinue
+        ? {}
+        : {
+            guidance:
+              "用户选择按当前结果交付。请明确已保存版本、质量评分和未关闭的问题，" +
+              "不要声称 strict 校验已经通过。",
+          }),
+    };
+  }
+
+  private requestInteractiveLine(): Promise<string | null> {
+    return new Promise((resolve) => {
+      this.interactiveLineWaiter = resolve;
+    });
+  }
+
+  /** 主循环收到一行输入时，优先交给正在等待的审批/预算选择 */
+  private answerInteractivePrompt(line: string | null): boolean {
+    const resolve = this.interactiveLineWaiter;
+    if (resolve === undefined) return false;
+    this.interactiveLineWaiter = undefined;
+    resolve(line);
+    return true;
   }
 
   private permissionMemoryFor(sessionId: string): PermissionMemory {

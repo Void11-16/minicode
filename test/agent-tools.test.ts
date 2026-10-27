@@ -12,6 +12,7 @@ class ScriptedProvider implements ChatProvider {
   readonly name = "scripted";
   private calls = 0;
   seenTools: ToolDefinition[] | undefined;
+  seenToolsHistories: ToolDefinition[][] = [];
   seenHistories: PromptMessage[][] = [];
   private readonly script: LLMResponse[];
 
@@ -25,6 +26,7 @@ class ScriptedProvider implements ChatProvider {
 
   chatWithTools(history: readonly PromptMessage[], tools: readonly ToolDefinition[]): Promise<LLMResult> {
     this.seenHistories.push([...history]);
+    this.seenToolsHistories.push([...tools]);
     if (this.calls === 0) this.seenTools = [...tools];
     const result = this.script[this.calls];
     this.calls += 1;
@@ -64,6 +66,27 @@ class EndlessToolProvider implements ChatProvider {
   }
 }
 
+class RepeatedFailureProvider implements ChatProvider {
+  readonly name = "repeated-failure";
+  readonly chatWithToolsHistories: PromptMessage[][] = [];
+  readonly finalChatHistories: PromptMessage[][] = [];
+  toolCalls = 0;
+
+  async chat(history: readonly PromptMessage[]): Promise<string> {
+    this.finalChatHistories.push([...history]);
+    return "连续失败已熔断，当前行程尚未完成。";
+  }
+
+  async chatWithTools(history: readonly PromptMessage[]): Promise<LLMResult> {
+    this.chatWithToolsHistories.push([...history]);
+    this.toolCalls += 1;
+    return {
+      type: "tool_calls",
+      toolCalls: [{ id: `failure-${this.toolCalls}`, name: "always_fail", arguments: "{}" }],
+    };
+  }
+}
+
 test("Agent 工具循环: 调用工具 → 结果回传 → 最终回答", async () => {
   const provider = new ScriptedProvider([
     { type: "tool_calls", toolCalls: [{ id: "call_1", name: "echo", arguments: '{"text":"你好"}' }] },
@@ -84,7 +107,8 @@ test("Agent 工具循环: 调用工具 → 结果回传 → 最终回答", async
   );
   assert.equal(agent.history[1].toolCalls?.[0].name, "echo");
   assert.equal(agent.history[2].toolCallId, "call_1");
-  assert.equal(agent.history[2].content, "回显: 你好");
+  assert.match(agent.history[2].content, /^\[tool-result type=generic chars=6\]\n/);
+  assert.match(agent.history[2].content, /回显: 你好/);
 
   // 工具定义传给了 Provider，工具结果出现在第二轮的历史里
   assert.equal(provider.seenTools?.[0].name, "echo");
@@ -93,6 +117,193 @@ test("Agent 工具循环: 调用工具 → 结果回传 → 最终回答", async
   assert.deepEqual(
     events.map((e) => e.type),
     ["tool_start", "tool_end"],
+  );
+});
+
+test("Agent: 同一用户请求只保存一次需求单，换标题重试会被拦下", async () => {
+  const provider = new ScriptedProvider([
+    {
+      type: "tool_calls",
+      toolCalls: [{
+        id: "brief-1",
+        name: "save_travel_brief",
+        arguments: '{"title":"北京三日游","destination":"北京"}',
+      }],
+    },
+    {
+      type: "tool_calls",
+      toolCalls: [{
+        id: "brief-2",
+        name: "save_travel_brief",
+        arguments: '{"title":"北京三日历史之旅","destination":"北京"}',
+      }],
+    },
+    { type: "text", content: "继续生成行程" },
+  ]);
+  const registry = new ToolRegistry();
+  let executions = 0;
+  registry.register({
+    name: "save_travel_brief",
+    description: "测试需求单",
+    parameters: { type: "object", properties: {} },
+    execute: async () => {
+      executions += 1;
+      return "需求单已保存";
+    },
+  });
+  const agent = new ChatAgent(new Session(), provider, registry);
+
+  assert.equal(await agent.run("去北京玩三天", { maxToolRounds: 3 }), "继续生成行程");
+  assert.equal(executions, 1);
+  assert.equal(agent.history.find((message) => message.toolCallId === "brief-2")?.content.includes("重复保存已忽略"), true);
+});
+
+test("Agent: 落盘提醒保留检索能力，不再把必要证据请求封锁成循环", async () => {
+  const search = (round: number): LLMResult => ({
+    type: "tool_calls",
+    toolCalls: [{
+      id: `search-${round}`,
+      name: "search_attractions",
+      arguments: JSON.stringify({ city: "北京", query: `候选-${round}` }),
+    }],
+  });
+  const provider = new ScriptedProvider([
+    {
+      type: "tool_calls",
+      toolCalls: [{
+        id: "brief",
+        name: "save_travel_brief",
+        arguments: '{"title":"北京三日游","destination":"北京","pace":"适中"}',
+      }],
+    },
+    ...[1, 2, 3, 4, 5, 6, 7].map(search),
+    search(8),
+    {
+      type: "tool_calls",
+      toolCalls: [{
+        id: "save-day-1",
+        name: "save_itinerary",
+        arguments: JSON.stringify({
+          title: "北京三日游",
+          days: [{
+            date: "2026-10-27",
+            items: [{
+              name: "故宫",
+              type: "visit",
+              location: { latitude: 39.9163, longitude: 116.3972 },
+            }],
+          }],
+        }),
+      }],
+    },
+    { type: "text", content: "第 1 天已保存，继续完善。" },
+  ]);
+  const registry = new ToolRegistry();
+  let searchExecutions = 0;
+  let itineraryExecutions = 0;
+  registry.register({
+    name: "save_travel_brief",
+    description: "保存需求",
+    parameters: { type: "object", properties: {} },
+    alwaysActive: true,
+    execute: async () => "需求单已保存",
+  });
+  registry.register({
+    name: "search_attractions",
+    description: "搜索景点",
+    parameters: { type: "object", properties: {} },
+    execute: async () => {
+      searchExecutions += 1;
+      return "找到一批景点";
+    },
+  });
+  registry.register({
+    name: "save_itinerary",
+    description: "保存行程",
+    parameters: { type: "object", properties: {} },
+    alwaysActive: true,
+    execute: async () => {
+      itineraryExecutions += 1;
+      return "行程已保存";
+    },
+  });
+  const agent = new ChatAgent(new Session(), provider, registry);
+
+  assert.equal(
+    await agent.run("规划北京三日游", { maxToolRounds: 11 }),
+    "第 1 天已保存，继续完善。",
+  );
+  assert.equal(searchExecutions, 8, "第 8 次必要检索仍可执行");
+  assert.equal(itineraryExecutions, 1);
+
+  assert.ok(provider.seenToolsHistories[8].some((tool) => tool.name === "search_attractions"));
+  assert.equal(agent.history.find((message) => message.toolCallId === "search-8")?.content.includes("资料检索已暂停"), false);
+
+});
+
+test("Agent 保留最近一轮完整工具参数，旧轮次压缩后仍能读取并继续修改", async () => {
+  const hugeArguments = JSON.stringify({
+    title: "北京五日游",
+    days: [{ date: "2026-10-22", items: [{ name: "故宫", note: "详情".repeat(4000) }] }],
+  });
+  const provider = new ScriptedProvider([
+    { type: "tool_calls", toolCalls: [{ id: "call_save", name: "save_itinerary", arguments: hugeArguments }] },
+    { type: "tool_calls", toolCalls: [{ id: "call_load", name: "load_itinerary", arguments: '{"title":"北京五日游"}' }] },
+    { type: "text", content: "已继续修改" },
+  ]);
+  const registry = new ToolRegistry();
+  registry.register({
+    name: "save_itinerary",
+    description: "保存测试行程",
+    parameters: { type: "object", properties: {} },
+    execute: async () => "已保存「北京五日游」",
+  });
+  registry.register({
+    name: "load_itinerary",
+    description: "读取测试行程",
+    parameters: { type: "object", properties: {} },
+    execute: async () => "当前行程：北京五日游",
+  });
+  const agent = new ChatAgent(new Session(), provider, registry);
+
+  assert.equal(await agent.run("规划北京五日游", { maxToolRounds: 3 }), "已继续修改");
+
+  const secondRequest = provider.seenHistories[1];
+  const savedCall = secondRequest
+    .find((message) => message.toolCalls?.some((call) => call.id === "call_save"))
+    ?.toolCalls?.find((call) => call.id === "call_save");
+  assert.ok(savedCall !== undefined);
+  assert.equal(savedCall.name, "save_itinerary");
+  assert.equal(
+    savedCall.arguments,
+    hugeArguments,
+    "最近一轮应保留完整参数，让模型基于真实上一版继续修改",
+  );
+  assert.match(
+    secondRequest.find((message) => message.toolCallId === "call_save")?.content ?? "",
+    /^\[tool-result .*\]\n已保存「北京五日游」/,
+    "压缩参数不能破坏 tool_call / tool_result 配对",
+  );
+
+  const thirdRequest = provider.seenHistories[2];
+  assert.equal(
+    thirdRequest.some((message) =>
+      message.toolCalls?.some((call) => call.id === "call_save") === true ||
+      message.toolCallId === "call_save"
+    ),
+    false,
+    "已压缩的大参数调用与结果不再进入模型上下文，避免占位符被模仿",
+  );
+  assert.equal(
+    thirdRequest.some((message) =>
+      message.toolCalls?.some((call) => call.arguments.includes("_truncated")) === true
+    ),
+    false,
+  );
+  assert.match(
+    thirdRequest.find((message) => message.toolCallId === "call_load")?.content ?? "",
+    /^\[tool-result .*\]\n当前行程：北京五日游/,
+    "压缩后模型仍可重新读取行程并继续修改",
   );
 });
 
@@ -152,6 +363,78 @@ test("Agent 工具循环: 工具出错时错误回传给模型", async () => {
   assert.equal(events[1].type, "tool_error");
 });
 
+test("Agent 工具循环: 历史压缩占位符被拒绝，不会触发真实工具", async () => {
+  const provider = new ScriptedProvider([
+    {
+      type: "tool_calls",
+      toolCalls: [{
+        id: "call_placeholder",
+        name: "save_itinerary",
+        arguments: JSON.stringify({
+          _truncated: true,
+          original_chars: 9000,
+          note: "工具已执行，历史参数已压缩",
+        }),
+      }],
+    },
+    { type: "text", content: "我会重新读取行程后再修改" },
+  ]);
+  const registry = new ToolRegistry();
+  let executed = false;
+  registry.register({
+    name: "save_itinerary",
+    description: "测试",
+    parameters: { type: "object", properties: {} },
+    execute: async () => {
+      executed = true;
+      return "不应执行";
+    },
+  });
+  const agent = new ChatAgent(new Session(), provider, registry);
+
+  assert.equal(await agent.run("继续修改"), "我会重新读取行程后再修改");
+  assert.equal(executed, false);
+  assert.match(agent.history[2].content, /历史压缩占位符/);
+  assert.match(agent.history[2].content, /工具未执行/);
+  assert.equal(
+    provider.seenHistories[1].some((message) =>
+      message.toolCalls?.some((call) => call.arguments.includes("_truncated")) === true
+    ),
+    false,
+    "模型自己提交过的占位参数也不能再回灌到下一轮上下文",
+  );
+});
+
+test("Agent 工具循环: 同一工具错误连续出现时熔断，不空跑到预算上限", async () => {
+  const provider = new RepeatedFailureProvider();
+  const registry = new ToolRegistry();
+  let executions = 0;
+  registry.register({
+    name: "always_fail",
+    description: "测试连续失败",
+    parameters: { type: "object", properties: {} },
+    execute: async () => {
+      executions += 1;
+      throw new Error("同一参数无法执行");
+    },
+  });
+  const agent = new ChatAgent(new Session(), provider, registry);
+
+  const reply = await agent.run("测试", { maxToolRounds: 12 });
+
+  assert.equal(reply, "连续失败已熔断，当前行程尚未完成。");
+  assert.equal(provider.toolCalls, 5, "第 5 次相同失败后应停止继续请求工具");
+  assert.equal(executions, 5);
+  assert.match(
+    provider.finalChatHistories[0].at(-1)?.content ?? "",
+    /同一工具错误连续重复.*熔断/,
+  );
+  assert.match(
+    agent.history.filter((message) => message.role === "tool").at(-1)?.content ?? "",
+    /防循环.*连续出现 5 次/,
+  );
+});
+
 test("Agent 工具循环: 超过最大轮数且收尾失败时抛错（兜底路径）", async () => {
   const endless: LLMResponse = { type: "tool_calls", toolCalls: [{ id: "c", name: "echo", arguments: "{}" }] };
   const provider = new ScriptedProvider([endless, endless, endless]);
@@ -205,6 +488,26 @@ test("Agent 工具循环: 预算用尽时 onBudgetExhausted 可以放宽轮次�
   assert.deepEqual(exhaustedAt, [2, 4]);
   // 续期后多跑了两轮工具调用
   assert.equal(provider.toolCalls, 4);
+});
+
+test("Agent 工具循环: 异步动态预算生效，onToolRound 统计模型轮数而非工具次数", async () => {
+  const provider = new EndlessToolProvider("收尾总结：整合已获得的数据如下…");
+  const registry = new ToolRegistry();
+  registry.register(echoTool());
+  const agent = new ChatAgent(new Session(), provider, registry);
+  const rounds: Array<{ round: number; limit: number; toolCalls: number }> = [];
+
+  const reply = await agent.run("测试", {
+    maxToolRounds: async () => 2,
+    onToolRound: (info) => rounds.push(info),
+  });
+
+  assert.equal(reply, "收尾总结：整合已获得的数据如下…");
+  assert.equal(provider.toolCalls, 2);
+  assert.deepEqual(rounds, [
+    { round: 1, limit: 2, toolCalls: 1 },
+    { round: 2, limit: 2, toolCalls: 1 },
+  ]);
 });
 
 test("Agent 工具循环: 剩余轮数不足时注入收尾提醒（不写入会话历史）", async () => {

@@ -1,7 +1,9 @@
+import { cancellableFetch } from "./travel-request.ts";
+import { convertPoint } from "./coordinates.ts";
 import type { Tool } from "./tool.ts";
 import { requireString } from "./tool.ts";
 import { haversineKm } from "./geo.ts";
-import { geocodeLocation, regionLabel, type GeoResult } from "./geocoding.ts";
+import { geocodeLocation, poiCityVerdict, regionLabel, type GeoResult } from "./geocoding.ts";
 import { getAmapClient } from "./amap-access.ts";
 import type { AmapPoi } from "./amap.ts";
 
@@ -79,6 +81,7 @@ const LOCAL_CUISINE_HINTS: Record<string, string[]> = {
 export function createFoodTool(fetchFn: FetchLike = fetch): Tool {
   return {
     name: "search_restaurants",
+    recordsPlaceEvidence: true,
     description:
       "按多因子综合分搜索地点附近的餐厅（评分40% + 就近30% + 价格契合20% + 本地特色10%），" +
       "返回评分、人均、距离、菜系、本地特色标记、坐标（纬度,经度，可直接写入行程 location）与综合分。规划三餐时：中心传当期景点/住宿名（不是城市名），" +
@@ -102,7 +105,9 @@ export function createFoodTool(fetchFn: FetchLike = fetch): Tool {
       },
       required: ["city"],
     },
-    async execute(args) {
+    async execute(args, ctx) {
+      ctx?.signal?.throwIfAborted();
+      const request = cancellableFetch(fetchFn, ctx?.signal);
       const city = requireString(args, "city");
       const region = typeof args.region === "string" ? args.region.trim() : "";
       const cuisine = typeof args.cuisine === "string" ? args.cuisine.trim() : "";
@@ -114,7 +119,7 @@ export function createFoodTool(fetchFn: FetchLike = fetch): Tool {
         ? args.avoid_cuisines.split(/[,，、;；]+/).map((term) => term.trim()).filter((term) => term !== "")
         : [];
 
-      const amap = getAmapClient();
+      const amap = getAmapClient(ctx?.signal);
       if (amap === undefined) {
         return (
           "美食搜索依赖高德 POI 数据（评分/人均消费/菜系），当前未配置 amap_api_key。\n" +
@@ -122,7 +127,7 @@ export function createFoodTool(fetchFn: FetchLike = fetch): Tool {
         );
       }
 
-      const geo: GeoResult | null = await geocodeLocation(city, fetchFn, region === "" ? undefined : region);
+      const geo: GeoResult | null = await geocodeLocation(city, request, region === "" ? ctx?.destination : region, ctx?.signal);
       if (geo === null) {
         return `未找到地点: ${city}`;
       }
@@ -130,15 +135,15 @@ export function createFoodTool(fetchFn: FetchLike = fetch): Tool {
       // 高德 POI: 050000 = 餐饮服务；关键词用菜系（无菜系时用"美食"）
       const pois = await amap.poiSearch(
         cuisine === "" ? "美食" : cuisine,
-        { latitude: geo.latitude, longitude: geo.longitude },
+        { ...convertPoint(geo, "gcj02") },
         radiusKm * 1000,
         "050000",
       );
 
       const hints = localHintsFor(geo);
-      let foods = pois
-        .map((poi) => toFood(poi, geo, hints))
-        .filter((f): f is FoodInfo => f !== null);
+      let foods = pois.filter((poi) => region === "" || poiCityVerdict(poi, region) === "match")
+        .map((poi) => toFood(poi, { ...geo, ...convertPoint(geo, "gcj02") }, hints))
+        .filter((f): f is FoodInfo => f !== null && f.distanceKm <= radiusKm);
 
       // 硬性过滤：人均上限 + 排除菜系（含 avoid 词的菜系直接剔除）
       if (maxCost !== undefined) {
@@ -207,12 +212,13 @@ export function createFoodTool(fetchFn: FetchLike = fetch): Tool {
       if (avoid.length > 0) notes.push(`已排除菜系: ${avoid.join("、")}`);
       notes.push(`同一菜系最多 ${MAX_PER_CUISINE} 家`);
 
-      return (
+      const output = (
         `${geo.name} 餐厅推荐（前 ${varied.length} / 共 ${foods.length} 家，高德真实数据）\n` +
         `排序依据: 评分40% + 就近30% + 价格契合20% + 本地特色10%（${notes.join("；")}）\n` +
         lines.join("\n") +
         "\n提示: 推荐理由请引用综合分/评分/人均/距离/菜系数据；对具体餐厅调用 get_place_reviews 可查招牌菜、排队等口碑细节。"
       );
+      return await ctx?.evidence?.observePlaces("search_restaurants", region || ctx?.destination || city, output, "amap") ?? output;
     },
   };
 }

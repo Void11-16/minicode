@@ -1,14 +1,28 @@
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
+import { createServer, request as httpRequest, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { readFile, readdir, stat, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, parse, resolve } from "node:path";
+import {
+  AuthError,
+  AuthStore,
+  authCookie,
+  clearedAuthCookie,
+  parseCookie,
+  type AuthUser,
+} from "../auth/auth-store.ts";
+import { updateSavedItinerary } from "../tools/itinerary.ts";
+import { parseItinerary } from "../tools/itinerary-schema.ts";
+import { convertPoint, type GeoPoint, type CoordinateSystem } from "../tools/coordinates.ts";
+import type { ItinerarySnapshot } from "../tools/tool.ts";
+import { updateTravelStateFromSnapshot } from "../core/travel-state.ts";
 import { Session } from "../core/session.ts";
-import { ChatAgent, TurnAbortedError } from "../agent/agent.ts";
+import { ChatAgent, TurnAbortedError, type BudgetExhaustedDecision } from "../agent/agent.ts";
 import { composeSystemPrompt, readWorkspaceRules } from "../agent/prompt.ts";
 import { createProvider, createProviderFromProfile } from "../llm/factory.ts";
 import type { AppConfig } from "../config/config.ts";
 import { ConfigStore, maskSecret } from "../config/config.ts";
 import { ModelProfileStore, newProfileId, type ModelProfile } from "../config/models.ts";
+import { resolvePricing } from "../config/pricing.ts";
 import { JsonFileSessionStore } from "../storage/session-store.ts";
 import { SessionService } from "../service/session-service.ts";
 import { createDefaultRegistry } from "../tools/all.ts";
@@ -19,16 +33,19 @@ import { createPermissionMemory, decidePermission, permissionModeOf } from "../s
 import type { ApprovalMode, PermissionMemory } from "../service/permission-policy.ts";
 import type { AmapClient, RouteGeometry } from "../tools/amap.ts";
 import { haversineKm } from "../tools/geo.ts";
-import { resolvePlanCoordinates, type PlanJson } from "./plan-coords.ts";
+import { resolvePlanCoordinates, unresolvedCoordinateCount, type PlanJson } from "./plan-coords.ts";
 import { applyPlanEdit, suggestPlanOptions } from "./plan-edit.ts";
 import { deleteProfile, listProfiles, parseProfileDocument, profileSummary, saveProfile } from "../tools/profiles.ts";
 import type { ProfileFieldId } from "../tools/profiles.ts";
 import { briefForSessionTitle, toolRoundsForBrief } from "../tools/brief.ts";
 import { PhotoCache } from "./photo-cache.ts";
+import { RouteCache } from "./route-cache.ts";
 import { formatUsage } from "../core/usage.ts";
 import type { ChatProvider } from "../llm/provider.ts";
 import type { Message } from "../core/message.ts";
 import { STEERED_NOTE } from "../runtime/runtime.ts";
+import type { ToolBudgetAssessment } from "../runtime/tool-budget.ts";
+import { renderHistoryForSummary } from "../context/epoch.ts";
 
 /** 工具轮次兜底预算：需求单还没落盘（首轮）时使用，落盘后按行程天数动态调整 */
 const FALLBACK_TOOL_ROUNDS = 30;
@@ -42,6 +59,10 @@ export interface WebServerOptions {
   readonly port?: number;
   /** 直接注入 Provider（测试用可控时序） */
   readonly providerOverride?: ChatProvider;
+  /** 覆盖动态工具轮次预算（测试/嵌入场景；正常 Web 会话不设置） */
+  readonly maxToolRounds?: number;
+  /** 邮箱账号模式；默认开启。测试和嵌入式单用户模式可显式关闭 */
+  readonly auth?: boolean;
 }
 
 export interface RunningWebServer {
@@ -55,6 +76,11 @@ export interface RunningWebServer {
  * 复用 CLI 的全部装配（config/provider/tools/runtime/persist），零运行时依赖。
  */
 export async function startWebServer(options: WebServerOptions = {}): Promise<RunningWebServer> {
+  if (options.auth === false) return startSingleUserWebServer(options);
+  return startAuthenticatedWebServer(options);
+}
+
+async function startSingleUserWebServer(options: WebServerOptions): Promise<RunningWebServer> {
   const rootDir = options.rootDir ?? join(import.meta.dirname, "..", "..");
   const config = {
     ...(await new ConfigStore(join(rootDir, ".minicode", "config.json")).load()),
@@ -116,7 +142,29 @@ export async function startWebServer(options: WebServerOptions = {}): Promise<Ru
   const registry = createDefaultRegistry({ writeRoot: rootDir, workspace: rootDir });
   const store = new JsonFileSessionStore(join(rootDir, ".minicode", "sessions"));
   const photoCache = new PhotoCache(join(rootDir, ".minicode", "photo-cache.json"));
+  const routeCache = new RouteCache(join(rootDir, ".minicode", "route-cache.json"));
   await photoCache.load();
+  await routeCache.load();
+  const coordinateCalibrations = new Map<string, Promise<void>>();
+  const coordinateCalibrationResults = new Map<
+    string,
+    { raw: string; status: "ready" | "unavailable" }
+  >();
+  const backgroundTasks = new Set<Promise<void>>();
+
+  function sessionUsage(session: Session) {
+    const profile = profiles.find((item) => item.id === (session.modelProfile ?? defaultProfileId));
+    const pricing = resolvePricing(config, profile);
+    return {
+      usage: session.usage,
+      usageText: formatUsage(
+        session.usage,
+        pricing.inputPerM,
+        pricing.outputPerM,
+        pricing.cacheInputPerM,
+      ),
+    };
+  }
   // 高德 POI 搜索并发上限很低：照片请求必须串行限速（实测 12 个并发约 1/3 被限流），
   // 同时合并同一地点的在途请求，避免重复消耗配额
   const photoInflight = new Map<string, Promise<string[]>>();
@@ -138,17 +186,76 @@ export async function startWebServer(options: WebServerOptions = {}): Promise<Ru
     );
     return task;
   }
+
+  /**
+   * 坐标校准放到后台：首屏先返回文件里的坐标和虚线路线，
+   * 校准完成后再写回并让前端刷新标记，避免几十次高德 POI 请求阻塞地图打开。
+   */
+  function calibratePlanCoordinates(
+    file: string,
+    raw: string,
+    amap: AmapClient,
+  ): Promise<void> {
+    const existing = coordinateCalibrations.get(file);
+    if (existing !== undefined) return existing;
+    const task = (async () => {
+      let status: "ready" | "unavailable" = "unavailable";
+      try {
+        const plan = JSON.parse(raw) as PlanJson;
+        if (unresolvedCoordinateCount(plan) === 0) {
+          status = "ready";
+          return;
+        }
+        const corrected = await resolvePlanCoordinates(plan, async (query, near) => {
+          const pois = await amap.poiSearch(query, near, 50_000);
+          const first = pois[0];
+          if (first === undefined) return null;
+          const [longitude, latitude] = first.location.split(",").map(Number);
+          if (Number.isNaN(latitude) || Number.isNaN(longitude)) return null;
+          return { latitude, longitude };
+        });
+        if (corrected.resolved === 0) return;
+        // 后台任务期间行程可能被编辑：只有文件仍是本次读取的内容时才写回。
+        const snapshot = await updateSavedItinerary(rootDir, String(plan.title), async (current) => {
+          if (JSON.stringify(current) !== JSON.stringify(parseItinerary(plan))) throw new Error("校准期间行程已更新");
+          Object.assign(current, corrected.plan);
+        });
+        await syncEditedSnapshot(snapshot);
+        status = unresolvedCoordinateCount(corrected.plan) === 0 ? "ready" : "unavailable";
+      } catch {
+        // 高德配额/网络失败时保留原坐标，地图仍可正常使用
+      } finally {
+        // 失败也是一次明确结果；否则接口会永久返回 pending，前端无法结束等待。
+        coordinateCalibrationResults.set(file, { raw, status });
+      }
+    })();
+    coordinateCalibrations.set(file, task);
+    backgroundTasks.add(task);
+    void task.then(
+      () => {
+        coordinateCalibrations.delete(file);
+        backgroundTasks.delete(task);
+      },
+      () => {
+        coordinateCalibrations.delete(file);
+        backgroundTasks.delete(task);
+      },
+    );
+    return task;
+  }
   // 摘要走被压缩会话自己的 Provider：后台会话触发压缩时不能借当前选中会话的模型
-  const summarize = (session: Session, messages: readonly Message[]): Promise<string> =>
-    sessionProvider(session).chat([
+  const summarize = (session: Session, messages: readonly Message[]): Promise<string> => {
+    const transcript = renderHistoryForSummary(messages, session.travelState);
+    return sessionProvider(session).chat([
       {
         role: "user",
-        content: `请把以下对话历史压缩成要点摘要（保留关键事实、决策、用户偏好、日期和数字），直接输出摘要本身：\n\n${messages
-          .map((m) => `[${m.role}] ${m.content}`)
-          .join("\n")
-          .slice(0, 20_000)}`,
+        content:
+          "请把以下对话历史压缩成可继续执行任务的摘要。保留用户约束、日期、预算、已访问地点及类型、" +
+          "已保存行程、质量问题和 artifact 路径；删除寒暄、重复工具过程和不影响后续决策的原文。" +
+          `直接输出摘要本身：\n\n${transcript}`,
       },
     ]);
+  };
   const sessionService = new SessionService(store);
 
   // 启动时恢复最近更新的已落盘会话：否则每次重启当前位都是全新空白会话，
@@ -173,13 +280,26 @@ export async function startWebServer(options: WebServerOptions = {}): Promise<Ru
   // 每个会话独立的 SSE 输出流：多会话可并行执行，切换查看不打断后台任务
   const streams = new Map<string, (event: Record<string, unknown>) => void>();
   const pendingPermissions = new Map<number, { sessionId: string; tool: string; commandKey: string; resolve: (allowed: boolean) => void }>();
+  const pendingBudgets = new Map<number, { sessionId: string; resolve: (decision: BudgetExhaustedDecision) => void }>();
   /** 会话级审批记忆（总是允许的工具 / bash 命令前缀）——策略见 service/permission-policy */
   const permissionMemories = new Map<string, PermissionMemory>();
   /** 信任会话（仅内存，不持久化）：本会话内所有确认直接放行 */
   const trustedSessions = new Set<string>();
   let permissionCounter = 0;
+  let budgetCounter = 0;
   /** 已注册的会话集合：模式切换重建 Runtime 时全部重新注册，后台任务不丢 */
   const registeredSessions = new Set<string>();
+
+  async function syncEditedSnapshot(snapshot: ItinerarySnapshot): Promise<void> {
+    const ids = new Set([...registeredSessions, ...(await store.list()).map((meta) => meta.id)]);
+    for (const id of ids) {
+      const session = runtime.getAgent(id)?.session ?? await store.load(id);
+      if (session === null || session === undefined) continue;
+      if (session.travelState?.itinerary?.title !== snapshot.itinerary.title && session.travelState?.brief?.title !== snapshot.itinerary.title) continue;
+      session.setTravelState(updateTravelStateFromSnapshot(session.travelState, snapshot));
+      await store.save(session);
+    }
+  }
 
   function buildRuntimeOptions(): AgentRuntimeOptions {
     const write = (sessionId: string, event: Record<string, unknown>) => {
@@ -190,16 +310,13 @@ export async function startWebServer(options: WebServerOptions = {}): Promise<Ru
       archive: (session, epoch) => store.archive(session, epoch),
       // 工具轮次按行程需求动态给：7 天游的搜索+口碑+餐饮+逐日保存+校验远超默认 30 轮；
       // 需求单还没落盘的首轮按会话文本里的天数估算
-      maxToolRounds: async (session, input) => {
+      maxToolRounds: options.maxToolRounds ?? (async (session, input) => {
         const text = `${session.title}\n${input}`;
         return toolRoundsForBrief(await briefForSessionTitle(rootDir, text), FALLBACK_TOOL_ROUNDS, text);
-      },
-      onBudgetExtended: (sessionId, info) => {
-        write(sessionId, {
-          type: "budget",
-          text: `⚙️ 工具轮次不够用，预算从 ${info.from} 提到 ${info.to} 轮继续（按行程需求自动续期）`,
-        });
-      },
+      }),
+      onToolBudgetExhausted: (sessionId, assessment) =>
+        requestToolBudgetDecision(sessionId, assessment),
+      rootDir,
       onCheckpoint: (sessionId) => {
         const agent = runtime.getAgent(sessionId);
         if (agent === undefined) return;
@@ -224,7 +341,7 @@ export async function startWebServer(options: WebServerOptions = {}): Promise<Ru
         if (agent !== undefined) {
           // reply 事件：非流式 Provider 的兜底显示（流式时前端已有 delta，会忽略）
           write(sessionId, { type: "reply", text: reply });
-          write(sessionId, { type: "usage", text: formatUsage(agent.session.usage, Number.parseFloat(config.priceIn ?? "2"), Number.parseFloat(config.priceOut ?? "3")) });
+          write(sessionId, { type: "usage", text: sessionUsage(agent.session).usageText });
           void sessionService.persist(agent.session);
         }
       },
@@ -307,6 +424,49 @@ export async function startWebServer(options: WebServerOptions = {}): Promise<Ru
     });
   }
 
+  /**
+   * 工具预算耗尽：把质量报告和可修复性分析推给前端，暂停本轮直到用户选择。
+   * 达到硬上限或不支持交互时直接收尾，不伪造“继续”授权。
+   */
+  function requestToolBudgetDecision(
+    sessionId: string,
+    assessment: ToolBudgetAssessment,
+  ): Promise<BudgetExhaustedDecision> {
+    if (!assessment.canContinue) {
+      streams.get(sessionId)?.({
+        type: "budget",
+        text: `${assessment.explanation} 已达到 ${assessment.ceiling} 轮硬上限，将按当前结果交付。`,
+      });
+      return Promise.resolve({ continue: false });
+    }
+    return new Promise((resolve) => {
+      const id = (budgetCounter += 1);
+      // 5 分钟无响应默认停止，避免后台会话永久挂起；续期是额外成本，需明确授权
+      const timer = setTimeout(() => {
+        if (pendingBudgets.delete(id)) {
+          streams.get(sessionId)?.({
+            type: "budget",
+            text: "等待追加轮次授权超时，已按当前结果交付。",
+          });
+          resolve({ continue: false });
+        }
+      }, 300_000);
+      pendingBudgets.set(id, {
+        sessionId,
+        resolve: (decision) => {
+          clearTimeout(timer);
+          resolve(decision);
+        },
+      });
+      streams.get(sessionId)?.({
+        type: "budget_request",
+        id,
+        sessionId,
+        assessment,
+      });
+    });
+  }
+
   /** 会话当前生效的审批模式：trust（内存）> 会话持久值 > 全局默认 edits */
   function approvalModeOf(sessionId: string): ApprovalMode {
     const session = runtime.getAgent(sessionId)?.session;
@@ -369,6 +529,19 @@ export async function startWebServer(options: WebServerOptions = {}): Promise<Ru
       res.end(req.method === "HEAD" ? undefined : await currentIndexPage());
       return;
     }
+    if (req.method === "GET" && url.pathname === "/api/auth/me") {
+      stateJson(res, {
+        authEnabled: false,
+        authenticated: true,
+        user: {
+          id: "local",
+          email: "",
+          displayName: "本地旅行者",
+          createdAt: 0,
+        },
+      });
+      return;
+    }
     if (req.method === "GET" && url.pathname === "/api/state") {
       stateJson(res, {
         provider: provider.name,
@@ -379,6 +552,7 @@ export async function startWebServer(options: WebServerOptions = {}): Promise<Ru
         modelProfile: currentSession.modelProfile ?? defaultProfileId ?? null,
         workspace: workspaceOf(currentSession),
         approvalMode: approvalModeOf(currentSession.id),
+        ...sessionUsage(currentSession),
       });
       return;
     }
@@ -627,21 +801,41 @@ export async function startWebServer(options: WebServerOptions = {}): Promise<Ru
       }
       return;
     }
-    // 行程路线几何：逐段调高德路径规划（<1.5km 步行、其余驾车），内存缓存避免重复消耗配额
+    // 行程路线几何：逐段调高德路径规划（<1.5km 步行、其余驾车）。
+    // 支持 ?day=N 按天加载，避免多日行程必须等所有路段完成后才显示首日路线。
     if (req.method === "GET" && url.pathname.startsWith("/api/plans/") && url.pathname.endsWith("/routes")) {
       const title = decodeURIComponent(url.pathname.slice("/api/plans/".length, -"/routes".length));
       const safe = title.replace(/[^\p{Script=Han}a-zA-Z0-9-_ ]/gu, "").trim().replace(/\s+/g, "-");
+      const file = join(rootDir, "plans", `${safe}.json`);
       const amap = getAmapClient();
       if (amap === undefined) {
         stateJson(res, { available: false, days: [] });
         return;
       }
+      const rawDay = url.searchParams.get("day");
+      const requestedDay = rawDay === null ? null : Number(rawDay);
+      if (requestedDay !== null && (!Number.isInteger(requestedDay) || requestedDay < 1)) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: "day 必须是正整数" }));
+        return;
+      }
       try {
-        const plan = JSON.parse(await readFile(join(rootDir, "plans", `${safe}.json`), "utf8")) as {
-          days?: Array<{ items?: Array<{ type?: string; location?: { latitude?: number; longitude?: number } }> }>;
+        // 前端先渲染本地坐标，再请求路线；这里等后台校准结束，保证路径与最终标记一致。
+        await coordinateCalibrations.get(file);
+        const plan = JSON.parse(await readFile(file, "utf8")) as {
+          days?: Array<{ items?: Array<{ type?: string; location?: { latitude?: number; longitude?: number; crs?: CoordinateSystem; source?: string } }> }>;
         };
-        const days: Array<{ legs: Array<Record<string, unknown>> }> = [];
-        for (const day of plan.days ?? []) {
+        const allDays = plan.days ?? [];
+        if (requestedDay !== null && requestedDay > allDays.length) {
+          res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ error: `行程「${title}」没有第 ${requestedDay} 天` }));
+          return;
+        }
+        const selectedDays = requestedDay === null
+          ? allDays.map((day, index) => ({ day, number: index + 1 }))
+          : [{ day: allDays[requestedDay - 1], number: requestedDay }];
+        const days: Array<{ day: number; legs: Array<Record<string, unknown>> }> = [];
+        for (const { day, number } of selectedDays) {
           // 路线 = 当天实际停留点：景点 + 住宿/休息（住处是每天的起点终点），按条目顺序连接；
           // 餐厅是"沿途候选"（每餐多个），塞进路线会多绕路，只做标记
           const located = (day.items ?? []).filter(
@@ -652,8 +846,10 @@ export async function startWebServer(options: WebServerOptions = {}): Promise<Ru
           );
           const legs: Array<Record<string, unknown>> = [];
           for (let i = 1; i < located.length; i++) {
-            const from = { latitude: located[i - 1].location!.latitude!, longitude: located[i - 1].location!.longitude! };
-            const to = { latitude: located[i].location!.latitude!, longitude: located[i].location!.longitude! };
+            const fromLocation = located[i - 1].location!;
+            const from = convertPoint({ latitude: fromLocation.latitude!, longitude: fromLocation.longitude!, crs: fromLocation.crs ?? (fromLocation.source === "osm" ? "wgs84" : "gcj02") }, "gcj02");
+            const toLocation = located[i].location!;
+            const to = convertPoint({ latitude: toLocation.latitude!, longitude: toLocation.longitude!, crs: toLocation.crs ?? (toLocation.source === "osm" ? "wgs84" : "gcj02") }, "gcj02");
             const straightM = haversineKm(from.latitude, from.longitude, to.latitude, to.longitude) * 1000;
             // 同一点位的相邻条目（如多个"回酒店"休息块）：不请求路径规划，直连占位保持段数对齐
             if (straightM < 25) {
@@ -661,15 +857,16 @@ export async function startWebServer(options: WebServerOptions = {}): Promise<Ru
               continue;
             }
             const mode = straightM <= 1500 ? "walking" : "driving";
-            const geometry = await cachedLegRoute(amap, mode, from, to);
+            const geometry = await cachedLegRoute(amap, routeCache, mode, from, to);
             legs.push(
               geometry === null
                 ? { mode, straight: true }
                 : { mode, distanceM: geometry.distanceM, durationSec: geometry.durationSec, points: geometry.points },
             );
           }
-          days.push({ legs });
+          days.push({ day: number, legs });
         }
+        await routeCache.persist();
         stateJson(res, { available: true, days });
       } catch {
         res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
@@ -699,7 +896,10 @@ export async function startWebServer(options: WebServerOptions = {}): Promise<Ru
     if (req.method === "POST" && url.pathname === "/api/plans/edit") {
       const body = await readJsonBody(req);
       try {
-        stateJson(res, { ok: true, ...(await applyPlanEdit(rootDir, body)) });
+        let snapshot: ItinerarySnapshot | undefined;
+        const result = await applyPlanEdit(rootDir, body, { workspace: rootDir, onItinerary: (value) => { snapshot = value; } });
+        if (snapshot !== undefined) await syncEditedSnapshot(snapshot);
+        stateJson(res, { ok: true, ...result });
       } catch (error) {
         res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
         res.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
@@ -735,30 +935,34 @@ export async function startWebServer(options: WebServerOptions = {}): Promise<Ru
       try {
         const file = join(rootDir, "plans", `${safe}.json`);
         const raw = await readFile(file, "utf8");
-        // 模型写入的坐标常是估算值（实测偏差可达 2 公里），
-        // 用高德 POI 搜索按地点名重新校准并写回（带 amap-resolved 标记，只修一次）
-        let payload = raw;
+        const plan = JSON.parse(raw) as PlanJson;
+        // 模型写入的坐标常是估算值，但校准不能阻塞首屏：
+        // 先把本地数据交给地图，高德 POI 校准在后台完成后写回文件。
         const amap = getAmapClient();
-        if (amap !== undefined) {
-          try {
-            const corrected = await resolvePlanCoordinates(JSON.parse(raw) as PlanJson, async (query, near) => {
-              const pois = await amap.poiSearch(query, near, 50_000);
-              const first = pois[0];
-              if (first === undefined) return null;
-              const [longitude, latitude] = first.location.split(",").map(Number);
-              if (Number.isNaN(latitude) || Number.isNaN(longitude)) return null;
-              return { latitude, longitude };
-            });
-            if (corrected.resolved > 0) {
-              payload = JSON.stringify(corrected.plan, null, 2);
-              await writeFile(file, payload, "utf8");
-            }
-          } catch {
-            // 校准失败（配额/网络）→ 返回原始数据，不影响地图打开
-          }
+        const unresolved = unresolvedCoordinateCount(plan);
+        const previous = coordinateCalibrationResults.get(file);
+        const knownStatus = previous?.raw === raw ? previous.status : null;
+        if (
+          amap !== undefined &&
+          unresolved > 0 &&
+          knownStatus === null
+        ) {
+          void calibratePlanCoordinates(file, raw, amap);
         }
-        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-        res.end(payload);
+        stateJson(res, {
+          ...plan,
+          days: plan.days?.map((day) => ({ ...day, items: day.items?.map((item) => {
+            const location = item.location;
+            if (location?.latitude === undefined || location.longitude === undefined) return item;
+            return { ...item, display_location: { ...location, ...convertPoint({ latitude: location.latitude, longitude: location.longitude, crs: location.crs ?? (location.source === "osm" ? "wgs84" : "gcj02") }, "gcj02") } };
+          }) })),
+          coordinateCalibration:
+            amap === undefined
+              ? "unavailable"
+              : unresolved === 0
+                ? "ready"
+                : knownStatus ?? "pending",
+        });
       } catch {
         res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
         res.end(JSON.stringify({ error: `未找到行程「${title}」` }));
@@ -780,6 +984,11 @@ export async function startWebServer(options: WebServerOptions = {}): Promise<Ru
       const baseUrl = typeof body.baseUrl === "string" ? body.baseUrl.trim() : "";
       const model = typeof body.model === "string" ? body.model.trim() : "";
       const existing = profiles.find((p) => p.id === (typeof body.id === "string" ? body.id : ""));
+      const priceField = (key: "priceIn" | "priceCacheIn" | "priceOut") => {
+        if (!Object.hasOwn(body, key)) return existing?.[key];
+        const value = typeof body[key] === "string" ? body[key].trim() : "";
+        return value === "" ? undefined : value;
+      };
       // 更新时留空 = 保留旧值（前端编辑表单不回传打码 Key）
       const merged: ModelProfile = {
         id: existing?.id ?? newProfileId(profiles),
@@ -788,6 +997,9 @@ export async function startWebServer(options: WebServerOptions = {}): Promise<Ru
         apiKey: apiKey !== "" ? apiKey : existing?.apiKey,
         baseUrl: baseUrl !== "" ? baseUrl : existing?.baseUrl,
         model: model !== "" ? model : existing?.model,
+        priceIn: priceField("priceIn"),
+        priceCacheIn: priceField("priceCacheIn"),
+        priceOut: priceField("priceOut"),
       };
       if (merged.provider !== "mock" && (merged.apiKey === undefined || merged.apiKey === "")) {
         res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
@@ -856,7 +1068,11 @@ export async function startWebServer(options: WebServerOptions = {}): Promise<Ru
       return;
     }
     if (req.method === "GET" && url.pathname === "/api/history") {
-      stateJson(res, { title: currentSession.title, messages: currentSession.history });
+      stateJson(res, {
+        title: currentSession.title,
+        messages: currentSession.history,
+        ...sessionUsage(currentSession),
+      });
       return;
     }
     if (req.method === "GET" && url.pathname === "/api/sessions") {
@@ -919,6 +1135,7 @@ export async function startWebServer(options: WebServerOptions = {}): Promise<Ru
           id: currentSession.id,
           messages: currentSession.history,
           running: true,
+          ...sessionUsage(currentSession),
         });
         return;
       }
@@ -938,6 +1155,7 @@ export async function startWebServer(options: WebServerOptions = {}): Promise<Ru
         id: currentSession.id,
         messages: currentSession.history,
         running: runtime.hasActiveTurn(currentSession.id),
+        ...sessionUsage(currentSession),
       });
       return;
     }
@@ -960,6 +1178,30 @@ export async function startWebServer(options: WebServerOptions = {}): Promise<Ru
       res.end(JSON.stringify({ ok: true }));
       return;
     }
+    if (req.method === "POST" && url.pathname === "/api/budget") {
+      const body = await readJsonBody(req);
+      const id = typeof body.id === "number" ? body.id : -1;
+      const pending = pendingBudgets.get(id);
+      const action = body.action;
+      if (pending === undefined || (action !== "continue" && action !== "stop")) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: "无效或已处理的轮次授权请求" }));
+        return;
+      }
+      pendingBudgets.delete(id);
+      pending.resolve({
+        continue: action === "continue",
+        ...(action === "stop"
+          ? {
+              guidance:
+                "用户选择按当前结果交付。请明确已保存版本、质量评分和未关闭的问题，" +
+                "不要声称 strict 校验已经通过。",
+            }
+          : {}),
+      });
+      stateJson(res, { ok: true, action });
+      return;
+    }
     if (req.method === "POST" && url.pathname === "/api/queue") {
       const body = await readJsonBody(req);
       const message = typeof body.message === "string" ? body.message.trim() : "";
@@ -979,7 +1221,17 @@ export async function startWebServer(options: WebServerOptions = {}): Promise<Ru
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/stop") {
-      stateJson(res, { stopped: runtime.abortActiveTurn(currentSession.id) });
+      const stopped = runtime.abortActiveTurn(currentSession.id);
+      // 若本轮正停在“是否追加轮次”的选择上，也要解除等待，否则 /stop 会被预算门挂住
+      for (const [id, pending] of pendingBudgets) {
+        if (pending.sessionId !== currentSession.id) continue;
+        pendingBudgets.delete(id);
+        pending.resolve({
+          continue: false,
+          guidance: "用户已停止本轮。请简要说明当前已保存到哪一步和仍未关闭的问题，不要声称 strict 校验已通过。",
+        });
+      }
+      stateJson(res, { stopped });
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/rename") {
@@ -1087,12 +1339,211 @@ export async function startWebServer(options: WebServerOptions = {}): Promise<Ru
   return {
     server,
     port: actualPort,
-    close: () =>
-      new Promise<void>((resolve) => {
+    close: async () => {
+      await new Promise<void>((resolve) => {
         server.closeAllConnections(); // 强制断开 keep-alive 连接，避免 close 悬挂
         server.close(() => resolve());
-      }),
+      });
+      await Promise.allSettled(backgroundTasks);
+    },
   };
+}
+
+/**
+ * 本地账号网关。每个账号在 127.0.0.1 的随机端口上拥有一个独立的旧版单用户 Web 运行时，
+ * 网关只负责认证、同源 Cookie 和请求转发。这样会话、模型、审批与工具预算天然按用户隔离，
+ * 也避免把现有聊天/地图路由复制成两套。
+ */
+async function startAuthenticatedWebServer(options: WebServerOptions): Promise<RunningWebServer> {
+  const rootDir = options.rootDir ?? join(import.meta.dirname, "..", "..");
+  const config = {
+    ...(await new ConfigStore(join(rootDir, ".minicode", "config.json")).load()),
+    ...options.configOverrides,
+  };
+  const authStore = new AuthStore(join(rootDir, ".minicode", "users.db"));
+  const contexts = new Map<string, Promise<RunningWebServer>>();
+  const indexPath = join(import.meta.dirname, "index.html");
+  let indexHtml = await readFile(indexPath, "utf8");
+  let indexMtimeMs = (await stat(indexPath)).mtimeMs;
+
+  async function currentIndexPage(): Promise<string> {
+    const mtimeMs = (await stat(indexPath).catch(() => null))?.mtimeMs ?? 0;
+    if (mtimeMs !== indexMtimeMs) {
+      indexHtml = await readFile(indexPath, "utf8");
+      indexMtimeMs = mtimeMs;
+    }
+    return indexHtml;
+  }
+
+  function contextFor(user: AuthUser): Promise<RunningWebServer> {
+    const existing = contexts.get(user.id);
+    if (existing !== undefined) return existing;
+    const created = startSingleUserWebServer({
+      rootDir: join(rootDir, ".minicode", "users", user.id),
+      port: 0,
+      auth: false,
+      configOverrides: config,
+      ...(options.providerOverride === undefined ? {} : { providerOverride: options.providerOverride }),
+      ...(options.maxToolRounds === undefined ? {} : { maxToolRounds: options.maxToolRounds }),
+    });
+    contexts.set(user.id, created);
+    void created.catch(() => {
+      contexts.delete(user.id);
+    });
+    return created;
+  }
+
+  const server = createServer(async (req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    const url = new URL(req.url ?? "/", "http://localhost");
+    const token = parseCookie(req.headers.cookie, "minicode_session");
+
+    try {
+      if (req.method === "OPTIONS") {
+        res.writeHead(204);
+        res.end();
+        return;
+      }
+
+      if ((req.method === "GET" || req.method === "HEAD") && (url.pathname === "/" || url.pathname === "/index.html")) {
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(req.method === "HEAD" ? undefined : await currentIndexPage());
+        return;
+      }
+
+      if (url.pathname === "/api/auth/register" && req.method === "POST") {
+        const body = await readBody(req);
+        const user = await authStore.register({
+          email: body.email,
+          password: body.password,
+          displayName: body.displayName,
+        });
+        res.setHeader("Set-Cookie", authCookie(authStore.createSession(user.id)));
+        writeJson(res, 201, { user });
+        return;
+      }
+
+      if (url.pathname === "/api/auth/login" && req.method === "POST") {
+        const body = await readBody(req);
+        const user = await authStore.authenticate(body.email, body.password);
+        res.setHeader("Set-Cookie", authCookie(authStore.createSession(user.id)));
+        writeJson(res, 200, { user });
+        return;
+      }
+
+      if (url.pathname === "/api/auth/logout" && req.method === "POST") {
+        authStore.revokeSession(token);
+        res.setHeader("Set-Cookie", clearedAuthCookie());
+        writeJson(res, 200, { ok: true });
+        return;
+      }
+
+      if (url.pathname === "/api/auth/me" && req.method === "GET") {
+        const user = authStore.userForToken(token);
+        writeJson(res, 200, { authEnabled: true, authenticated: user !== null, user });
+        return;
+      }
+
+      if (url.pathname.startsWith("/api/auth/")) {
+        writeJson(res, 404, { error: "not found" });
+        return;
+      }
+
+      const user = authStore.userForToken(token);
+      if (user === null) {
+        writeJson(res, 401, { error: "请先登录后继续" });
+        return;
+      }
+
+      // 文件系统浏览与自定义工作区是本地开发能力，不向注册用户暴露。
+      if (url.pathname === "/api/workspace" || url.pathname === "/api/fs/dirs") {
+        writeJson(res, 403, { error: "账号模式不开放工作区切换" });
+        return;
+      }
+
+      const context = await contextFor(user);
+      await proxyRequest(req, res, context.port);
+    } catch (error) {
+      if (res.headersSent) {
+        res.end();
+        return;
+      }
+      writeJson(
+        res,
+        error instanceof AuthError ? error.status : 500,
+        { error: error instanceof Error ? error.message : String(error) },
+      );
+    }
+  });
+
+  const port = options.port ?? 3000;
+  await new Promise<void>((resolve) => server.listen(port, "127.0.0.1", resolve));
+  const actualPort = (server.address() as { port: number }).port;
+
+  return {
+    server,
+    port: actualPort,
+    close: async () => {
+      await new Promise<void>((resolve) => {
+        server.closeAllConnections();
+        server.close(() => resolve());
+      });
+      const running = await Promise.allSettled(contexts.values());
+      await Promise.allSettled(
+        running.flatMap((result) => (result.status === "fulfilled" ? [result.value.close()] : [])),
+      );
+      authStore.close();
+    },
+  };
+}
+
+async function readBody(request: IncomingMessage): Promise<Record<string, unknown>> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of request) {
+    size += (chunk as Buffer).length;
+    if (size > 1024 * 1024) throw new AuthError(413, "请求内容过大");
+    chunks.push(chunk as Buffer);
+  }
+  const raw = Buffer.concat(chunks).toString("utf8");
+  return JSON.parse(raw === "" ? "{}" : raw) as Record<string, unknown>;
+}
+
+function writeJson(response: ServerResponse, status: number, body: unknown): void {
+  response.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
+  response.end(JSON.stringify(body));
+}
+
+function proxyRequest(request: IncomingMessage, response: ServerResponse, port: number): Promise<void> {
+  return new Promise((resolve) => {
+    const proxied = httpRequest(
+      {
+        hostname: "127.0.0.1",
+        port,
+        path: request.url,
+        method: request.method,
+        headers: {
+          ...request.headers,
+          host: `127.0.0.1:${port}`,
+        },
+      },
+      (proxiedResponse) => {
+        const headers = Object.fromEntries(
+          Object.entries(proxiedResponse.headers).filter(([name]) => !name.startsWith("access-control-")),
+        );
+        response.writeHead(proxiedResponse.statusCode ?? 502, headers);
+        proxiedResponse.pipe(response);
+        proxiedResponse.on("end", resolve);
+      },
+    );
+    proxied.on("error", (error) => {
+      if (!response.headersSent) writeJson(response, 502, { error: `用户运行时暂时不可用：${error.message}` });
+      else response.end();
+      resolve();
+    });
+    request.on("aborted", () => proxied.destroy());
+    request.pipe(proxied);
+  });
 }
 
 /** 支持 ~ 展开：手输 "~/Documents" 之类路径也能直接用 */
@@ -1123,54 +1574,48 @@ async function listSubdirs(target: string): Promise<Array<{ name: string; path: 
     .sort((a, b) => Number(a.hidden) - Number(b.hidden) || a.name.localeCompare(b.name, "zh"));
 }
 
-/** 路段几何内存缓存：道路不随时间变化，避免每次打开地图重复消耗高德方向 API 配额 */
-const legRouteCache = new Map<string, { value: RouteGeometry | null; expiresAt: number }>();
-const LEG_CACHE_MAX = 400;
-/** 两次高德方向请求的最小间隔：实测连发会触发限流（infocode 10021 间歇出现） */
-const ROUTE_REQUEST_GAP_MS = 250;
-let lastRouteRequestAt = 0;
+/** 多个按天请求可能同时碰到同一路段：合并为一次上游调用 */
+const legRouteInflight = new Map<string, Promise<RouteGeometry | null>>();
 
 async function cachedLegRoute(
   amap: AmapClient,
+  cache: RouteCache,
   mode: "walking" | "driving",
-  from: { latitude: number; longitude: number },
-  to: { latitude: number; longitude: number },
+  from: GeoPoint,
+  to: GeoPoint,
 ): Promise<RouteGeometry | null> {
   const key =
     `${mode}|${from.latitude.toFixed(5)},${from.longitude.toFixed(5)}` +
     `|${to.latitude.toFixed(5)},${to.longitude.toFixed(5)}`;
-  const hit = legRouteCache.get(key);
-  if (hit !== undefined && Date.now() < hit.expiresAt) return hit.value;
+  const hit = cache.get(key);
+  if (hit !== undefined) return hit;
+  const existing = legRouteInflight.get(key);
+  if (existing !== undefined) return existing;
 
-  const value = await pacedLegRoute(amap, mode, from, to);
-  if (legRouteCache.size >= LEG_CACHE_MAX) {
-    const oldest = legRouteCache.keys().next().value;
-    if (oldest !== undefined) legRouteCache.delete(oldest);
-  }
-  // 成功长缓存（道路不变）；失败 5 分钟后可重试（限流是瞬时故障）
-  legRouteCache.set(key, {
-    value,
-    expiresAt: Date.now() + (value === null ? 5 * 60_000 : 7 * 24 * 60 * 60_000),
-  });
-  return value;
+  const task = requestLegRoute(amap, mode, from, to);
+  legRouteInflight.set(key, task);
+  void task.then(
+    (value) => {
+      if (value !== null) cache.set(key, value);
+      legRouteInflight.delete(key);
+    },
+    () => legRouteInflight.delete(key),
+  );
+  return task;
 }
 
-/** 带节奏控制与一次重试的方向请求：间隔 ≥250ms，失败后 400ms 重试一次 */
-async function pacedLegRoute(
+/** AmapClient 内部有全局 250ms 闸门；这里只在失败时退避重试一次 */
+async function requestLegRoute(
   amap: AmapClient,
   mode: "walking" | "driving",
-  from: { latitude: number; longitude: number },
-  to: { latitude: number; longitude: number },
+  from: GeoPoint,
+  to: GeoPoint,
   attempt = 0,
 ): Promise<RouteGeometry | null> {
-  const wait = lastRouteRequestAt + ROUTE_REQUEST_GAP_MS - Date.now();
-  if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
-  lastRouteRequestAt = Date.now();
-
   const result = await amap.directionRoute(mode, from, to).catch(() => null);
   if (result === null && attempt === 0) {
     await new Promise((resolve) => setTimeout(resolve, 400));
-    return pacedLegRoute(amap, mode, from, to, 1);
+    return requestLegRoute(amap, mode, from, to, 1);
   }
   return result;
 }

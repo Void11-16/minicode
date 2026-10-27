@@ -1,3 +1,4 @@
+import { hasRecommendationEvidence } from "../tools/recommendation-policy.ts";
 import { timeToMinutes } from "../tools/itinerary-schema.ts";
 import type { Itinerary, ItineraryItem, MealSubtype } from "../tools/itinerary-schema.ts";
 import { totalCostPerPerson, validateItinerary } from "../tools/itinerary-validator.ts";
@@ -45,9 +46,6 @@ export interface ItineraryEvalMetrics {
   readonly budgetRatio: number | undefined;
 }
 
-/** 推荐证据：note 同时包含"评分/口碑分"和"人均/价格"才算有依据 */
-const RATING_EVIDENCE = /(?:评分|\d(?:\.\d+)?\s*分)/;
-const PRICE_EVIDENCE = /(?:人均|均价|¥\s*\d)/;
 const LOCAL_SPECIALTY = /本地/;
 /** 路线效率类问题码（顺路程度相关） */
 const ROUTE_ISSUE_CODES = new Set([
@@ -55,6 +53,7 @@ const ROUTE_ISSUE_CODES = new Set([
   "spatial-gap",
   "transfer-too-tight",
   "long-transport",
+  "remote-day-overpacked",
 ]);
 /** 午餐/晚餐候选数达标线（与校验器 few-meal-options 的口径一致） */
 const MEAL_SLOT_TARGET = 4;
@@ -63,12 +62,11 @@ export function computeItineraryMetrics(
   itinerary: Itinerary,
   expectations: EvalExpectations,
 ): ItineraryEvalMetrics {
-  const report = validateItinerary(
-    itinerary,
-    expectations.budgetPerPersonYuan === undefined
-      ? {}
-      : { budget_per_person_yuan: expectations.budgetPerPersonYuan },
-  );
+  const validated = { ...itinerary, constraints: { ...itinerary.constraints, expected_days: expectations.expectedDays, recommendations: true } };
+  const report = validateItinerary(validated, expectations.budgetPerPersonYuan === undefined ? {} : { budget_per_person_yuan: expectations.budgetPerPersonYuan });
+  const expectedDayMismatch = itinerary.days.length !== expectations.expectedDays;
+  const issueCounts = report.issue_count;
+  const score = report.score;
 
   const slots = collectMealSlots(itinerary);
   const meals = itinerary.days.flatMap((day) => day.items.filter((item) => item.type === "meal"));
@@ -80,10 +78,19 @@ export function computeItineraryMetrics(
   const cost = totalCostPerPerson(itinerary);
 
   return {
-    status: report.status,
-    score: report.score,
-    issueCounts: report.issue_count,
-    issueCodes: [...new Set(report.issues.map((issue) => issue.code))],
+    status:
+      issueCounts.P0 > 0 ? "invalid"
+      : issueCounts.P1 > 0 ? "needs_revision"
+      : issueCounts.P2 > 0 ? "needs_confirmation"
+      : "ok",
+    score,
+    issueCounts,
+    issueCodes: [
+      ...new Set([
+        ...report.issues.map((issue) => issue.code),
+        ...(expectedDayMismatch ? ["expected-day-count-mismatch"] : []),
+      ]),
+    ],
     days: itinerary.days.length,
     expectedDays: expectations.expectedDays,
     visitsPerDay: itinerary.days.length === 0 ? 0 : visitCount / itinerary.days.length,
@@ -124,11 +131,6 @@ function collectMealSlots(itinerary: Itinerary): MealSlot[] {
     }
   }
   return slots;
-}
-
-function hasRecommendationEvidence(item: ItineraryItem): boolean {
-  const note = item.note ?? "";
-  return RATING_EVIDENCE.test(note) && PRICE_EVIDENCE.test(note);
 }
 
 /** 价位档：经济 ≤50 / 中档 ≤120 / 高档 >120，返回该时段覆盖的档数 */

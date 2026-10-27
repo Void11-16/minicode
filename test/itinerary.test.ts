@@ -175,6 +175,28 @@ test("save_itinerary: 保存 JSON + 渲染 Markdown", async () => {
   assert.match(markdown, /- 09:00 · 景点 · 灵隐寺 — 公交约 73 分钟/);
 });
 
+test("save_itinerary: 景点误用 subtype 时转为 place_type，不阻断保存", async () => {
+  const root = await mkdtemp(join(tmpdir(), "minicode-itin-subtype-"));
+  const save = createSaveItineraryTool(root);
+  const load = createLoadItineraryTool(root);
+
+  await save.execute({
+    title: "北京三日游",
+    days: [{
+      items: [{
+        type: "visit",
+        subtype: "博物馆",
+        name: "中国国家博物馆",
+      }],
+    }],
+  });
+
+  const parsed = JSON.parse(await load.execute({ title: "北京三日游" }) as string);
+  assert.equal(parsed.days[0].items[0].type, "visit");
+  assert.equal(parsed.days[0].items[0].subtype, undefined);
+  assert.equal(parsed.days[0].items[0].place_type, "博物馆");
+});
+
 test("save/load/list 往返：增量修改的基础", async () => {
   const root = await mkdtemp(join(tmpdir(), "minicode-itin-"));
   const save = createSaveItineraryTool(root);
@@ -214,6 +236,7 @@ test("save_itinerary: merge=true 按 date 合并（分天保存，其余天保�
   const output = await save.execute({
     title: "合并测试",
     merge: true,
+    merge_mode: "replace_day",
     days: [{ date: "2026-10-11", items: [{ type: "visit", name: "新B" }] }],
   });
   assert.match(output, /合并保存/);
@@ -241,6 +264,20 @@ test("save_itinerary: merge=true 按 date 合并（分天保存，其余天保�
   const fresh = JSON.parse(await load.execute({ title: "全新合并" }) as string);
   assert.equal(fresh.days.length, 1);
   assert.equal(fresh.days[0].items[0].name, "X");
+});
+
+test("save_itinerary: 半成品明确显示完成进度并产生 P1", async () => {
+  const root = await mkdtemp(join(tmpdir(), "minicode-itin-progress-"));
+  const save = createSaveItineraryTool(root);
+
+  const output = await save.execute({
+    title: "北京五日首访游",
+    merge: true,
+    days: [{ date: "2026-10-30", items: [{ type: "visit", name: "前门大街" }] }],
+  });
+  assert.match(output, /1\/5 天/);
+  assert.match(output, /P0 0 \/ P1 [1-9]\d*/);
+  assert.match(output, /尚未完成，不能按完整行程交付/);
 });
 
 test("save_itinerary: 保存质量报告，strict 只拦截行程类 P1（餐饮建议不拦截）", async () => {
@@ -319,4 +356,53 @@ test("load_itinerary: 不存在时提示用 list 查看", async () => {
   const output = await load.execute({ title: "不存在的行程" });
   assert.match(output, /未找到行程「不存在的行程」/);
   assert.match(output, /list_itineraries/);
+});
+
+test("load_itinerary: summary 只返回紧凑目录，day=N 只返回单日完整 JSON", async () => {
+  const root = await mkdtemp(join(tmpdir(), "minicode-itin-read-"));
+  const save = createSaveItineraryTool(root);
+  const load = createLoadItineraryTool(root);
+
+  await save.execute({
+    title: "北京读法",
+    days: [
+      {
+        date: "2026-11-01",
+        items: [{
+          id: "forbidden-city",
+          time: "09:00",
+          type: "visit",
+          name: "故宫",
+          place_type: "古迹",
+          location: { latitude: 39.9163, longitude: 116.3972, source: "amap" },
+        }],
+      },
+      {
+        date: "2026-11-02",
+        items: [{
+          id: "national-museum",
+          time: "09:00",
+          type: "visit",
+          name: "国家博物馆",
+          place_type: "博物馆",
+          location: { latitude: 39.9042, longitude: 116.4074, source: "amap" },
+        }],
+      },
+    ],
+  });
+
+  const summary = await load.execute({ title: "北京读法", summary: true });
+  assert.doesNotMatch(summary, /^\{/);
+  assert.match(summary, /Day 1 · 2026-11-01/);
+  assert.match(summary, /\[visit\/古迹\] 故宫/);
+  assert.match(summary, /\[visit\/博物馆\] 国家博物馆/);
+  assert.match(summary, /id=forbidden-city/);
+
+  const secondDay = JSON.parse(
+    await load.execute({ title: "北京读法", day: 2 }) as string,
+  );
+  assert.equal(secondDay.days.length, 1);
+  assert.equal(secondDay.days[0].items[0].name, "国家博物馆");
+  assert.equal(secondDay.days[0].items[0].place_type, "博物馆");
+  assert.equal(secondDay.days.some((day: { date?: string }) => day.date === "2026-11-01"), false);
 });

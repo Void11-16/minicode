@@ -1,3 +1,4 @@
+import { convertPoint, type CoordinateSystem } from "../tools/coordinates.ts";
 import { haversineKm } from "../tools/geo.ts";
 
 /**
@@ -7,6 +8,7 @@ import { haversineKm } from "../tools/geo.ts";
  */
 
 interface PlanLocation {
+  crs?: CoordinateSystem;
   name?: string;
   latitude?: number;
   longitude?: number;
@@ -67,7 +69,7 @@ export async function resolvePlanCoordinates(
   for (const item of collectItems(next)) {
     if (attempted >= MAX_ITEMS_PER_PLAN) break;
     const location = item.location;
-    if (location === undefined || location.source === RESOLVED_SOURCE) continue;
+    if (location === undefined || item.evidence_verified === true || location.source === RESOLVED_SOURCE) continue;
     if (location.latitude === undefined || location.longitude === undefined) continue;
     const query = resolutionQuery(item);
     if (query === null) continue;
@@ -77,7 +79,7 @@ export async function resolvePlanCoordinates(
     // 会因离质心更近而被错认；解析结果与原坐标偏差过大也直接拒绝（匹配错误的保护）
     const originLatitude = location.latitude;
     const originLongitude = location.longitude;
-    const itemNear = { latitude: originLatitude, longitude: originLongitude };
+    const itemNear = convertPoint({ latitude: originLatitude, longitude: originLongitude, crs: location.crs ?? "gcj02" }, "gcj02");
     let coordinate: Coordinate | null = null;
     for (const variant of queryVariants(query)) {
       if (intervalMs > 0) {
@@ -96,10 +98,23 @@ export async function resolvePlanCoordinates(
     location.latitude = coordinate.latitude;
     location.longitude = coordinate.longitude;
     location.source = RESOLVED_SOURCE;
+    location.crs = "gcj02";
     resolved += 1;
   }
 
   return { plan: next, resolved, attempted };
+}
+
+/** 地图首屏无需同步等待校准，但要据此告知前端“后台仍在校准” */
+export function unresolvedCoordinateCount(plan: PlanJson): number {
+  return collectItems(plan).filter(
+    (item) =>
+      item.evidence_verified !== true &&
+      item.location?.source !== RESOLVED_SOURCE &&
+      item.location?.latitude !== undefined &&
+      item.location?.longitude !== undefined &&
+      resolutionQuery(item) !== null,
+  ).length;
 }
 
 const GENERIC_MEAL_LABELS = new Set(["早餐", "午餐", "晚餐", "夜宵", "宵夜", "加餐", "下午茶", "小吃"]);

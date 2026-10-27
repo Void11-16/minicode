@@ -101,7 +101,9 @@ const responseCache = new TtlCache<OverpassResponse>(10 * 60_000, 50);
 export async function overpassQuery(
   query: string,
   fetchFn: FetchLike = fetch,
+  signal?: AbortSignal,
 ): Promise<OverpassResponse> {
+  signal?.throwIfAborted();
   const cached = responseCache.get(query);
   if (cached !== undefined) {
     return cached;
@@ -112,6 +114,7 @@ export async function overpassQuery(
   let lastError = "";
 
   for (const url of mirrorsByHealth()) {
+    signal?.throwIfAborted();
     const budgetLeft = deadline - Date.now();
     if (budgetLeft <= 0) break;
     attempts += 1;
@@ -123,7 +126,8 @@ export async function overpassQuery(
           "User-Agent": USER_AGENT,
         },
         body: query,
-        signal: AbortSignal.timeout(Math.min(ATTEMPT_TIMEOUT_MS, budgetLeft)),
+        signal: signal === undefined ? AbortSignal.timeout(Math.min(ATTEMPT_TIMEOUT_MS, budgetLeft))
+          : AbortSignal.any([signal, AbortSignal.timeout(Math.min(ATTEMPT_TIMEOUT_MS, budgetLeft))]),
       });
       if (!response.ok) {
         lastError = noteFailure(url, `HTTP ${response.status}`);
@@ -134,6 +138,7 @@ export async function overpassQuery(
       try {
         data = (await response.json()) as OverpassResponse;
       } catch {
+        signal?.throwIfAborted();
         lastError = noteFailure(url, "响应不是 JSON（可能是错误页）");
         continue;
       }
@@ -145,6 +150,7 @@ export async function overpassQuery(
       responseCache.set(query, data);
       return data;
     } catch (error) {
+      signal?.throwIfAborted();
       lastError = noteFailure(url, error instanceof Error ? error.message : String(error));
     }
   }
@@ -167,10 +173,12 @@ export async function overpassFallback(
   query: string,
   primaryError: string | undefined,
   fetchFn: FetchLike,
+  signal?: AbortSignal,
 ): Promise<OverpassResponse> {
   try {
-    return await overpassQuery(query, fetchFn);
+    return await overpassQuery(query, fetchFn, signal);
   } catch (error) {
+    signal?.throwIfAborted();
     const osmError = error instanceof Error ? error.message : String(error);
     if (primaryError === undefined) throw new Error(osmError);
     throw new Error(`高德请求失败（${primaryError}）后转 OpenStreetMap 兜底，OSM 也不可用：${osmError}`);

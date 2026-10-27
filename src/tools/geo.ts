@@ -43,17 +43,17 @@ export function createGeocodeTool(fetchFn: FetchLike = fetch): Tool {
       },
       required: ["location"],
     },
-    async execute(args) {
+    async execute(args, ctx) {
       const location = requireString(args, "location");
       const city = typeof args.city === "string" ? args.city.trim() : "";
 
       if (city !== "") {
-        const verified = await geocodeInCity(location, city, fetchFn);
+        const verified = await geocodeInCity(location, city, fetchFn, ctx?.signal);
         if (verified !== null) {
           const region = regionLabel(verified);
           return [
             `坐标已核实（目标城市 ${city}）：${verified.name}${region === "" ? "" : `（${region}）`}`,
-            `纬度 ${verified.latitude.toFixed(4)}, 经度 ${verified.longitude.toFixed(4)}（高德，省市字段校验通过）`,
+            `纬度 ${verified.latitude.toFixed(4)}, 经度 ${verified.longitude.toFixed(4)}（${verified.crs === "gcj02" ? "高德 GCJ-02" : "OSM WGS84"}，省市字段校验通过）`,
             "可直接写入行程条目的 location.latitude / location.longitude。",
           ].join("\n");
         }
@@ -65,7 +65,7 @@ export function createGeocodeTool(fetchFn: FetchLike = fetch): Tool {
         );
       }
 
-      const candidates = await geocodeCandidates(location, fetchFn, 3);
+      const candidates = await geocodeCandidates(location, fetchFn, 3, ctx?.signal);
       if (candidates.length === 0) {
         return `未找到地点: ${location}`;
       }
@@ -93,10 +93,10 @@ export function createReverseGeocodeTool(fetchFn: FetchLike = fetch): Tool {
       },
       required: ["latitude", "longitude"],
     },
-    async execute(args) {
+    async execute(args, ctx) {
       const latitude = requireNumber(args, "latitude");
       const longitude = requireNumber(args, "longitude");
-      const result = await reverseGeocode(latitude, longitude, fetchFn);
+      const result = await reverseGeocode(latitude, longitude, fetchFn, ctx?.signal);
       if (result === null) {
         return `无法解析坐标 ${latitude}, ${longitude}`;
       }

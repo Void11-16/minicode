@@ -23,6 +23,32 @@ function sseResponse(lines: string[]): Response {
   );
 }
 
+function interruptedSseResponse(lines: string[], error: Error): Response {
+  const encoder = new TextEncoder();
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const line of lines) controller.enqueue(encoder.encode(line));
+        controller.error(error);
+      },
+    }),
+    { status: 200 },
+  );
+}
+
+function partiallyInterruptedSseResponse(line: string, error: Error): Response {
+  const encoder = new TextEncoder();
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode(line));
+        setTimeout(() => controller.error(error), 0);
+      },
+    }),
+    { status: 200 },
+  );
+}
+
 test("chatWithTools: 发送 tools 参数并解析 tool_calls 响应", async () => {
   const requests: Array<Record<string, unknown>> = [];
   const fetchFn = (async (_url: string | URL, init?: RequestInit) => {
@@ -59,6 +85,115 @@ test("chatWithTools: 发送 tools 参数并解析 tool_calls 响应", async () =
     }],
     tool_choice: "auto",
   });
+});
+
+test("chatWithTools: 短暂连接失败会换连接重试", async () => {
+  const connections: Array<string | null> = [];
+  let calls = 0;
+  const fetchFn = (async (_url: string | URL, init?: RequestInit) => {
+    calls += 1;
+    connections.push(init?.headers ? new Headers(init.headers).get("Connection") : null);
+    if (calls === 1) throw new TypeError("fetch failed");
+    return jsonResponse({ choices: [{ message: { content: "恢复成功" } }] });
+  }) as typeof fetch;
+
+  const provider = new OpenAICompatProvider({
+    apiKey: "sk-t",
+    model: "deepseek-chat",
+    fetchFn,
+    retryDelayMs: 0,
+  });
+  const result = await provider.chatWithTools([createMessage("user", "再试一次")], []);
+
+  assert.equal(result.type, "text");
+  assert.equal(calls, 2);
+  assert.deepEqual(connections, ["close", "close"]);
+});
+
+test("chatStreamWithTools: 尚未输出文本的流中断会安全重试", async () => {
+  let calls = 0;
+  const fetchFn = (async () => {
+    calls += 1;
+    if (calls === 1) return interruptedSseResponse([], new TypeError("terminated"));
+    return sseResponse([
+      'data: {"choices":[{"delta":{"content":"重试成功"}}]}\n\n',
+      "data: [DONE]\n\n",
+    ]);
+  }) as typeof fetch;
+  const provider = new OpenAICompatProvider({
+    apiKey: "sk-t",
+    model: "deepseek-chat",
+    fetchFn,
+    retryDelayMs: 0,
+  });
+  const deltas: string[] = [];
+
+  const result = await provider.chatStreamWithTools!(
+    [createMessage("user", "hi")],
+    [],
+    (delta) => deltas.push(delta),
+  );
+
+  assert.equal(result.type, "text");
+  assert.deepEqual(deltas, ["重试成功"]);
+  assert.equal(calls, 2);
+});
+
+test("chatStreamWithTools: 流式重试耗尽后可安全降级为非流式请求", async () => {
+  let calls = 0;
+  const requests: Array<Record<string, unknown>> = [];
+  const fetchFn = (async (_url: string | URL, init?: RequestInit) => {
+    calls += 1;
+    requests.push(JSON.parse(String(init?.body)));
+    if (calls <= 3) return interruptedSseResponse([], new TypeError("terminated"));
+    return jsonResponse({ choices: [{ message: { content: "降级成功" } }] });
+  }) as typeof fetch;
+  const provider = new OpenAICompatProvider({
+    apiKey: "sk-t",
+    model: "deepseek-chat",
+    fetchFn,
+    retryDelayMs: 0,
+  });
+  const deltas: string[] = [];
+
+  const result = await provider.chatStreamWithTools!(
+    [createMessage("user", "hi")],
+    [],
+    (delta) => deltas.push(delta),
+  );
+
+  assert.equal(result.type, "text");
+  assert.deepEqual(deltas, ["降级成功"]);
+  assert.equal(calls, 4);
+  assert.equal(requests[0].stream, true);
+  assert.equal(requests[3].stream, undefined);
+});
+
+test("chatStreamWithTools: 已输出正文后断流不重放或降级", async () => {
+  let calls = 0;
+  const fetchFn = (async () => {
+    calls += 1;
+    return partiallyInterruptedSseResponse(
+      'data: {"choices":[{"delta":{"content":"半段"}}]}\n\n',
+      new TypeError("terminated"),
+    );
+  }) as typeof fetch;
+  const provider = new OpenAICompatProvider({
+    apiKey: "sk-t",
+    model: "deepseek-chat",
+    fetchFn,
+    retryDelayMs: 0,
+  });
+
+  await assert.rejects(
+    () => provider.chatStreamWithTools!(
+      [createMessage("user", "hi")],
+      [],
+      () => {},
+    ),
+    /流式响应中断.*terminated/,
+  );
+  assert.equal(calls, 1, "已经展示给用户的半段文本不能通过重放产生重复");
 });
 
 test("chatWithTools: 历史中的 tool 消息正确序列化", async () => {

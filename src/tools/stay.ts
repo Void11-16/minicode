@@ -1,5 +1,7 @@
+import { cancellableFetch } from "./travel-request.ts";
+import { convertPoint } from "./coordinates.ts";
 import type { Tool } from "./tool.ts";
-import { geocodeLocation, type GeoResult } from "./geocoding.ts";
+import { geocodeLocation, poiCityVerdict, type GeoResult } from "./geocoding.ts";
 import { haversineKm } from "./geo.ts";
 import { requireString } from "./tool.ts";
 import { overpassFallback, type OsmElement } from "./overpass.ts";
@@ -35,43 +37,47 @@ interface StayInfo {
 export function createStayTool(fetchFn: FetchLike = fetch): Tool {
   return {
     name: "search_stays",
+    recordsPlaceEvidence: true,
     description:
       "搜索某个城市的真实住宿：酒店/民宿/青旅，返回名称、地址、距离、坐标（纬度,经度，可直接写入行程 location），" +
-      "高德数据源还包含真实评分与参考价格，结果按评分降序排列。未配置高德或查询失败时使用 OpenStreetMap（无价格评分）。",
+      "高德数据源还包含真实评分与每房每晚参考价格（元/房/晚），结果按评分降序排列。未配置高德或查询失败时使用 OpenStreetMap（无价格评分）。",
     parameters: {
       type: "object",
       properties: {
+        region: { type: "string", description: "目标城市；city 为酒店/商圈名时用于城市核验" },
         city: { type: "string", description: "城市名，例如：杭州" },
         radius_km: { type: "number", description: "搜索半径（公里），默认 10，最大 30" },
         limit: { type: "number", description: "返回数量上限，默认 10" },
       },
       required: ["city"],
     },
-    async execute(args) {
+    async execute(args, ctx) {
+      ctx?.signal?.throwIfAborted();
+      const request = cancellableFetch(fetchFn, ctx?.signal);
       const city = requireString(args, "city");
       const radiusKm = Math.min(30, Math.max(1, typeof args.radius_km === "number" ? args.radius_km : 10));
       const limit = Math.floor(Math.min(30, Math.max(1, typeof args.limit === "number" ? args.limit : 10)));
 
-      const geo: GeoResult | null = await geocodeLocation(city, fetchFn);
+      const geo: GeoResult | null = await geocodeLocation(city, request, typeof args.region === "string" ? args.region : ctx?.destination, ctx?.signal);
       if (geo === null) {
         return `未找到地点: ${city}`;
       }
 
       // 高德主源（配置了 Key 时）：真实评分 + 参考价格
-      const amap = getAmapClient();
+      const amap = getAmapClient(ctx?.signal);
       let amapError: string | undefined;
       if (amap !== undefined && geo.country === "中国") {
         try {
           // 实测: 高德 POI 的 distance 字段经常为空，用坐标自算
           const pois = await amap.poiSearch(
             "酒店",
-            { latitude: geo.latitude, longitude: geo.longitude },
+            { ...convertPoint(geo, "gcj02") },
             radiusKm * 1000,
             "100000", // 住宿服务 POI 分类
           );
           if (pois.length > 0) {
             // 评分降序（无评分沉底）：API 原始顺序会把高分酒店挤出前列
-            const ranked = rankPoisByRating(pois, { latitude: geo.latitude, longitude: geo.longitude });
+            const ranked = rankPoisByRating(pois, { ...convertPoint(geo, "gcj02") }).filter((entry) => entry.distanceKm <= radiusKm && (typeof args.region !== "string" || poiCityVerdict(entry.poi, args.region) === "match"));
             const lines = ranked.slice(0, limit).map((entry, index) => {
               const parts = [`${index + 1}. ${entry.poi.name}`];
               if (entry.poi.type !== undefined && entry.poi.type !== "") parts.push(entry.poi.type);
@@ -79,34 +85,38 @@ export function createStayTool(fetchFn: FetchLike = fetch): Tool {
               if (entry.rating !== undefined) parts.push(`评分 ${entry.rating.toFixed(1)}`);
               const coords = formatPoiCoordinates(entry.poi.location);
               if (coords !== null) parts.push(`坐标 ${coords}`);
-              const cost = entry.poi.biz_ext?.cost;
-              if (cost !== undefined && cost !== "" && cost !== "0") parts.push(`参考价 ¥${cost}起`);
+              const rawCost = entry.poi.biz_ext?.cost;
+              const cost = typeof rawCost === "string" && rawCost.trim() !== "" ? Number(rawCost) : undefined;
+              if (cost !== undefined && Number.isFinite(cost) && cost > 0) parts.push(`参考价 ¥${cost}/房/晚起`);
               if (entry.poi.address !== undefined && entry.poi.address !== "") parts.push(entry.poi.address);
               return parts.filter(Boolean).join(" | ");
             });
-            return (
+            const output = (
               `${geo.name} 住宿（按评分排序，前 ${Math.min(limit, ranked.length)} / 共 ${ranked.length} 家，高德数据）：\n` +
               lines.join("\n")
             );
+            return await ctx?.evidence?.observePlaces("search_stays", String(args.region ?? ctx?.destination ?? city), output, "amap") ?? output;
           }
         } catch (error) {
+          ctx?.signal?.throwIfAborted();
           // 高德失败（限流/配额/网络）→ 降级 OSM；原因要留给用户看，否则像 OSM 的锅
           amapError = error instanceof Error ? error.message : String(error);
         }
       }
 
+      const osmGeo = { ...geo, ...convertPoint(geo, "wgs84") };
       const query =
         "[out:json][timeout:25];" +
         "(" +
-        `nwr(around:${radiusKm * 1000},${geo.latitude},${geo.longitude})` +
+        `nwr(around:${radiusKm * 1000},${osmGeo.latitude},${osmGeo.longitude})` +
         '[tourism~"^(hotel|hostel|guest_house|apartment|motel)$"];' +
         ");" +
         `out center ${limit * 3};`;
 
-      const data = await overpassFallback(query, amapError, fetchFn);
+      const data = await overpassFallback(query, amapError, request, ctx?.signal);
       const stays = (data.elements ?? [])
-        .map((element) => toStay(element, geo))
-        .filter((s): s is StayInfo => s !== null)
+        .map((element) => toStay(element, osmGeo))
+        .filter((s): s is StayInfo => s !== null && s.distanceKm <= radiusKm)
         .sort((a, b) => a.distanceKm - b.distanceKm);
 
       // 按名称去重（node/way/relation 可能重复表示同一家住宿）
@@ -138,12 +148,13 @@ export function createStayTool(fetchFn: FetchLike = fetch): Tool {
         return parts.join(" | ");
       });
 
-      return (
+      const output = (
         `${geo.name} 的真实住宿（前 ${Math.min(limit, unique.length)} / 共 ${unique.length} 家，OpenStreetMap 数据）：\n` +
         lines.join("\n") +
         "\n注：以上为真实存在的住宿，但不含价格；口碑可用 get_place_reviews 查询。" +
         degradedNote(amapError)
       );
+      return await ctx?.evidence?.observePlaces("search_stays", String(args.region ?? ctx?.destination ?? city), output, "osm") ?? output;
     },
   };
 }

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadCases } from "../src/eval/cases.ts";
 import { computeItineraryMetrics } from "../src/eval/metrics.ts";
-import type { Itinerary, ItineraryItem } from "../src/tools/itinerary-schema.ts";
+import { parseItinerary, type Itinerary, type ItineraryItem } from "../src/tools/itinerary-schema.ts";
 
 function meal(
   id: string,
@@ -15,7 +15,9 @@ function meal(
   cuisine: string,
   note: string,
 ): ItineraryItem {
-  return { id, type: "meal", subtype, name, cost_per_person: cost, cuisine, note };
+  return { id, type: "meal", subtype, name, cost_per_person: cost, cuisine, note,
+    ...(/(\d\.\d)分/.test(note) ? { evidence_id: `test-${id}`, evidence_verified: true, rating: Number(/(\d\.\d)分/.exec(note)![1]) } : {}),
+  };
 }
 
 function visit(id: string, name: string, time: string, endTime: string): ItineraryItem {
@@ -90,6 +92,34 @@ test("评测指标：预算超支接线到校验器（budget-exceeded）", () =>
   assert.ok(metrics.issueCodes.includes("budget-exceeded"));
   assert.ok(metrics.issueCounts.P1 > 0);
   assert.ok((metrics.budgetRatio ?? 0) > 1);
+});
+
+test("评测指标：案例期望天数缺失时不能得到满分", () => {
+  const partial = parseItinerary({
+    title: "首访行程",
+    days: [{
+      items: [
+        {
+          time: "09:00",
+          end_time: "11:00",
+          type: "visit",
+          name: "故宫",
+          location: { latitude: 39.9163, longitude: 116.3972 },
+          opening_hours: { opens: "08:30", closes: "17:00" },
+          source: "amap",
+          confidence: "high",
+        },
+      ],
+    }],
+  });
+
+  const metrics = computeItineraryMetrics(partial, { expectedDays: 5 });
+  assert.equal(metrics.days, 1);
+  assert.equal(metrics.expectedDays, 5);
+  assert.equal(metrics.issueCounts.P1, 4);
+  assert.equal(metrics.status, "needs_revision");
+  assert.ok(metrics.score <= 20, "1/5 天半成品的评分不应超过完整度上限");
+  assert.ok(metrics.issueCodes.includes("expected-day-count-mismatch"));
 });
 
 test("金标准样例文件：全部可加载且字段合法", async () => {

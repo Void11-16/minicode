@@ -24,7 +24,7 @@ test("plan_day_routes: 公交/地铁逐段规划并标记过长路段", async ()
       // 地标解析走 POI 搜索（城市约束），不再依赖 geocode 的同名歧义
       const keywords = parsed.searchParams.get("keywords") ?? "";
       return amapResponse({
-        pois: [{ id: "p1", name: keywords, type: "风景名胜", location: GEOCODINGS[keywords] }],
+        pois: [{ id: "p1", name: keywords, cityname: "杭州市", type: "风景名胜", location: GEOCODINGS[keywords] }],
       });
     }
     if (parsed.hostname.includes("amap.com") && parsed.pathname.includes("geocode")) {
@@ -67,7 +67,7 @@ test("plan_day_routes: 合计不足 1 小时时只显示分钟（41 分钟不写
     if (parsed.pathname.includes("place/text")) {
       const keywords = parsed.searchParams.get("keywords") ?? "";
       return amapResponse({
-        pois: [{ id: "p1", name: keywords, type: "风景名胜", location: GEOCODINGS[keywords] }],
+        pois: [{ id: "p1", name: keywords, cityname: "杭州市", type: "风景名胜", location: GEOCODINGS[keywords] }],
       });
     }
     if (parsed.pathname.includes("transit")) {
@@ -96,6 +96,45 @@ test("plan_day_routes: 合计不足 1 小时时只显示分钟（41 分钟不写
   setAmapKey(undefined);
 });
 
+test("plan_day_routes: 检测到远郊移动时返回专用规划模板", async () => {
+  const coords: Record<string, string> = {
+    北京市区: "116.4074,39.9042",
+    八达岭长城: "116.0200,40.3598",
+  };
+  setAmapKey("test-key", (async (url: string | URL | Request) => {
+    const parsed = url instanceof URL ? url : new URL(String(url));
+    if (parsed.pathname.includes("place/text")) {
+      const keywords = parsed.searchParams.get("keywords") ?? "";
+      return amapResponse({
+        pois: [{ id: "p1", name: keywords, cityname: "北京市", type: "风景名胜", location: coords[keywords] }],
+      });
+    }
+    if (parsed.pathname.includes("transit")) {
+      return amapResponse({
+        route: {
+          transits: [{
+            duration: "4800",
+            walking_distance: "500",
+            segments: [{ walking: { distance: "500" }, bus: { buslines: [{ name: "877路" }] } }],
+          }],
+        },
+      });
+    }
+    return amapResponse({});
+  }) as typeof fetch);
+
+  const output = await createPlanRoutesTool().execute({
+    stops: ["北京市区", "八达岭长城"],
+    city: "北京",
+  });
+
+  assert.match(output, /远郊日模板已触发/);
+  assert.match(output, /只安排 1 个远郊主景点/);
+  assert.match(output, /返回市区后不再增加景点/);
+
+  setAmapKey(undefined);
+});
+
 test("plan_day_routes: 未配置高德时降级 OSRM 驾车", async () => {
   setAmapKey(undefined);
   const fetchFn = (async (url: string | URL) => {
@@ -109,7 +148,7 @@ test("plan_day_routes: 未配置高德时降级 OSRM 驾车", async () => {
       const coordinate = coords[query] ?? [120.1, 30.2];
       return jsonResponse({
         features: [{
-          properties: { name: query, state: "浙江省", country: "中国" },
+          properties: { name: query, city: "杭州市", state: "浙江省", country: "中国" },
           geometry: { coordinates: coordinate },
         }],
       });

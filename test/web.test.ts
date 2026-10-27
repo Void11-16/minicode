@@ -1,13 +1,17 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { test } from "node:test";
 import { mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { startWebServer } from "../src/web/server.ts";
 import { JsonFileSessionStore } from "../src/storage/session-store.ts";
 import { Session } from "../src/core/session.ts";
-import type { ChatProvider } from "../src/llm/provider.ts";
+import type { ChatProvider, LLMResult, ToolDefinition } from "../src/llm/provider.ts";
+import type { PromptMessage } from "../src/core/message.ts";
 import { setAmapKey } from "../src/tools/amap-access.ts";
+import type { ToolBudgetAssessment } from "../src/runtime/tool-budget.ts";
 
 /** 可控时序 Provider：chat 挂起直到测试显式 release（验证 steer/排队/停止的并发行为） */
 class ControlledProvider implements ChatProvider {
@@ -34,6 +38,8 @@ class ToolProvider implements ChatProvider {
   readonly name = "tool-test";
   private readonly steps: Array<{ name: string; arguments: string }>;
   private calls = 0;
+  private activated = false;
+  private stepIndex = 0;
 
   constructor(steps: Array<{ name: string; arguments: string }>) {
     this.steps = steps;
@@ -45,15 +51,124 @@ class ToolProvider implements ChatProvider {
 
   async chatWithTools() {
     this.calls += 1;
-    if (this.calls % 2 === 1) {
-      const step = this.steps[(this.calls - 1) / 2];
-      if (step !== undefined) {
-        return { type: "tool_calls" as const, toolCalls: [{ id: `t${this.calls}`, name: step.name, arguments: step.arguments }] };
-      }
+    if (!this.activated) {
+      this.activated = true;
+      return {
+        type: "tool_calls" as const,
+        toolCalls: [{
+          id: "activate-test-tools",
+          name: "activate_tools",
+          arguments: JSON.stringify({ tools: [...new Set(this.steps.map((step) => step.name))] }),
+        }],
+      };
+    }
+    const step = this.steps[this.stepIndex];
+    if (step !== undefined) {
+      this.stepIndex += 1;
+      return {
+        type: "tool_calls" as const,
+        toolCalls: [{ id: `t${this.calls}`, name: step.name, arguments: step.arguments }],
+      };
     }
     return { type: "text" as const, content: "完成" };
   }
 }
+
+/** 先保存一份有问题的行程，之后持续请求工具，直到用户决定追加或停止 */
+class BudgetToolProvider implements ChatProvider {
+  readonly name = "budget-test";
+  readonly toolHistories: PromptMessage[][] = [];
+  readonly chatHistories: PromptMessage[][] = [];
+  private calls = 0;
+  private activated = false;
+  private toolSteps = 0;
+
+  async chat(history: readonly PromptMessage[]): Promise<string> {
+    this.chatHistories.push([...history]);
+    return "当前版本尚未通过 strict 校验，已按现有结果整理交付。";
+  }
+
+  async chatWithTools(
+    history: readonly PromptMessage[],
+    _tools: readonly ToolDefinition[],
+  ): Promise<LLMResult> {
+    this.calls += 1;
+    this.toolHistories.push([...history]);
+    if (!this.activated) {
+      this.activated = true;
+      return {
+        type: "tool_calls",
+        toolCalls: [{
+          id: "activate-budget-tools",
+          name: "activate_tools",
+          arguments: JSON.stringify({ tools: ["save_itinerary", "load_itinerary"] }),
+        }],
+      };
+    }
+    if (history.some((message) => message.content.includes("用户已授权追加工具轮次"))) {
+      return { type: "text", content: "已使用追加轮次完成完善与复验。" };
+    }
+    if (this.toolSteps === 0) {
+      this.toolSteps += 1;
+      return {
+        type: "tool_calls",
+        toolCalls: [
+          {
+            id: "save-budget-plan",
+            name: "save_itinerary",
+            arguments: JSON.stringify(BUDGET_PLAN),
+          },
+        ],
+      };
+    }
+    this.toolSteps += 1;
+    return {
+      type: "tool_calls",
+      toolCalls: [
+        {
+          id: `load-budget-plan-${this.calls}`,
+          name: "load_itinerary",
+          arguments: JSON.stringify({ title: BUDGET_PLAN.title }),
+        },
+      ],
+    };
+  }
+}
+
+const BUDGET_PLAN = {
+  title: "杭州一日游",
+  budget_per_person_yuan: 1000,
+  days: [
+    {
+      date: "2026-10-19",
+      items: [
+        {
+          id: "west-lake",
+          time: "09:00",
+          end_time: "10:00",
+          type: "visit",
+          name: "西湖",
+          location: { latitude: 30.24, longitude: 120.15 },
+          source: "amap",
+          confidence: "high",
+          opening_hours: { opens: "08:00", closes: "18:00", source: "official" },
+        },
+        {
+          id: "lingyin",
+          time: "12:00",
+          end_time: "13:00",
+          type: "visit",
+          name: "灵隐寺",
+          note: "坐标待核实",
+          location: { source: "amap" },
+          source: "amap",
+          confidence: "high",
+          opening_hours: { opens: "07:00", closes: "18:00", source: "official" },
+        },
+      ],
+    },
+  ],
+};
 
 /** 逐帧读取 SSE，可在事件到达时应答（如权限确认） */
 async function collectSse(
@@ -84,9 +199,32 @@ async function withMockServer(): Promise<{ port: number; close: () => Promise<vo
   const running = await startWebServer({
     rootDir: root,
     port: 0,
+    auth: false,
     configOverrides: { provider: "mock" },
   });
   return { port: running.port, close: running.close, root };
+}
+
+async function registerUser(
+  base: string,
+  email: string,
+  password = "wander-2026",
+  displayName?: string,
+) {
+  const response = await fetch(`${base}/api/auth/register`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password, displayName }),
+  });
+  return {
+    response,
+    data: await response.json(),
+    cookie: response.headers.get("set-cookie")?.split(";")[0] ?? "",
+  };
+}
+
+function withSession(cookie: string, headers: Record<string, string> = {}) {
+  return { Cookie: cookie, ...headers };
 }
 
 test("web: 首页与状态接口", async () => {
@@ -94,8 +232,19 @@ test("web: 首页与状态接口", async () => {
   const base = `http://127.0.0.1:${port}`;
 
   const html = await (await fetch(`${base}/`)).text();
-  assert.match(html, /minicode · AI 助手/);
+  assert.match(html, /minicode travels · 旅行规划工作台/);
+  assert.match(html, /下一站，/);
   assert.match(html, /travel-toggle/); // 旅行规划是可开关的能力，不是默认身份
+  assert.match(html, /id="brief-start-date"/);
+  assert.match(html, /id="brief-end-date"/);
+  assert.match(html, /id="brief-days"/);
+  assert.match(html, /data-\$\{group\}="\$\{value\}"/);
+  assert.match(html, /\["慢", "松弛", "每天 1-2 个主景点"\]/);
+  assert.match(html, /\["适中", "适中", "每天 3-4 个景点"\]/);
+  assert.match(html, /\["紧凑", "紧凑", "尽量多看，少留空白"\]/);
+  assert.match(html, /function removeEmptyAiCards/);
+  assert.match(html, /function updateSessionUsage/);
+  assert.match(html, /\/routes\?day=\$\{dayNo\}/);
 
   const state = await (await fetch(`${base}/api/state`)).json();
   assert.equal(state.provider, "mock");
@@ -104,6 +253,264 @@ test("web: 首页与状态接口", async () => {
   assert.ok(state.tools >= 17);
 
   await close();
+});
+
+test("web: 历史、状态和恢复接口返回同一份会话累计用量", async () => {
+  const root = await mkdtemp(join(tmpdir(), "minicode-web-usage-"));
+  const store = new JsonFileSessionStore(join(root, ".minicode", "sessions"));
+  const session = new Session("sess_usage");
+  session.add("user", "帮我规划杭州三日游");
+  session.add("assistant", "已生成行程");
+  session.addUsage({
+    promptTokens: 1200,
+    completionTokens: 300,
+    totalTokens: 1500,
+    promptCacheHitTokens: 400,
+  });
+  await store.save(session);
+
+  const running = await startWebServer({
+    rootDir: root,
+    port: 0,
+    auth: false,
+    configOverrides: { provider: "mock" },
+  });
+  const base = `http://127.0.0.1:${running.port}`;
+
+  try {
+    const history = await (await fetch(`${base}/api/history`)).json();
+    const state = await (await fetch(`${base}/api/state`)).json();
+    const resumed = await (await fetch(`${base}/api/resume`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: session.id }),
+    })).json();
+    const expected = {
+      promptTokens: 1200,
+      completionTokens: 300,
+      totalTokens: 1500,
+      requests: 1,
+      cacheHitTokens: 400,
+    };
+    assert.deepEqual(history.usage, expected);
+    assert.deepEqual(state.usage, expected);
+    assert.deepEqual(resumed.usage, expected);
+    assert.equal(history.usageText, state.usageText);
+    assert.equal(history.usageText, resumed.usageText);
+    assert.match(history.usageText, /tokens: 输入 1200 \/ 输出 300 \/ 共 1500/);
+    assert.match(history.usageText, /估算成本 ¥0\.0033/);
+  } finally {
+    await running.close();
+  }
+});
+
+test("web: 邮箱账号注册、登录、登出与安全存储", async () => {
+  const root = await mkdtemp(join(tmpdir(), "minicode-auth-basic-"));
+  const running = await startWebServer({
+    rootDir: root,
+    port: 0,
+    configOverrides: { provider: "mock" },
+  });
+  const base = `http://127.0.0.1:${running.port}`;
+  const email = "traveller@example.com";
+  const password = "west-lake-2026";
+
+  try {
+    const html = await fetch(`${base}/`);
+    assert.equal(html.status, 200);
+    assert.match(await html.text(), /账号数据独立保存/);
+
+    const me = await (await fetch(`${base}/api/auth/me`)).json();
+    assert.deepEqual(me, { authEnabled: true, authenticated: false, user: null });
+    assert.equal((await fetch(`${base}/api/state`)).status, 401, "未登录不能读取业务状态");
+
+    const invalidEmail = await registerUser(base, "not-an-email", password);
+    assert.equal(invalidEmail.response.status, 400);
+    const shortPassword = await registerUser(base, email, "short");
+    assert.equal(shortPassword.response.status, 400);
+
+    const registered = await registerUser(base, " Traveller@Example.com ", password, "  小  林 ");
+    assert.equal(registered.response.status, 201);
+    assert.equal(registered.data.user.email, email);
+    assert.equal(registered.data.user.displayName, "小 林");
+    assert.match(registered.cookie, /^minicode_session=[A-Za-z0-9_-]+$/);
+    const setCookie = registered.response.headers.get("set-cookie") ?? "";
+    assert.match(setCookie, /HttpOnly/i);
+    assert.match(setCookie, /SameSite=Lax/i);
+    assert.match(setCookie, /Path=\//i);
+    assert.match(setCookie, /Max-Age=2592000/i);
+
+    const duplicate = await registerUser(base, "TRAVELLER@example.com", password);
+    assert.equal(duplicate.response.status, 409);
+    const wrongPassword = await fetch(`${base}/api/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password: "wrong-password" }),
+    });
+    assert.equal(wrongPassword.status, 401);
+
+    const login = await fetch(`${base}/api/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
+    assert.equal(login.status, 200);
+    const loginCookie = login.headers.get("set-cookie")?.split(";")[0] ?? "";
+    assert.notEqual(loginCookie, registered.cookie, "每次登录使用独立会话");
+
+    const authenticatedMe = await (await fetch(`${base}/api/auth/me`, {
+      headers: withSession(loginCookie),
+    })).json();
+    assert.equal(authenticatedMe.authenticated, true);
+    assert.equal(authenticatedMe.user.email, email);
+    assert.equal((await fetch(`${base}/api/state`, {
+      headers: withSession(loginCookie),
+    })).status, 200);
+
+    const database = new DatabaseSync(join(root, ".minicode", "users.db"), { readOnly: true });
+    try {
+      const user = database
+        .prepare("SELECT password_hash FROM users WHERE email = ?")
+        .get(email) as { password_hash: string };
+      assert.match(user.password_hash, /^scrypt\$[a-f0-9]+\$[a-f0-9]+$/);
+      assert.ok(!user.password_hash.includes(password), "数据库不能保存明文密码");
+
+      const token = loginCookie.slice(loginCookie.indexOf("=") + 1);
+      const session = database
+        .prepare("SELECT token_hash FROM auth_sessions WHERE user_id = ? ORDER BY created_at DESC LIMIT 1")
+        .get(registered.data.user.id) as { token_hash: string };
+      assert.equal(session.token_hash, createHash("sha256").update(token).digest("hex"));
+      assert.notEqual(session.token_hash, token, "数据库不能保存可直接使用的登录 token");
+    } finally {
+      database.close();
+    }
+
+    const logout = await fetch(`${base}/api/auth/logout`, {
+      method: "POST",
+      headers: withSession(loginCookie),
+    });
+    assert.equal(logout.status, 200);
+    assert.match(logout.headers.get("set-cookie") ?? "", /Max-Age=0/i);
+    assert.equal((await fetch(`${base}/api/state`, {
+      headers: withSession(loginCookie),
+    })).status, 401, "登出后旧 token 立即失效");
+  } finally {
+    await running.close();
+  }
+});
+
+test("web: 账号数据隔离、同源限制与重启持久登录", async () => {
+  const root = await mkdtemp(join(tmpdir(), "minicode-auth-isolation-"));
+  const first = await startWebServer({
+    rootDir: root,
+    port: 0,
+    configOverrides: { provider: "mock" },
+  });
+  const base = `http://127.0.0.1:${first.port}`;
+  let alice: Awaited<ReturnType<typeof registerUser>>;
+
+  try {
+    alice = await registerUser(base, "alice@example.com", "alice-travel-2026", "Alice");
+    const bob = await registerUser(base, "bob@example.com", "bob-travel-2026", "Bob");
+    assert.equal(alice.response.status, 201);
+    assert.equal(bob.response.status, 201);
+
+    const travel = await fetch(`${base}/api/chat`, {
+      method: "POST",
+      headers: withSession(alice.cookie, { "Content-Type": "application/json" }),
+      body: JSON.stringify({ message: "Alice 的杭州三日游" }),
+    });
+    assert.equal(travel.status, 200);
+    assert.match(await travel.text(), /"type":"done"/);
+
+    const aliceHistory = await (await fetch(`${base}/api/history`, {
+      headers: withSession(alice.cookie),
+    })).json();
+    const bobHistory = await (await fetch(`${base}/api/history`, {
+      headers: withSession(bob.cookie),
+    })).json();
+    assert.ok(aliceHistory.messages.some((message: { content: string }) =>
+      message.content.includes("Alice 的杭州三日游")));
+    assert.ok(!bobHistory.messages.some((message: { content: string }) =>
+      message.content.includes("Alice 的杭州三日游")));
+
+    const savedModel = await fetch(`${base}/api/models`, {
+      method: "POST",
+      headers: withSession(alice.cookie, { "Content-Type": "application/json" }),
+      body: JSON.stringify({ name: "Alice Mock", provider: "mock" }),
+    });
+    assert.equal(savedModel.status, 200);
+    assert.equal((await (await fetch(`${base}/api/models`, {
+      headers: withSession(alice.cookie),
+    })).json()).profiles.length, 1);
+    assert.equal((await (await fetch(`${base}/api/models`, {
+      headers: withSession(bob.cookie),
+    })).json()).profiles.length, 0, "模型配置按账号隔离");
+
+    const bobTravel = await fetch(`${base}/api/chat`, {
+      method: "POST",
+      headers: withSession(bob.cookie, { "Content-Type": "application/json" }),
+      body: JSON.stringify({ message: "Bob 的上海周末" }),
+    });
+    assert.equal(bobTravel.status, 200);
+    await bobTravel.text();
+
+    assert.equal((await fetch(`${base}/api/workspace`, {
+      method: "POST",
+      headers: withSession(alice.cookie, { "Content-Type": "application/json" }),
+      body: JSON.stringify({ path: root }),
+    })).status, 403);
+    assert.equal((await fetch(`${base}/api/fs/dirs`, {
+      headers: withSession(alice.cookie),
+    })).status, 403);
+
+    const sameOrigin = await fetch(`${base}/api/state`, {
+      headers: withSession(alice.cookie, { Origin: "null" }),
+    });
+    assert.equal(sameOrigin.status, 200);
+    assert.equal(sameOrigin.headers.get("access-control-allow-origin"), null, "账号模式不开放跨域 Cookie");
+
+    const userDirs = await readdir(join(root, ".minicode", "users"));
+    assert.deepEqual(
+      new Set(userDirs),
+      new Set([alice.data.user.id, bob.data.user.id]),
+      "每个账号拥有独立的数据目录",
+    );
+
+    await fetch(`${base}/api/auth/logout`, {
+      method: "POST",
+      headers: withSession(bob.cookie),
+    });
+    assert.equal((await fetch(`${base}/api/state`, {
+      headers: withSession(bob.cookie),
+    })).status, 401);
+    assert.equal((await fetch(`${base}/api/state`, {
+      headers: withSession(alice.cookie),
+    })).status, 200, "一个账号登出不影响另一个账号");
+  } finally {
+    await first.close();
+  }
+
+  const second = await startWebServer({
+    rootDir: root,
+    port: 0,
+    configOverrides: { provider: "mock" },
+  });
+  const restartedBase = `http://127.0.0.1:${second.port}`;
+  try {
+    const me = await fetch(`${restartedBase}/api/auth/me`, {
+      headers: withSession(alice!.cookie),
+    });
+    assert.equal(me.status, 200);
+    assert.equal((await me.json()).authenticated, true, "服务重启后 Cookie 仍有效");
+    const history = await (await fetch(`${restartedBase}/api/history`, {
+      headers: withSession(alice!.cookie),
+    })).json();
+    assert.ok(history.messages.some((message: { content: string }) =>
+      message.content.includes("Alice 的杭州三日游")), "重启后账号会话仍可恢复");
+  } finally {
+    await second.close();
+  }
 });
 
 test("web: 聊天 SSE 流式返回并持久化会话", async () => {
@@ -137,6 +544,96 @@ test("web: 聊天 SSE 流式返回并持久化会话", async () => {
   await firstBody.text();
 
   await close();
+});
+
+test("web: 工具轮次耗尽返回质量报告，用户授权追加后继续", async () => {
+  const root = await mkdtemp(join(tmpdir(), "minicode-web-budget-"));
+  const provider = new BudgetToolProvider();
+  const running = await startWebServer({
+    rootDir: root,
+    port: 0,
+    auth: false,
+    providerOverride: provider,
+    maxToolRounds: 2,
+  });
+  const base = `http://127.0.0.1:${running.port}`;
+  let request: { id: number; assessment: ToolBudgetAssessment } | undefined;
+
+  try {
+    const res = await fetch(`${base}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "帮我规划杭州一日游" }),
+    });
+    assert.equal(res.status, 200);
+    const stream = await collectSse(res, async (event) => {
+      if (event.type !== "budget_request") return;
+      request = event as { id: number; assessment: ToolBudgetAssessment };
+      const answer = await fetch(`${base}/api/budget`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: request.id, action: "continue" }),
+      });
+      assert.equal(answer.status, 200);
+    });
+
+    assert.ok(request !== undefined, "应收到预算决策请求");
+    assert.equal(request.assessment.currentLimit, 2);
+    assert.equal(request.assessment.suggestedAdditionalRounds, 15);
+    assert.equal(request.assessment.quality.available, true);
+    assert.equal(request.assessment.quality.score, 91);
+    assert.equal(request.assessment.quality.strict_pass, false);
+    assert.deepEqual(request.assessment.quality.issue_count, { P0: 0, P1: 1, P2: 1 });
+    assert.equal(request.assessment.quality.potential_score, 98);
+    assert.match(request.assessment.repair.summary, /理论上可把评分提升/);
+    assert.match(stream, /当前版本尚未通过 strict 校验/);
+    assert.doesNotMatch(stream, /已使用追加轮次完成完善与复验/);
+    assert.ok(
+      provider.toolHistories.at(-1)?.some((message) =>
+        message.content.includes("用户已授权追加工具轮次"),
+      ),
+      "续跑请求应带上前端质量评估生成的修复指导",
+    );
+  } finally {
+    await running.close();
+  }
+});
+
+test("web: 工具轮次耗尽后用户选择交付，不再追加工具", async () => {
+  const root = await mkdtemp(join(tmpdir(), "minicode-web-budget-stop-"));
+  const provider = new BudgetToolProvider();
+  const running = await startWebServer({
+    rootDir: root,
+    port: 0,
+    auth: false,
+    providerOverride: provider,
+    maxToolRounds: 2,
+  });
+  const base = `http://127.0.0.1:${running.port}`;
+
+  try {
+    const res = await fetch(`${base}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "帮我规划杭州一日游" }),
+    });
+    const stream = await collectSse(res, async (event) => {
+      if (event.type !== "budget_request") return;
+      const request = event as { id: number };
+      const answer = await fetch(`${base}/api/budget`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: request.id, action: "stop" }),
+      });
+      assert.equal(answer.status, 200);
+    });
+
+    assert.match(stream, /当前版本尚未通过 strict 校验/);
+    assert.equal(provider.toolHistories.length, 2, "拒绝追加后不应再发起工具轮次");
+    assert.equal(provider.chatHistories.length, 0, "直接渲染落盘版本，无需额外模型收尾请求");
+  } finally {
+    await running.close();
+  }
 });
 
 test("web: 新会话与空消息校验", async () => {
@@ -268,7 +765,7 @@ test("web: 工作区接口（校验目录/切换/状态同步/恢复默认）", 
 test("web: 多模型配置 CRUD 与按会话选择", async () => {
   const root = await mkdtemp(join(tmpdir(), "minicode-web-models-"));
   // 无任何 Key → 旧配置回退为 Mock（全程离线），profile 全部通过 API 创建
-  const running = await startWebServer({ rootDir: root, port: 0, configOverrides: { provider: "auto" } });
+  const running = await startWebServer({ rootDir: root, port: 0, auth: false, configOverrides: { provider: "auto" } });
   const base = `http://127.0.0.1:${running.port}`;
 
   try {
@@ -549,7 +1046,7 @@ test("web: 重启后自动恢复最近的会话（不再从空白新会话开始
       body: JSON.stringify({ message }),
     }).then((res) => res.text());
 
-  const first = await startWebServer({ rootDir: root, port: 0, configOverrides: { provider: "mock" } });
+  const first = await startWebServer({ rootDir: root, port: 0, auth: false, configOverrides: { provider: "mock" } });
   const base1 = `http://127.0.0.1:${first.port}`;
   let recentId = "";
   try {
@@ -563,7 +1060,7 @@ test("web: 重启后自动恢复最近的会话（不再从空白新会话开始
     await first.close();
   }
 
-  const second = await startWebServer({ rootDir: root, port: 0, configOverrides: { provider: "mock" } });
+  const second = await startWebServer({ rootDir: root, port: 0, auth: false, configOverrides: { provider: "mock" } });
   const base2 = `http://127.0.0.1:${second.port}`;
   try {
     const sessions = await (await fetch(`${base2}/api/sessions`)).json();
@@ -578,7 +1075,7 @@ test("web: 重启后自动恢复最近的会话（不再从空白新会话开始
 test("web: 执行中 steer 注入 + 排队，输出进入同一条流", async () => {
   const provider = new ControlledProvider();
   const root = await mkdtemp(join(tmpdir(), "minicode-web-"));
-  const running = await startWebServer({ rootDir: root, port: 0, providerOverride: provider });
+  const running = await startWebServer({ rootDir: root, port: 0, auth: false, providerOverride: provider });
   const base = `http://127.0.0.1:${running.port}`;
 
   try {
@@ -643,7 +1140,7 @@ test("web: 执行中 steer 注入 + 排队，输出进入同一条流", async ()
 test("web: 多会话并行执行（Codex 式多任务）", async () => {
   const provider = new ControlledProvider();
   const root = await mkdtemp(join(tmpdir(), "minicode-web-parallel-"));
-  const running = await startWebServer({ rootDir: root, port: 0, providerOverride: provider });
+  const running = await startWebServer({ rootDir: root, port: 0, auth: false, providerOverride: provider });
   const base = `http://127.0.0.1:${running.port}`;
 
   try {
@@ -716,12 +1213,18 @@ test("web: 行程路线接口返回真实路径几何（高德方向 API；景�
             { name: "夜宿酒店", type: "rest", location: { name: "酒店", latitude: 28.96, longitude: 118.86 } },
           ],
         },
+        {
+          items: [
+            { name: "酒店", type: "accommodation", location: { name: "酒店", latitude: 28.97, longitude: 118.87 } },
+            { name: "C点", type: "visit", time: "09:00", location: { name: "C点", latitude: 28.971, longitude: 118.871 } },
+          ],
+        },
       ],
     }),
     "utf8",
   );
 
-  const running = await startWebServer({ rootDir: root, port: 0, configOverrides: { provider: "mock" } });
+  const running = await startWebServer({ rootDir: root, port: 0, auth: false, configOverrides: { provider: "mock" } });
   // 服务端在请求时懒读取全局高德客户端，测试后注入假客户端即可
   const calls: string[] = [];
   setAmapKey("test-key", (async (url: string | URL | Request) => {
@@ -752,12 +1255,13 @@ test("web: 行程路线接口返回真实路径几何（高德方向 API；景�
     );
     const data = await res.json();
     assert.equal(data.available, true);
-    assert.equal(data.days.length, 1);
+    assert.deepEqual(data.days.map((day: { day: number }) => day.day), [1, 2]);
     // 路线 = 酒店 → A点 → B点 → 酒店 → 酒店；餐厅不参与；同点位两条目不请求路径
     assert.deepEqual(calls, [
       "118.86,28.96→118.863,28.962",
       "118.863,28.962→118.866,28.963",
       "118.866,28.963→118.86,28.96",
+      "118.87,28.97→118.871,28.971",
     ]);
     assert.equal(data.days[0].legs.length, 4);
     assert.equal(data.days[0].legs[3].straight, true);
@@ -768,6 +1272,22 @@ test("web: 行程路线接口返回真实路径几何（高德方向 API；景�
       [28.96, 118.86],
       [28.962, 118.863],
     ]);
+
+    const dayResponse = await fetch(
+      `http://127.0.0.1:${running.port}/api/plans/${encodeURIComponent("测试路线")}/routes?day=1`,
+    );
+    assert.equal(dayResponse.status, 200);
+    const dayData = await dayResponse.json();
+    assert.deepEqual(dayData.days.map((day: { day: number }) => day.day), [1]);
+    assert.deepEqual(dayData.days[0].legs, data.days[0].legs);
+    const secondDayResponse = await fetch(
+      `http://127.0.0.1:${running.port}/api/plans/${encodeURIComponent("测试路线")}/routes?day=2`,
+    );
+    assert.equal(secondDayResponse.status, 200);
+    const secondDayData = await secondDayResponse.json();
+    assert.deepEqual(secondDayData.days.map((day: { day: number }) => day.day), [2]);
+    assert.deepEqual(secondDayData.days[0].legs, data.days[1].legs);
+    assert.equal(calls.length, 4, "按天重取应命中持久路线缓存，不重复调用高德");
   } finally {
     setAmapKey(undefined);
     await running.close();
@@ -856,7 +1376,7 @@ test("web: 行程条目编辑（替换/调序/删除，重生成 md 与质量报
     "utf8",
   );
   setAmapKey(undefined); // 确保从无 Key 状态开始（推荐降级路径）
-  const running = await startWebServer({ rootDir: root, port: 0, configOverrides: { provider: "mock" } });
+  const running = await startWebServer({ rootDir: root, port: 0, auth: false, configOverrides: { provider: "mock" } });
   const base = `http://127.0.0.1:${running.port}`;
   const edit = (body: unknown) =>
     fetch(`${base}/api/plans/edit`, {
@@ -883,7 +1403,7 @@ test("web: 行程条目编辑（替换/调序/删除，重生成 md 与质量报
     const newB = plan.days[0].items.find((item) => item.id === "b")!;
     assert.equal(newB.name, "新B景点");
     assert.equal(newB.location?.latitude, 30.02);
-    assert.match(newB.note ?? "", /高德4\.7分｜人均约¥35/);
+    assert.match(newB.note ?? "", /评分4\.7（待核实）｜人均约¥35/);
 
     // 调序：B 上移与 A 交换位置，时间槽跟着槽位走
     assert.equal((await edit({ title: "编辑测试", day: 1, item_id: "b", op: "move", direction: "up" })).status, 200);
@@ -945,7 +1465,7 @@ test("web: 行程条目编辑（替换/调序/删除，重生成 md 与质量报
 
 test("web: POI 照片接口（高德 photos，服务端缓存，无 Key 时明确不可用）", async () => {
   const root = await mkdtemp(join(tmpdir(), "minicode-web-photos-"));
-  const running = await startWebServer({ rootDir: root, port: 0, configOverrides: { provider: "mock" } });
+  const running = await startWebServer({ rootDir: root, port: 0, auth: false, configOverrides: { provider: "mock" } });
   const base = `http://127.0.0.1:${running.port}`;
   let calls = 0;
   setAmapKey("test-key", (async (url: string | URL | Request) => {
@@ -988,7 +1508,7 @@ test("web: POI 照片接口（高德 photos，服务端缓存，无 Key 时明�
 
 test("web: 照片接口并发去重（同名同坐标只请求一次上游）", async () => {
   const root = await mkdtemp(join(tmpdir(), "minicode-web-photos2-"));
-  const running = await startWebServer({ rootDir: root, port: 0, configOverrides: { provider: "mock" } });
+  const running = await startWebServer({ rootDir: root, port: 0, auth: false, configOverrides: { provider: "mock" } });
   let calls = 0;
   setAmapKey("test-key", (async () => {
     calls += 1;
@@ -1026,7 +1546,7 @@ test("web: 删除行程接口（连带 Markdown 与质量报告）", async () =>
   await writeFile(join(root, "plans", "待删除.quality.md"), "# 质量报告", "utf8");
   await writePlan("保留.json", "保留");
 
-  const running = await startWebServer({ rootDir: root, port: 0, configOverrides: { provider: "mock" } });
+  const running = await startWebServer({ rootDir: root, port: 0, auth: false, configOverrides: { provider: "mock" } });
   const base = `http://127.0.0.1:${running.port}`;
   const del = (body: unknown) =>
     fetch(`${base}/api/plans/delete`, {
@@ -1061,7 +1581,7 @@ test("web: 删除行程接口（连带 Markdown 与质量报告）", async () =>
 test("web: 审批模式——自动编辑（默认）下文件写入免确认", async () => {
   const root = await mkdtemp(join(tmpdir(), "minicode-approval-"));
   const provider = new ToolProvider([{ name: "write_file", arguments: JSON.stringify({ path: "auto.txt", content: "hi" }) }]);
-  const running = await startWebServer({ rootDir: root, port: 0, providerOverride: provider });
+  const running = await startWebServer({ rootDir: root, port: 0, auth: false, providerOverride: provider });
   const base = `http://127.0.0.1:${running.port}`;
 
   try {
@@ -1083,7 +1603,7 @@ test("web: 审批模式——自动编辑（默认）下文件写入免确认", 
 test("web: 审批模式——逐条确认时文件写入需批准", async () => {
   const root = await mkdtemp(join(tmpdir(), "minicode-approval-"));
   const provider = new ToolProvider([{ name: "write_file", arguments: JSON.stringify({ path: "gated.txt", content: "ok" }) }]);
-  const running = await startWebServer({ rootDir: root, port: 0, providerOverride: provider });
+  const running = await startWebServer({ rootDir: root, port: 0, auth: false, providerOverride: provider });
   const base = `http://127.0.0.1:${running.port}`;
 
   try {
@@ -1123,7 +1643,7 @@ test("web: 审批模式——逐条确认时文件写入需批准", async () => 
 test("web: 审批模式——信任会话下 bash 变更命令免确认", async () => {
   const root = await mkdtemp(join(tmpdir(), "minicode-approval-"));
   const provider = new ToolProvider([{ name: "bash", arguments: JSON.stringify({ command: "echo trusted > t.txt" }) }]);
-  const running = await startWebServer({ rootDir: root, port: 0, providerOverride: provider });
+  const running = await startWebServer({ rootDir: root, port: 0, auth: false, providerOverride: provider });
   const base = `http://127.0.0.1:${running.port}`;
 
   try {
@@ -1160,7 +1680,7 @@ test("web: bash 命令记忆——批准一次后同前缀命令免确认", asyn
     { name: "bash", arguments: JSON.stringify({ command: "npm test" }) },
     { name: "bash", arguments: JSON.stringify({ command: "npm test --silent" }) },
   ]);
-  const running = await startWebServer({ rootDir: root, port: 0, providerOverride: provider });
+  const running = await startWebServer({ rootDir: root, port: 0, auth: false, providerOverride: provider });
   const base = `http://127.0.0.1:${running.port}`;
 
   try {
@@ -1230,7 +1750,7 @@ test("web: 恢复会话是快速纯加载（不再在切换时触发摘要 LLM �
       return "不应被调用";
     },
   };
-  const running = await startWebServer({ rootDir: root, port: 0, providerOverride: provider });
+  const running = await startWebServer({ rootDir: root, port: 0, auth: false, providerOverride: provider });
   const base = `http://127.0.0.1:${running.port}`;
 
   try {

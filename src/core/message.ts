@@ -37,11 +37,28 @@ export interface Message {
   readonly content: string;
   readonly createdAt: number;
   readonly toolCalls?: readonly ToolCall[];
+  /** 本地审计副本：参数被压缩后保留原始调用，但永远不会进入 Prompt */
+  readonly archivedToolCalls?: readonly ToolCall[];
   readonly toolCallId?: string;
   readonly toolName?: string;
 }
 
 let counter = 0;
+
+/** 会话历史里的压缩参数占位符，不是可执行参数 */
+export function isCompactedToolArguments(argumentsJson: string): boolean {
+  try {
+    const value = JSON.parse(argumentsJson) as unknown;
+    return (
+      typeof value === "object" &&
+      value !== null &&
+      !Array.isArray(value) &&
+      (value as Record<string, unknown>)._truncated === true
+    );
+  } catch {
+    return false;
+  }
+}
 
 export function createMessage(
   role: Role,

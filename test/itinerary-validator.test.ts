@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { parseItinerary } from "../src/tools/itinerary-schema.ts";
-import { renderQualityReport, validateItinerary } from "../src/tools/itinerary-validator.ts";
+import {
+  expectedDaysFromTitle,
+  renderQualityReport,
+  validateItinerary,
+} from "../src/tools/itinerary-validator.ts";
 
 const COMPLETE_ITINERARY = parseItinerary({
   title: "杭州一日",
@@ -159,6 +163,20 @@ test("itinerary schema: 拒绝非法时间与重复 ID", () => {
   );
 });
 
+test("itinerary schema: 拒绝重复日期，避免 merge 时静默覆盖另一日", () => {
+  assert.throws(
+    () =>
+      parseItinerary({
+        title: "北京两日游",
+        days: [
+          { date: "2026-10-01", items: [{ name: "故宫" }] },
+          { date: "2026-10-01", items: [{ name: "国博" }] },
+        ],
+      }),
+    /相同日期 2026-10-01/,
+  );
+});
+
 test("itinerary schema: 跨天重复 ID 自动改写为当天默认 ID（同一天内仍报错）", () => {
   // 模型常把 Day 1 的自动 id 抄到后面几天：前端把 id 当全局键，必须改写而不是报错
   const itinerary = parseItinerary({
@@ -286,6 +304,11 @@ test("validate_itinerary: 发现时间冲突、餐段、交通与预算问题", 
   assert.ok(codes.includes("outside-opening-hours"));
   assert.ok(codes.includes("duplicate-place"));
   assert.ok(codes.includes("long-transport"));
+  assert.equal(
+    report.issues.find((item) => item.code === "long-transport")?.level,
+    "P2",
+    "90 分钟交通只提示确认，不应阻断 strict",
+  );
   assert.ok(codes.includes("budget-exceeded"));
   // 餐饮问题单独成列：不参与状态与评分
   assert.ok(mealCodes.includes("missing-lunch"));
@@ -293,6 +316,172 @@ test("validate_itinerary: 发现时间冲突、餐段、交通与预算问题", 
   assert.ok(!codes.includes("missing-lunch"), "餐饮问题不应出现在行程问题里");
   assert.match(renderQualityReport(report), /## P0/);
   assert.match(renderQualityReport(report), /餐饮参考/);
+});
+
+test("validate_itinerary: 远郊日叠加市区景点触发结构性 P1", () => {
+  const itinerary = parseItinerary({
+    title: "北京远郊一日",
+    days: [{
+      date: "2026-10-22",
+      items: [
+        {
+          id: "hotel",
+          time: "07:30",
+          end_time: "08:00",
+          type: "accommodation",
+          name: "酒店出发",
+          location: { latitude: 39.9042, longitude: 116.4074 },
+          source: "amap",
+          confidence: "high",
+        },
+        {
+          id: "to-badaling",
+          time: "08:00",
+          end_time: "09:15",
+          type: "transport",
+          name: "市区到八达岭",
+          from: "酒店",
+          to: "八达岭长城",
+          transport_mode: "driving",
+          planned_duration_min: 75,
+          distance_km: 62,
+          source: "amap",
+          confidence: "high",
+        },
+        {
+          id: "badaling",
+          time: "09:15",
+          end_time: "12:00",
+          type: "visit",
+          name: "八达岭长城",
+          location: { latitude: 40.3598, longitude: 116.0200 },
+          opening_hours: { opens: "06:30", closes: "16:30", source: "official" },
+          source: "amap",
+          confidence: "high",
+        },
+        {
+          id: "back-city",
+          time: "12:00",
+          end_time: "13:20",
+          type: "transport",
+          name: "八达岭回景山",
+          from: "八达岭长城",
+          to: "景山公园",
+          transport_mode: "driving",
+          planned_duration_min: 80,
+          distance_km: 64,
+          source: "amap",
+          confidence: "high",
+        },
+        {
+          id: "jingshan",
+          time: "14:30",
+          end_time: "16:00",
+          type: "visit",
+          name: "景山公园",
+          location: { latitude: 39.9251, longitude: 116.3966 },
+          opening_hours: { opens: "06:00", closes: "21:00", source: "official" },
+          source: "amap",
+          confidence: "high",
+        },
+        {
+          id: "hotel-back",
+          time: "17:00",
+          end_time: "17:30",
+          type: "accommodation",
+          name: "回酒店休息",
+          location: { latitude: 39.9042, longitude: 116.4074 },
+          source: "amap",
+          confidence: "high",
+        },
+      ],
+    }],
+  });
+
+  const report = validateItinerary(itinerary);
+  const transports = report.issues.filter((item) => item.code === "long-transport");
+  assert.deepEqual(transports.map((item) => item.level), ["P2", "P2"]);
+  assert.equal(report.issue_count.P0, 0);
+  const overpacked = report.issues.find((item) => item.code === "remote-day-overpacked");
+  assert.ok(overpacked !== undefined, "远郊主景点后回市区再游览应触发远郊日模板");
+  assert.equal(overpacked.level, "P1");
+  assert.match(overpacked.message, /只保留 1 个主景点/);
+  assert.match(overpacked.message, /最远相距约 58 公里/);
+  assert.equal(report.issue_count.P1, 1);
+});
+
+test("validate_itinerary: 远郊日只保留主景点可正常通过", () => {
+  const itinerary = parseItinerary({
+    title: "北京远郊一日",
+    days: [{
+      date: "2026-10-22",
+      items: [
+        {
+          id: "hotel",
+          time: "07:30",
+          end_time: "08:00",
+          type: "accommodation",
+          name: "酒店出发",
+          location: { latitude: 39.9042, longitude: 116.4074 },
+          source: "amap",
+          confidence: "high",
+        },
+        {
+          id: "to-badaling",
+          time: "08:00",
+          end_time: "09:15",
+          type: "transport",
+          name: "市区到八达岭",
+          from: "酒店",
+          to: "八达岭长城",
+          transport_mode: "driving",
+          planned_duration_min: 75,
+          distance_km: 62,
+          source: "amap",
+          confidence: "high",
+        },
+        {
+          id: "badaling",
+          time: "09:15",
+          end_time: "12:15",
+          type: "visit",
+          name: "八达岭长城",
+          location: { latitude: 40.3598, longitude: 116.0200 },
+          opening_hours: { opens: "06:30", closes: "16:30", source: "official" },
+          source: "amap",
+          confidence: "high",
+        },
+        {
+          id: "back-hotel",
+          time: "12:15",
+          end_time: "13:35",
+          type: "transport",
+          name: "八达岭回酒店",
+          from: "八达岭长城",
+          to: "酒店",
+          transport_mode: "driving",
+          planned_duration_min: 80,
+          distance_km: 62,
+          source: "amap",
+          confidence: "high",
+        },
+        {
+          id: "rest",
+          time: "13:35",
+          end_time: "15:00",
+          type: "rest",
+          name: "回酒店休整",
+          location: { latitude: 39.9042, longitude: 116.4074 },
+          source: "amap",
+          confidence: "high",
+        },
+      ],
+    }],
+  });
+
+  const report = validateItinerary(itinerary);
+  assert.ok(!report.issues.some((item) => item.code === "remote-day-overpacked"));
+  assert.equal(report.issue_count.P1, 0, "单主景点的远郊日不应因景点结构被拦截");
 });
 
 test("validate_itinerary: 空壳返程日（只有吃饭没有游览）必须被拦截", () => {
@@ -342,7 +531,28 @@ test("validate_itinerary: 标题天数与实际天数不符（支持中文数字
   const report = validateItinerary(itinerary);
   const mismatch = report.issues.find((item) => item.code === "title-day-mismatch");
   assert.ok(mismatch !== undefined, "三日游只排 1 天应触发 title-day-mismatch");
+  assert.equal(mismatch.level, "P1", "缺失行程日不能让半成品通过 strict");
+  assert.equal(report.status, "needs_revision");
   assert.match(mismatch.message, /3日游.*1 天/);
+  assert.match(mismatch.message, /补齐缺失日期/);
+});
+
+test("validate_itinerary: 标题中的天数支持修饰词、两日与两位中文数字", () => {
+  assert.equal(expectedDaysFromTitle("北京五日首访游"), 5);
+  assert.equal(expectedDaysFromTitle("北京三日·博物馆历史之旅"), 3);
+  assert.equal(expectedDaysFromTitle("赤峰七日草原地质游"), 7);
+  assert.equal(expectedDaysFromTitle("杭州两日游"), 2);
+  assert.equal(expectedDaysFromTitle("北京5日深度游"), 5);
+  assert.equal(expectedDaysFromTitle("云南十二日摄影行"), 12);
+  assert.equal(expectedDaysFromTitle("周末去北京"), undefined);
+
+  const report = validateItinerary(parseItinerary({
+    title: "北京五日首访游",
+    days: [{ items: [{ time: "09:00", end_time: "11:00", type: "visit", name: "故宫" }] }],
+  }));
+  const mismatch = report.issues.find((item) => item.code === "title-day-mismatch");
+  assert.equal(mismatch?.level, "P1");
+  assert.match(mismatch?.message ?? "", /5日游.*1 天/);
 });
 
 test("validate_itinerary: 空间断层——相邻景点距离超阈值且无交通衔接", () => {

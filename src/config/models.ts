@@ -13,6 +13,12 @@ export interface ModelProfile {
   /** OpenAI 兼容服务的 base URL */
   readonly baseUrl?: string;
   readonly model?: string;
+  /** 缓存未命中输入价（元/百万 tokens）；未设置时回退全局配置 */
+  readonly priceIn?: string;
+  /** 缓存命中输入价（元/百万 tokens）；未设置时回退全局配置 */
+  readonly priceCacheIn?: string;
+  /** 输出价（元/百万 tokens）；未设置时回退全局配置 */
+  readonly priceOut?: string;
 }
 
 interface ModelsFile {
@@ -61,6 +67,9 @@ export class ModelProfileStore {
         provider: "deepseek",
         apiKey: config.deepseekApiKey,
         model: config.deepseekModel ?? "deepseek-chat",
+        priceIn: config.priceIn,
+        priceCacheIn: config.priceCacheIn,
+        priceOut: config.priceOut,
       });
     }
     if (config.llmApiKey !== undefined && config.llmApiKey !== "") {
@@ -71,6 +80,9 @@ export class ModelProfileStore {
         apiKey: config.llmApiKey,
         baseUrl: config.llmBaseUrl ?? "https://api.openai.com/v1",
         model: config.llmModel ?? "gpt-4o-mini",
+        priceIn: config.priceIn,
+        priceCacheIn: config.priceCacheIn,
+        priceOut: config.priceOut,
       });
     }
     if (profiles.length === 0) return existing;

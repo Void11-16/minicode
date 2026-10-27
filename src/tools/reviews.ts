@@ -1,3 +1,4 @@
+import { cancellableFetch } from "./travel-request.ts";
 import type { Tool } from "./tool.ts";
 import { requireString } from "./tool.ts";
 
@@ -36,11 +37,13 @@ export function createReviewsTool(fetchFn: FetchLike = fetch): Tool {
       properties: {
         place: { type: "string", description: "景点名，例如：灵隐寺" },
         city: { type: "string", description: "所在城市，提高搜索准确性，例如：杭州" },
-        aspect: { type: "string", description: "关注侧面：口碑(默认)/人均价格/招牌菜/排队/游玩时长（建议游玩时间，用于排行程定时长）" },
+        aspect: { type: "string", description: "关注侧面：口碑(默认)/人均价格/招牌菜/排队/游玩时长/开放时间/闭馆时间" },
       },
       required: ["place"],
     },
-    async execute(args) {
+    async execute(args, ctx) {
+      ctx?.signal?.throwIfAborted();
+      const request = cancellableFetch(fetchFn, ctx?.signal);
       const place = requireString(args, "place");
       const city = typeof args.city === "string" ? args.city.trim() : "";
       const aspect = typeof args.aspect === "string" ? args.aspect.trim() : "";
@@ -49,6 +52,7 @@ export function createReviewsTool(fetchFn: FetchLike = fetch): Tool {
         : aspect === "招牌菜" ? "招牌菜 必点 推荐"
         : aspect === "排队" ? "排队 等位 攻略"
         : aspect === "游玩时长" ? "建议游玩时长"
+        : aspect === "开放时间" || aspect === "闭馆时间" ? "开放时间 每周 闭馆 官方"
         : "点评 评价 值得去吗";
 
       const errors: string[] = [];
@@ -58,9 +62,9 @@ export function createReviewsTool(fetchFn: FetchLike = fetch): Tool {
       for (const engine of SEARCH_ENGINES) {
         for (const searchQuery of queryVariants(place, city, suffix)) {
           try {
-            const response = await fetchFn(engine.buildUrl(searchQuery), {
+            const response = await request(engine.buildUrl(searchQuery), {
               headers: { "User-Agent": USER_AGENT, "Accept-Language": "zh-CN,zh;q=0.9" },
-              signal: AbortSignal.timeout(30_000),
+              signal: AbortSignal.timeout(engine.timeoutMs ?? 30_000),
             });
             if (!response.ok) {
               errors.push(`${engine.name}: HTTP ${response.status}`);
@@ -77,6 +81,7 @@ export function createReviewsTool(fetchFn: FetchLike = fetch): Tool {
               durationHints.push({ text: hint, source: engine.name });
             }
           } catch (error) {
+            ctx?.signal?.throwIfAborted();
             // 例如 DuckDuckGo 在部分网络环境不可达，降级到下一个引擎
             errors.push(`${engine.name}: ${error instanceof Error ? error.message : String(error)}`);
             break;
@@ -284,6 +289,7 @@ function popularityNote(popularity: Popularity): string {
 /** 搜索引擎列表：按顺序尝试，前者失败或无结果时降级 */
 const SEARCH_ENGINES: Array<{
   readonly name: string;
+  readonly timeoutMs?: number;
   buildUrl(query: string): string;
   parse(html: string): SearchResult[];
 }> = [
@@ -306,6 +312,8 @@ const SEARCH_ENGINES: Array<{
   },
   {
     name: "duckduckgo",
+    // 国内网络下经常无响应；它是最后降级项，不能占用完整的 30 秒。
+    timeoutMs: 4_000,
     buildUrl: (query) => `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`,
     parse: parseDuckDuckGo,
   },

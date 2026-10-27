@@ -1,9 +1,16 @@
 import { SessionScheduler } from "./scheduler.ts";
 import { ContextEpochManager, type CompactInfo } from "../context/epoch.ts";
-import { TurnAbortedError, type AgentEvent, type ChatAgent, type PermissionRequest } from "../agent/agent.ts";
+import {
+  TurnAbortedError,
+  type AgentEvent,
+  type BudgetExhaustedDecision,
+  type ChatAgent,
+  type PermissionRequest,
+} from "../agent/agent.ts";
 import type { Message } from "../core/message.ts";
 import type { Session } from "../core/session.ts";
 import { debugLog } from "../util/logger.ts";
+import { assessToolBudget, budgetGuidance, type ToolBudgetAssessment } from "./tool-budget.ts";
 
 export type DeliveryMode = "steer" | "queue";
 
@@ -13,12 +20,11 @@ export const STEERED_NOTE = "↪ 已注入当前执行轮";
 /** 工具轮次默认预算（未按会话解析时） */
 const DEFAULT_MAX_TOOL_ROUNDS = 30;
 /**
- * 预算用尽后的续期步长与次数上限，以及绝对上限（防止模型无限刷轮次）。
+ * 预算用尽后的续期步长与绝对上限（防止模型无限刷轮次）。
  * 长线行程（10 天以上）逐日搜索+保存+校验实测能用到 80+ 轮，
- * 所以上限放到 150：真不够时按 +15 续期三次，够用就不再续。
+ * 所以上限放到 150：真不够时由用户逐次授权追加（至少 +15 轮）。
  */
 const BUDGET_EXTENSION_STEP = 15;
-const MAX_BUDGET_EXTENSIONS = 3;
 const ROUND_LIMIT_CEILING = 150;
 
 export interface AgentRuntimeOptions {
@@ -32,8 +38,17 @@ export interface AgentRuntimeOptions {
    * 未提供时默认 30。
    */
   readonly maxToolRounds?: number | ((session: Session, input: string) => number | Promise<number>);
-  /** 预算自动续期时通知宿主（前端/CLI 提示用户，便于解释为什么还在跑） */
-  readonly onBudgetExtended?: (sessionId: string, info: { readonly from: number; readonly to: number }) => void;
+  /**
+   * 工具预算用尽时交给宿主询问用户。
+   * assessment 已包含当前已保存行程的质量报告、可修复性与建议追加轮数。
+   * 返回 continue=true 后运行时按 assessment.suggestedAdditionalRounds 追加预算。
+   */
+  readonly onToolBudgetExhausted?: (
+    sessionId: string,
+    assessment: ToolBudgetAssessment,
+  ) => BudgetExhaustedDecision | Promise<BudgetExhaustedDecision>;
+  /** plans/ 与需求单所在目录；默认进程工作目录 */
+  readonly rootDir?: string;
   /** 压缩前归档原始会话（数据安全） */
   readonly archive?: (session: Session, nextEpoch: number) => Promise<void>;
   /** 持久化检查点：会话历史在安全边界落盘（崩溃时最多丢进行中的半步） */
@@ -166,24 +181,57 @@ export class AgentRuntime {
         this.options.onCompact?.(sessionId, compact);
       }
 
-      // 工具轮次预算：先按会话需求解析（例如 7 天行程给更多轮），
-      // 用尽后最多再续期三次，每次 +15 轮，绝对上限 150 轮
+      // 工具轮次预算：先按会话需求解析（例如 7 天行程给更多轮）；
+      // 用尽后暂停并让用户基于当前质量决定是否继续追加，绝对上限 150 轮
       const resolvedLimit = await this.resolveRoundLimit(agent.session, input);
       let limit = resolvedLimit;
-      let extensions = 0;
+      let previousFingerprint: string | undefined;
       const reply = await agent.run(input, {
         // 通用 agent 场景（读文件→改代码→跑测试→修）需要更多轮次；上限保护仍在
         maxToolRounds: () => limit,
         onBudgetExhausted: async (current) => {
-          if (extensions >= MAX_BUDGET_EXTENSIONS) return false;
-          // 需求单可能在本次轮次里才写盘：续期时重新解析一次，取更大的那个
-          const refreshed = await this.resolveRoundLimit(agent.session, input);
-          const next = Math.min(ROUND_LIMIT_CEILING, Math.max(refreshed, current + BUDGET_EXTENSION_STEP));
-          if (next <= current) return false;
-          extensions += 1;
+          // 需求单可能在本次轮次里才落盘：重新解析一次，让续跑量跟得上真实行程工作量
+          const refreshedLimit = await this.resolveRoundLimit(agent.session, input);
+          const extensionStep = Math.max(BUDGET_EXTENSION_STEP, refreshedLimit - current);
+          const assessment = await assessToolBudget({
+            rootDir: this.options.rootDir ?? process.cwd(),
+            session: agent.session,
+            initialLimit: resolvedLimit,
+            currentLimit: current,
+            ceiling: ROUND_LIMIT_CEILING,
+            extensionStep,
+            previousFingerprint,
+          });
+          previousFingerprint = assessment.fingerprint;
+          const decision = this.options.onToolBudgetExhausted === undefined
+            ? { continue: false }
+            : await this.options.onToolBudgetExhausted(sessionId, assessment);
+          if (!decision.continue || assessment.suggestedAdditionalRounds <= 0) {
+            return {
+              ...decision,
+              continue: false,
+              guidance:
+                decision.guidance ??
+                (assessment.canContinue
+                  ? "用户选择按当前结果交付。请明确当前已保存到哪一步、质量评分和仍未关闭的问题；" +
+                    "不要声称 strict 校验已通过，也不要再请求调用工具。"
+                  : `已达到 ${assessment.ceiling} 轮工具调用硬上限，系统将按当前结果交付。` +
+                    "请明确当前已保存到哪一步、质量评分和仍未关闭的问题；" +
+                    "不要声称 strict 校验已通过，也不要再请求调用工具。"),
+            };
+          }
+          const next = Math.min(
+            ROUND_LIMIT_CEILING,
+            current + assessment.suggestedAdditionalRounds,
+          );
+          if (next <= current) return { continue: false };
           limit = next;
-          this.options.onBudgetExtended?.(sessionId, { from: current, to: next });
-          return true;
+          return {
+            continue: true,
+            guidance:
+              `${budgetGuidance(assessment)}\n\n` +
+              `用户已授权把工具预算从 ${current} 轮追加到 ${next} 轮。`,
+          };
         },
         onCheckpoint: () => this.options.onCheckpoint?.(sessionId),
         onEvent: (event) => this.options.onEvent?.(sessionId, event),

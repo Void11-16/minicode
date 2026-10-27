@@ -35,13 +35,50 @@ export function addUsage(summary: UsageSummary, usage: TokenUsage): UsageSummary
   };
 }
 
+export interface CostBreakdown {
+  readonly cacheHitTokens: number;
+  readonly cacheMissTokens: number;
+  readonly outputTokens: number;
+  readonly cacheHitCostYuan: number;
+  readonly cacheMissCostYuan: number;
+  readonly outputCostYuan: number;
+  readonly totalCostYuan: number;
+}
+
+/**
+ * 按单价（元/百万 tokens）估算成本。
+ * priceInPerM 表示缓存未命中输入价；priceCacheInPerM 省略时按未命中价保守估算。
+ */
+export function estimateCostBreakdown(
+  summary: UsageSummary,
+  priceInPerM: number,
+  priceOutPerM: number,
+  priceCacheInPerM: number = priceInPerM,
+): CostBreakdown {
+  const cacheHitTokens = Math.min(Math.max(summary.cacheHitTokens, 0), summary.promptTokens);
+  const cacheMissTokens = Math.max(0, summary.promptTokens - cacheHitTokens);
+  const cacheHitCostYuan = (cacheHitTokens * priceCacheInPerM) / 1_000_000;
+  const cacheMissCostYuan = (cacheMissTokens * priceInPerM) / 1_000_000;
+  const outputCostYuan = (summary.completionTokens * priceOutPerM) / 1_000_000;
+  return {
+    cacheHitTokens,
+    cacheMissTokens,
+    outputTokens: summary.completionTokens,
+    cacheHitCostYuan,
+    cacheMissCostYuan,
+    outputCostYuan,
+    totalCostYuan: cacheHitCostYuan + cacheMissCostYuan + outputCostYuan,
+  };
+}
+
 /** 按单价（元/百万 tokens）估算成本 */
 export function estimateCostYuan(
   summary: UsageSummary,
   priceInPerM: number,
   priceOutPerM: number,
+  priceCacheInPerM: number = priceInPerM,
 ): number {
-  return (summary.promptTokens * priceInPerM + summary.completionTokens * priceOutPerM) / 1_000_000;
+  return estimateCostBreakdown(summary, priceInPerM, priceOutPerM, priceCacheInPerM).totalCostYuan;
 }
 
 /** 会话估算花费是否达到预算（budgetYuan <= 0 视为不限制） */
@@ -50,15 +87,17 @@ export function isOverBudget(
   priceInPerM: number,
   priceOutPerM: number,
   budgetYuan: number,
+  priceCacheInPerM: number = priceInPerM,
 ): boolean {
   if (budgetYuan <= 0) return false;
-  return estimateCostYuan(summary, priceInPerM, priceOutPerM) >= budgetYuan;
+  return estimateCostYuan(summary, priceInPerM, priceOutPerM, priceCacheInPerM) >= budgetYuan;
 }
 
 export function formatUsage(
   summary: UsageSummary,
   priceInPerM?: number,
   priceOutPerM?: number,
+  priceCacheInPerM?: number,
 ): string {
   const base =
     `tokens: 输入 ${summary.promptTokens} / 输出 ${summary.completionTokens} / ` +
@@ -66,11 +105,20 @@ export function formatUsage(
   if (priceInPerM === undefined || priceOutPerM === undefined) {
     return base;
   }
-  const cost = estimateCostYuan(summary, priceInPerM, priceOutPerM);
-  let result = `${base}，估算成本 ¥${cost.toFixed(4)}`;
+  const cost = estimateCostBreakdown(
+    summary,
+    priceInPerM,
+    priceOutPerM,
+    priceCacheInPerM ?? priceInPerM,
+  );
+  let result = `${base}，估算成本 ¥${cost.totalCostYuan.toFixed(4)}`;
   if (summary.cacheHitTokens > 0 && summary.promptTokens > 0) {
     const percent = Math.round((summary.cacheHitTokens / summary.promptTokens) * 100);
     result += `，缓存命中 ${percent}%`;
+    result +=
+      `（缓存输入 ¥${cost.cacheHitCostYuan.toFixed(4)} / ` +
+      `未命中输入 ¥${cost.cacheMissCostYuan.toFixed(4)} / ` +
+      `输出 ¥${cost.outputCostYuan.toFixed(4)}）`;
   }
   return result;
 }

@@ -36,6 +36,21 @@ test("read_file: 行号输出 + offset/limit 分段 + 无匹配提示行数", as
   assert.match(sliced, /还有 1 行未显示/);
 });
 
+test("read_file: 单次字符预算有界，并返回可直接续读的 offset", async () => {
+  const workspace = await tempWorkspace();
+  const lines = Array.from({ length: 400 }, (_, index) => `line-${index + 1}-${"内容".repeat(15)}`);
+  await writeFile(join(workspace, "long.txt"), lines.join("\n"), "utf8");
+  const tool = createReadFileTool();
+
+  const output = await tool.execute({ path: "long.txt" }, { workspace });
+  assert.ok(output.length < 3000);
+  const nextOffset = Number(/可用 offset=(\d+)/.exec(output)?.[1]);
+  assert.ok(nextOffset > 1);
+
+  const next = await tool.execute({ path: "long.txt", offset: nextOffset }, { workspace });
+  assert.match(next, new RegExp(`^long\\.txt[^\\n]*\\n${nextOffset}\\tline-${nextOffset}-`));
+});
+
 test("read_file: 越界/不存在/目录/超 2MB 的场景", async () => {
   const workspace = await tempWorkspace();
   const outside = await tempWorkspace();

@@ -6,6 +6,7 @@ import { ChatAgent, type AgentEvent, type PermissionRequest } from "../src/agent
 import { ToolRegistry } from "../src/tools/tool.ts";
 import type { ChatProvider, LLMResult, ToolDefinition } from "../src/llm/provider.ts";
 import type { PromptMessage } from "../src/core/message.ts";
+import type { ToolBudgetAssessment } from "../src/runtime/tool-budget.ts";
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -22,9 +23,17 @@ class ManualProvider implements ChatProvider {
   readonly name = "manual";
   readonly pending: Array<{ history: PromptMessage[]; resolve: (result: LLMResult) => void }> = [];
   readonly completed: PromptMessage[][] = [];
+  readonly chatHistories: PromptMessage[][] = [];
+  private readonly wrapUpReply: string | undefined;
 
-  async chat(): Promise<string> {
-    throw new Error("不应被调用");
+  constructor(wrapUpReply?: string) {
+    this.wrapUpReply = wrapUpReply;
+  }
+
+  async chat(history: readonly PromptMessage[]): Promise<string> {
+    this.chatHistories.push([...history]);
+    if (this.wrapUpReply === undefined) throw new Error("不应被调用");
+    return this.wrapUpReply;
   }
 
   chatWithTools(history: readonly PromptMessage[], _tools: readonly ToolDefinition[], signal?: AbortSignal): Promise<LLMResult> {
@@ -293,15 +302,16 @@ test("上下文压缩: 摘要器收到被压缩的会话（后台会话用自己
   assert.equal(session.epoch, 1);
 });
 
-test("轮次预算: 按会话动态解析，用尽后自动续期并通知宿主", async () => {
+test("轮次预算: 用尽后评估质量，用户授权才追加轮次", async () => {
   const provider = new ManualProvider();
-  const extended: Array<{ from: number; to: number }> = [];
+  const assessments: ToolBudgetAssessment[] = [];
   const runtime = new AgentRuntime({
     summarize: async () => "摘要",
     // 动态预算：测试里恒为 2（真实场景是按需求单的行程天数算）
     maxToolRounds: () => 2,
-    onBudgetExtended: (_sessionId, info) => {
-      extended.push(info);
+    onToolBudgetExhausted: (_sessionId, assessment) => {
+      assessments.push(assessment);
+      return { continue: true };
     },
   });
   runtime.registerAgent("sess_budget", new ChatAgent(new Session("sess_budget"), provider, echoRegistry()));
@@ -312,10 +322,45 @@ test("轮次预算: 按会话动态解析，用尽后自动续期并通知宿主
     await waitFor(() => provider.pending.length > i);
     provider.complete(i, { type: "tool_calls", toolCalls: [{ id: `c${i}`, name: "echo", arguments: "{}" }] });
   }
-  // 预算用尽 → 续期（重算后取 current+15）→ 第 3 轮给出最终回答
+  // 预算用尽 → 先评估当前质量，再由用户授权 +15 轮 → 第 3 轮给出最终回答
   await waitFor(() => provider.pending.length > 2);
+  assert.equal(assessments.length, 1);
+  assert.equal(assessments[0].currentLimit, 2);
+  assert.equal(assessments[0].suggestedAdditionalRounds, 15);
+  assert.equal(assessments[0].quality.available, false);
+  assert.ok(
+    provider.pending[2].history.some((message) =>
+      message.role === "system" && message.content.includes("用户已授权追加工具轮次"),
+    ),
+    "授权后应注入临时修复指导",
+  );
   provider.complete(2, { type: "text", content: "完成" });
 
   assert.equal(await turn, "完成");
-  assert.deepEqual(extended, [{ from: 2, to: 17 }]);
+  const session = runtime.getAgent("sess_budget")?.session;
+  assert.ok(session?.history.every((message) => !message.content.includes("用户已授权追加工具轮次")));
+});
+
+test("轮次预算: 用户选择交付后禁用工具收尾，并明确未通过 strict", async () => {
+  const provider = new ManualProvider("当前版本 93/100，尚未通过 strict 校验。");
+  const runtime = new AgentRuntime({
+    summarize: async () => "摘要",
+    maxToolRounds: () => 2,
+    onToolBudgetExhausted: () => ({
+      continue: false,
+      guidance: "用户选择按当前结果交付，不要声称已通过 strict。",
+    }),
+  });
+  runtime.registerAgent("sess_budget_stop", new ChatAgent(new Session("sess_budget_stop"), provider, echoRegistry()));
+
+  const turn = runtime.send("sess_budget_stop", "开始", "queue");
+  for (let i = 0; i < 2; i += 1) {
+    await waitFor(() => provider.pending.length > i);
+    provider.complete(i, { type: "tool_calls", toolCalls: [{ id: `c${i}`, name: "echo", arguments: "{}" }] });
+  }
+
+  assert.equal(await turn, "当前版本 93/100，尚未通过 strict 校验。");
+  assert.equal(provider.chatHistories.length, 1);
+  assert.match(provider.chatHistories[0].at(-1)?.content ?? "", /工具已被禁用/);
+  assert.match(provider.chatHistories[0].at(-1)?.content ?? "", /用户选择按当前结果交付/);
 });

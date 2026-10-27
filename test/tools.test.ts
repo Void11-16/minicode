@@ -39,6 +39,30 @@ test("ToolRegistry: 未知工具 / 非法 JSON 参数都抛错", async () => {
   );
 });
 
+test("ToolRegistry: 历史压缩占位符绝不能进入工具执行", async () => {
+  const registry = new ToolRegistry();
+  let executed = false;
+  registry.register({
+    name: "save_itinerary",
+    description: "测试",
+    parameters: { type: "object", properties: {} },
+    execute: async () => {
+      executed = true;
+      return "不应执行";
+    },
+  });
+
+  await assert.rejects(
+    () => registry.execute("save_itinerary", JSON.stringify({
+      _truncated: true,
+      original_chars: 7693,
+      note: "工具已执行，历史参数已压缩",
+    })),
+    /历史压缩占位符.*工具未执行/,
+  );
+  assert.equal(executed, false);
+});
+
 test("haversineKm: 北京到上海约 1067 公里", () => {
   const km = haversineKm(39.9042, 116.4074, 31.2304, 121.4737);
   assert.ok(Math.abs(km - 1067) < 15, `实际 ${km}`);

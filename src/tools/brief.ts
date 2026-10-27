@@ -1,9 +1,11 @@
-import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { Tool } from "./tool.ts";
 import { requireString } from "./tool.ts";
-import { planFileFor } from "./itinerary.ts";
+import { atomicWrite, withPlanLock, planFileFor } from "./plan-files.ts";
 import { loadProfile, mergeProfiles } from "./profiles.ts";
+
+export const DEFAULT_TRAVELERS = 2;
 
 export interface TravelBrief {
   readonly title: string;
@@ -11,6 +13,7 @@ export interface TravelBrief {
   readonly startDate?: string;
   readonly endDate?: string;
   readonly travelers?: number;
+  readonly roomCount?: number;
   readonly budgetTotalYuan?: number;
   readonly budgetPerMealYuan?: number;
   readonly accommodation?: string;
@@ -50,7 +53,7 @@ export function createSaveTravelBriefTool(rootDir: string = process.cwd()): Tool
     name: "save_travel_brief",
     description:
       "保存旅行需求单（结构化）。用户提供需求文本（模板或自由描述）后，解析成此结构保存，" +
-      "并向用户列出解析结果与默认值做一次性确认；后续规划的所有工具参数从需求单取：" +
+      "需求信息足够时只保存一次并立即进入规划，不等待用户二次确认；后续规划的所有工具参数从需求单取：" +
       "region/目的地=destination、餐厅 max_cost=budgetPerMealYuan、" +
       "天气=get_weather 按行程起止日期（start_date/end_date；超 16 天预报范围的部分拿不到）、" +
       "avoid_cuisines=avoid、口味=tastePreferences。用户补充/修改需求时更新保存。",
@@ -61,6 +64,7 @@ export function createSaveTravelBriefTool(rootDir: string = process.cwd()): Tool
         destination: { type: "string", description: "目的地城市/区域，例如：杭州" },
         startDate: { type: "string", description: "开始日期 YYYY-MM-DD，可选" },
         endDate: { type: "string", description: "结束日期 YYYY-MM-DD，可选" },
+        roomCount: { type: "integer", description: "住宿房间数；缺省按每间最多 2 人估算" },
         travelers: { type: "number", description: "出行人数，可选" },
         budgetTotalYuan: { type: "number", description: "总预算（元），可选" },
         budgetPerMealYuan: { type: "number", description: "单餐人均预算（元），可选" },
@@ -83,9 +87,13 @@ export function createSaveTravelBriefTool(rootDir: string = process.cwd()): Tool
       const file = planFileFor(rootDir, "plans/briefs", brief.title, "json");
 
       await mkdir(dirname(file), { recursive: true });
-      await writeFile(file, JSON.stringify(brief, null, 2), "utf8");
+      await withPlanLock(file, () => atomicWrite(file, JSON.stringify(brief, null, 2)));
 
-      return `需求单已保存: ${file}\n${summarizeBrief(brief)}\n请向用户确认以上解析结果（空缺项将按默认处理），确认后即可一步到位生成规划。`;
+      return (
+        `需求单已保存: ${file}\n${summarizeBrief(brief)}\n` +
+        "空缺项按默认值处理。不要再保存第二份需求单，立即检索候选并开始保存第 1 天行程；" +
+        "后续保存行程沿用本次标题。"
+      );
     },
   };
 }
@@ -136,7 +144,10 @@ function parseBrief(args: Record<string, unknown>): TravelBrief {
       throw new Error(`${key} 需要 YYYY-MM-DD 格式`);
     }
   }
-  for (const key of ["travelers", "budgetTotalYuan", "budgetPerMealYuan"]) {
+  for (const key of ["travelers", "roomCount"]) {
+    if (args[key] !== undefined && !Number.isSafeInteger(args[key])) throw new Error(`${key} 需要正整数`);
+  }
+  for (const key of ["travelers", "roomCount", "budgetTotalYuan", "budgetPerMealYuan"]) {
     const value = args[key];
     if (value !== undefined && (typeof value !== "number" || !Number.isFinite(value) || value <= 0)) {
       throw new Error(`${key} 需要正数`);
@@ -160,6 +171,7 @@ function parseBrief(args: Record<string, unknown>): TravelBrief {
     destination,
     ...(typeof args.startDate === "string" ? { startDate: args.startDate } : {}),
     ...(typeof args.endDate === "string" ? { endDate: args.endDate } : {}),
+    ...(typeof args.roomCount === "number" ? { roomCount: args.roomCount } : {}),
     ...(typeof args.travelers === "number" ? { travelers: args.travelers } : {}),
     ...(typeof args.budgetTotalYuan === "number" ? { budgetTotalYuan: args.budgetTotalYuan } : {}),
     ...(typeof args.budgetPerMealYuan === "number" ? { budgetPerMealYuan: args.budgetPerMealYuan } : {}),
@@ -178,6 +190,7 @@ function summarizeBrief(brief: TravelBrief): string {
     ["目的地", brief.destination],
     ["日期", brief.startDate === undefined ? "未定（按当天推算）" : `${brief.startDate} 至 ${brief.endDate ?? brief.startDate}`],
     ["人数", brief.travelers === undefined ? "未填（按 2 人）" : `${brief.travelers} 人`],
+    ["房数", brief.roomCount === undefined ? `未填（按每间 2 人，${Math.ceil((brief.travelers ?? DEFAULT_TRAVELERS) / 2)} 间）` : `${brief.roomCount} 间`],
     ["总预算", brief.budgetTotalYuan === undefined ? "未填" : `¥${brief.budgetTotalYuan}`],
     ["单餐人均", brief.budgetPerMealYuan === undefined ? "未填（不限制）" : `¥${brief.budgetPerMealYuan}`],
     ["口味", brief.tastePreferences ?? "未填（用长期偏好或询问）"],

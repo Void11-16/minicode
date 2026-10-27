@@ -1,5 +1,6 @@
 import { createMessage, type Message } from "../core/message.ts";
-import type { Session } from "../core/session.ts";
+import { compactToolCallArguments, type Session } from "../core/session.ts";
+import { renderTravelState, type TravelState } from "../core/travel-state.ts";
 
 export interface CompactInfo {
   readonly sessionId: string;
@@ -37,7 +38,120 @@ export function estimateHistoryTokens(
   messages: readonly Message[],
   factor: number = 0.7,
 ): number {
-  return messages.reduce((sum, message) => sum + estimateTokens(message.content, factor) + 4, 0);
+  return messages.reduce((sum, message) => {
+    const toolCallChars = message.toolCalls?.reduce(
+      (total, call) => total + call.id.length + call.name.length + call.arguments.length + 16,
+      0,
+    ) ?? 0;
+    return sum + estimateTokens(message.content, factor) + Math.ceil(toolCallChars * factor) + 4;
+  }, 0);
+}
+
+/**
+ * 为摘要模型准备有界但覆盖全部消息的转录。
+ * 不能直接对整个字符串 slice：长会话被切掉的恰好总是后半段，近期约束和
+ * artifact 路径会静默消失。这里按角色权重给每条消息分配预算，并对正文做
+ * 首尾/关键字段裁剪；结构化旅行状态另行完整保留。
+ */
+export function renderHistoryForSummary(
+  messages: readonly Message[],
+  travelState?: TravelState,
+  maxChars: number = 24_000,
+): string {
+  if (maxChars <= 0) return "";
+  const state = renderTravelState(travelState);
+  const stateBlock = state === undefined
+    ? ""
+    : `【需要精确保留的结构化旅行状态】\n${state}`;
+  if (messages.length === 0) return stateBlock.slice(0, maxChars);
+
+  const transcriptHeader = "【历史转录（每条消息均已压缩，完整工具原文在 artifact 中）】";
+  const fixedChars =
+    stateBlock.length +
+    (stateBlock === "" ? 0 : 2) +
+    transcriptHeader.length +
+    1;
+  if (fixedChars >= maxChars) return stateBlock.slice(0, maxChars);
+
+  const transcriptBudget = maxChars - fixedChars;
+  const weighted = messages.map((message) => ({
+    message,
+    weight:
+      (message.role === "user" ? 3 : message.role === "tool" ? 2 : 1) *
+      (message.content.includes("artifact=") ? 4 : 1),
+  }));
+  // 最近的消息承载最新约束，给更强的权重；整体仍保持按原始顺序输出。
+  const totalWeight = weighted.reduce(
+    (sum, item, index) => sum + item.weight * recencyFactor(index, messages.length),
+    0,
+  );
+  let remainingWeight = totalWeight;
+  // 为消息之间的换行预留空间，避免大量短消息的 separators 突破硬上限。
+  let remainingChars = Math.max(0, transcriptBudget - Math.min(messages.length - 1, transcriptBudget));
+  const transcript = weighted.flatMap(({ message, weight }, index) => {
+    const adjustedWeight = weight * recencyFactor(index, messages.length);
+    const budget = Math.min(
+      2_000,
+      Math.floor((remainingChars * adjustedWeight) / Math.max(1, remainingWeight)),
+    );
+    remainingWeight -= adjustedWeight;
+    if (budget <= 0) return [];
+    const prefix = `[${index + 1}/${messages.length} ${message.role}` +
+      `${message.toolName === undefined ? "" : ` ${message.toolName}`}] `;
+    const clippedPrefix = prefix.length <= budget
+      ? prefix
+      : `${prefix.slice(0, Math.max(0, budget - 1))}…`;
+    const clipped = previewMessage(message, Math.max(0, budget - clippedPrefix.length));
+    const rendered = `${clippedPrefix}${clipped}`;
+    remainingChars = Math.max(0, remainingChars - rendered.length);
+    return rendered === "" ? [] : [rendered];
+  });
+  const renderedState = stateBlock === "" ? [] : [stateBlock, ""];
+  const rendered = [...renderedState, transcriptHeader, ...transcript].join("\n");
+  return rendered.length <= maxChars ? rendered : rendered.slice(0, maxChars);
+}
+
+function recencyFactor(index: number, total: number): number {
+  if (total <= 1) return 1.5;
+  return 1 + (index / (total - 1)) * 0.5;
+}
+
+function previewMessage(message: Message, budget: number): string {
+  const calls = message.toolCalls === undefined
+    ? ""
+    : `（调用 ${message.toolCalls.map((call) => call.name).join("、")}）`;
+  const text = `${message.content}${calls}`;
+  if (text.length <= budget) return text;
+  if (budget <= 0) return "";
+
+  const lines = text.split("\n");
+  const important = lines.filter((line) =>
+    /artifact=|P[012]|质量|评分|预算|日期|时间|坐标|类型|用户|必须|不要|偏好|已保存|行程|地点/i.test(line),
+  );
+  const head = lines.slice(0, 8);
+  const tail = lines.slice(-6);
+  const candidates = [...important.slice(0, 24), ...head, ...tail];
+  const unique = [...new Set(candidates)];
+  let result = "";
+  for (const line of unique) {
+    const next = result === "" ? line : `${result}\n${line}`;
+    if (next.length > budget) {
+      // 关键行即使单行超预算，也要保留可识别的头部（例如 artifact 路径），
+      // 不能因为前面的“开头摘要”塞满预算而静默丢掉它。
+      if (result === "" && important.includes(line)) return clipLine(line, budget);
+      continue;
+    }
+    result = next;
+  }
+  if (result !== "") return result;
+  if (budget < 20) return text.slice(0, budget);
+  const half = Math.floor((budget - 1) / 2);
+  return `${text.slice(0, half)}…${text.slice(-half)}`;
+}
+
+function clipLine(line: string, budget: number): string {
+  if (line.length <= budget) return line;
+  return `${line.slice(0, Math.max(0, budget - 1))}…`;
 }
 
 /**
@@ -81,14 +195,13 @@ export class ContextEpochManager {
       keepFrom -= 1;
     }
     if (keepFrom === 0) return null; // 边界一直退到起点，没有可压缩的历史
+    // 摘要器拿到压缩前的原始消息，才能按重要性保留坐标、类型、artifact 路径等
+    // 零散但关键的事实；截断只发生在最终写回历史时。
     const oldMessages = session.history.slice(0, keepFrom);
     // 保留的最近消息里，超长工具结果截断（搜索结果动辄数 KB，不截断会导致
-    // 压缩后仍超阈值 → 每轮重复压缩，白烧 LLM 调用）
-    const recent = session.history.slice(keepFrom).map((message) =>
-      message.role === "tool" && message.content.length > KEPT_TOOL_MAX_CHARS
-        ? { ...message, content: `${message.content.slice(0, KEPT_TOOL_MAX_CHARS)}\n…（历史工具结果过长，已截断）` }
-        : message,
-    );
+    // 压缩后仍超阈值 → 每轮重复压缩，白烧 LLM 调用）；save_itinerary 等
+    // 工具参数也可能有 7KB+，同样要结构化截断，否则压缩后的窗口仍会持续膨胀。
+    const recent = session.history.slice(keepFrom).map(compactHistoricalMessage);
 
     const nextEpoch = session.epoch + 1;
     // 先归档原始历史（失败则中止，宁可不做压缩也不丢数据），再花 LLM 调用做摘要
@@ -112,4 +225,19 @@ export class ContextEpochManager {
       tokensAfter: session.estimateHistoryTokens(),
     };
   }
+}
+
+function compactHistoricalMessage(message: Message): Message {
+  const content =
+    message.role === "tool" && message.content.length > KEPT_TOOL_MAX_CHARS
+      ? `${message.content.slice(0, KEPT_TOOL_MAX_CHARS)}\n…（历史工具结果过长，已截断）`
+      : message.content;
+  const toolCalls = message.toolCalls?.map((call) =>
+    ({ ...call, arguments: compactToolCallArguments(call.arguments) }),
+  );
+  return {
+    ...message,
+    content,
+    ...(toolCalls === undefined ? {} : { toolCalls }),
+  };
 }

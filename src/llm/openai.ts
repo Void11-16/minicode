@@ -1,3 +1,4 @@
+import { setTimeout as sleep } from "node:timers/promises";
 import type { ChatProvider, LLMResult, ToolDefinition } from "./provider.ts";
 import type { PromptMessage } from "../core/message.ts";
 import type { ToolCall } from "../core/message.ts";
@@ -42,8 +43,22 @@ interface StreamChunk {
   usage?: ApiUsage;
 }
 
-/** LLM 请求超时：含工具的大对话可能较慢，但绝不能无限等待 */
+/** 建连超时与流式空闲超时：活跃的长回答不按总时长截断，静默卡死仍会退出 */
 const LLM_TIMEOUT_MS = 120_000;
+/** DeepSeek/代理偶发复用连接失败；有限重试可恢复，但不能无限重发产生费用 */
+const LLM_MAX_ATTEMPTS = 3;
+const LLM_MAX_STREAM_ATTEMPTS = 3;
+const LLM_RETRY_BASE_DELAY_MS = 400;
+const RETRYABLE_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
+
+class ReplaySafeStreamError extends Error {
+  readonly replaySafe: boolean;
+
+  constructor(message: string, replaySafe: boolean) {
+    super(message);
+    this.replaySafe = replaySafe;
+  }
+}
 
 export interface OpenAICompatOptions {
   readonly apiKey: string;
@@ -53,6 +68,8 @@ export interface OpenAICompatOptions {
   readonly systemPrompt?: string;
   /** 注入自定义 fetch（测试用），默认全局 fetch */
   readonly fetchFn?: FetchLike;
+  /** 网络重试退避基数（测试用；默认 400ms） */
+  readonly retryDelayMs?: number;
 }
 
 interface RequestOptions {
@@ -85,6 +102,7 @@ export class OpenAICompatProvider implements ChatProvider {
   readonly baseUrl: string;
   readonly systemPrompt: string | undefined;
   private readonly fetchFn: FetchLike;
+  private readonly retryDelayMs: number;
 
   constructor(options: OpenAICompatOptions) {
     this.apiKey = options.apiKey;
@@ -92,6 +110,7 @@ export class OpenAICompatProvider implements ChatProvider {
     this.baseUrl = options.baseUrl ?? "https://api.openai.com/v1";
     this.systemPrompt = options.systemPrompt;
     this.fetchFn = options.fetchFn ?? fetch;
+    this.retryDelayMs = options.retryDelayMs ?? LLM_RETRY_BASE_DELAY_MS;
     this.name = `openai:${this.model}`;
   }
 
@@ -169,33 +188,34 @@ export class OpenAICompatProvider implements ChatProvider {
       body.stream_options = { include_usage: true };
     }
 
-    let response: Response;
-    try {
-      // 超时信号与用户中断信号合并：任一触发即中止
-      const timeoutSignal = AbortSignal.timeout(LLM_TIMEOUT_MS);
-      const signal = options.signal === undefined
-        ? timeoutSignal
-        : AbortSignal.any([timeoutSignal, options.signal]);
-      response = await this.fetchFn(`${this.baseUrl}/chat/completions`, {
-        method: "POST",
-        signal,
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${this.apiKey}`,
-        },
-        body: JSON.stringify(body),
-      });
-    } catch (error) {
-      throw new Error(`网络请求失败: ${error instanceof Error ? error.message : String(error)}`);
+    if (options.stream === true) {
+      try {
+        return await this.consumeStreamWithRetry(body, options);
+      } catch (error) {
+        // 所有流式尝试都在尚未输出正文时失败，可安全改走非流式请求。
+        if (
+          !(error instanceof ReplaySafeStreamError) ||
+          !error.replaySafe ||
+          options.signal?.aborted === true
+        ) {
+          throw error;
+        }
+        const fallback = await this.requestCore(history, {
+          ...(options.tools === undefined ? {} : { tools: options.tools }),
+          ...(options.signal === undefined ? {} : { signal: options.signal }),
+        });
+        if (fallback.toolCalls.length === 0 && fallback.content !== "") {
+          options.onTextDelta?.(fallback.content);
+        }
+        return fallback;
+      }
     }
+
+    const response = await this.requestWithRetry(body, options.signal);
 
     if (!response.ok) {
       const errorBody = await response.text().catch(() => "");
       throw new Error(`LLM 返回 ${response.status}: ${errorBody.slice(0, 500)}`);
-    }
-
-    if (options.stream === true) {
-      return this.consumeStream(response, options.onTextDelta);
     }
 
     const data = (await response.json()) as ApiResponse;
@@ -209,6 +229,86 @@ export class OpenAICompatProvider implements ChatProvider {
       })),
       usage: toTokenUsage(data.usage),
     };
+  }
+
+  /**
+   * 连接建立阶段失败或可恢复 HTTP 状态最多尝试 3 次。
+   * 流开始后的中断不在这里重试，避免把已经展示给用户的半段文本再发一遍。
+   */
+  private async requestWithRetry(
+    body: Record<string, unknown>,
+    userSignal: AbortSignal | undefined,
+  ): Promise<Response> {
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= LLM_MAX_ATTEMPTS; attempt += 1) {
+      try {
+        // 不复用连接：Node 的 keep-alive 连接在与部分代理/API 网关组合时会偶发 ETIMEDOUT。
+        const timeoutController = new AbortController();
+        const timeout = globalThis.setTimeout(() => timeoutController.abort(), LLM_TIMEOUT_MS);
+        timeout.unref();
+        const signal = userSignal === undefined
+          ? timeoutController.signal
+          : AbortSignal.any([timeoutController.signal, userSignal]);
+        let response: Response;
+        try {
+          response = await this.fetchFn(`${this.baseUrl}/chat/completions`, {
+            method: "POST",
+            signal,
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${this.apiKey}`,
+              Connection: "close",
+            },
+            body: JSON.stringify(body),
+          });
+        } finally {
+          clearTimeout(timeout);
+        }
+        if (!RETRYABLE_STATUS.has(response.status) || attempt === LLM_MAX_ATTEMPTS) return response;
+        if (response.body !== null) await response.body.cancel().catch(() => undefined);
+        await sleep(retryDelayMs(response, attempt, this.retryDelayMs));
+      } catch (error) {
+        lastError = error;
+        if (userSignal?.aborted === true || attempt === LLM_MAX_ATTEMPTS) break;
+        await sleep(this.retryDelayMs * attempt);
+      }
+    }
+    const reason = lastError instanceof Error ? lastError.message : String(lastError);
+    throw new Error(`网络请求失败（已尝试 ${LLM_MAX_ATTEMPTS} 次）: ${reason}`);
+  }
+
+  /**
+   * 流式请求建立后也可能被代理或网关中断。
+   * 在还没有任何文本展示给用户时，可安全重发整个模型请求；一旦开始输出则不能重放，
+   * 否则聊天中会出现重复的半段回答。
+   */
+  private async consumeStreamWithRetry(
+    body: Record<string, unknown>,
+    options: RequestOptions,
+  ): Promise<RequestResult> {
+    let lastError: unknown;
+    let replaySafe = true;
+    for (let attempt = 1; attempt <= LLM_MAX_STREAM_ATTEMPTS; attempt += 1) {
+      const response = await this.requestWithRetry(body, options.signal);
+      if (!response.ok) {
+        const errorBody = await response.text().catch(() => "");
+        throw new Error(`LLM 返回 ${response.status}: ${errorBody.slice(0, 500)}`);
+      }
+      let textEmitted = false;
+      try {
+        return await this.consumeStream(response, (delta) => {
+          textEmitted = true;
+          options.onTextDelta?.(delta);
+        });
+      } catch (error) {
+        lastError = error;
+        if (textEmitted) replaySafe = false;
+        if (textEmitted || options.signal?.aborted === true || attempt === LLM_MAX_STREAM_ATTEMPTS) break;
+        await sleep(this.retryDelayMs * attempt);
+      }
+    }
+    const reason = lastError instanceof Error ? lastError.message : String(lastError);
+    throw new ReplaySafeStreamError(`网络请求失败（流式响应中断）: ${reason}`, replaySafe);
   }
 
   /** 消费 SSE 流：同时累积文本增量与工具调用增量（按 index 分片拼接） */
@@ -251,8 +351,17 @@ export class OpenAICompatProvider implements ChatProvider {
       }
     };
 
-    for await (const raw of response.body) {
-      buffer += decoder.decode(raw as Uint8Array, { stream: true });
+    const reader = response.body.getReader();
+    for (;;) {
+      let chunk: ReadableStreamReadResult<Uint8Array>;
+      try {
+        chunk = await readStreamChunk(reader, LLM_TIMEOUT_MS);
+      } catch (error) {
+        await reader.cancel().catch(() => undefined);
+        throw error;
+      }
+      if (chunk.done) break;
+      buffer += decoder.decode(chunk.value, { stream: true });
       const lines = buffer.split("\n");
       buffer = lines.pop() ?? "";
 
@@ -338,6 +447,29 @@ export class OpenAICompatProvider implements ChatProvider {
       return undefined;
     }
   }
+}
+
+function retryDelayMs(response: Response, attempt: number, baseDelayMs: number): number {
+  const retryAfter = Number.parseFloat(response.headers.get("Retry-After") ?? "");
+  if (Number.isFinite(retryAfter) && retryAfter >= 0) return Math.min(retryAfter * 1000, 5_000);
+  return baseDelayMs * attempt;
+}
+
+function readStreamChunk(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  idleTimeoutMs: number,
+): Promise<ReadableStreamReadResult<Uint8Array>> {
+  let timeout: ReturnType<typeof globalThis.setTimeout> | undefined;
+  const idle = new Promise<never>((_resolve, reject) => {
+    timeout = globalThis.setTimeout(
+      () => reject(new Error(`流式响应超过 ${idleTimeoutMs / 1000} 秒无新数据`)),
+      idleTimeoutMs,
+    );
+    timeout.unref();
+  });
+  return Promise.race([reader.read(), idle]).finally(() => {
+    if (timeout !== undefined) clearTimeout(timeout);
+  });
 }
 
 function toTokenUsage(raw: ApiUsage | undefined): TokenUsage | undefined {

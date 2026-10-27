@@ -1,3 +1,4 @@
+import { cancellableFetch } from "./travel-request.ts";
 import type { Tool } from "./tool.ts";
 import { geocodeLocation, regionLabel, type GeoResult } from "./geocoding.ts";
 import { requireString } from "./tool.ts";
@@ -50,7 +51,9 @@ export function createWeatherTool(fetchFn: FetchLike = fetch): Tool {
       },
       required: ["location"],
     },
-    async execute(args) {
+    async execute(args, ctx) {
+      ctx?.signal?.throwIfAborted();
+      const request = cancellableFetch(fetchFn, ctx?.signal);
       const location = requireString(args, "location");
       if (args.start_date !== undefined && !isDateString(args.start_date)) {
         return "start_date 必须是 YYYY-MM-DD 格式，例如 2026-10-20";
@@ -59,7 +62,7 @@ export function createWeatherTool(fetchFn: FetchLike = fetch): Tool {
         return "end_date 必须是 YYYY-MM-DD 格式，例如 2026-10-22";
       }
 
-      const geo: GeoResult | null = await geocodeLocation(location, fetchFn);
+      const geo: GeoResult | null = await geocodeLocation(location, request, typeof args.city === "string" ? args.city : ctx?.destination, ctx?.signal);
       if (geo === null) {
         return `未找到地点: ${location}`;
       }
@@ -78,7 +81,7 @@ export function createWeatherTool(fetchFn: FetchLike = fetch): Tool {
         `https://api.open-meteo.com/v1/forecast?latitude=${geo.latitude}&longitude=${geo.longitude}` +
         `&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum` +
         `&start_date=${range.start}&end_date=${range.end}&timezone=auto`;
-      const response = await fetchFn(url, { signal: AbortSignal.timeout(30_000) });
+      const response = await request(url, { signal: AbortSignal.timeout(30_000) });
       if (!response.ok) {
         return cannotFetch(geo.name, `天气服务返回 HTTP ${response.status}`);
       }

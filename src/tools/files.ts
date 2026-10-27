@@ -6,6 +6,7 @@ import { requireString } from "./tool.ts";
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
 const DEFAULT_READ_LINES = 500;
 const MAX_READ_LINES = 2000;
+const MAX_READ_CHARS = 2600;
 const MAX_LIST_ENTRIES = 300;
 const MAX_GREP_MATCHES = 200;
 
@@ -63,7 +64,10 @@ export function createReadFileTool(defaultWorkspace: string = process.cwd()): To
     name: "read_file",
     description:
       "读取工作区内的文本文件，输出带行号（格式 `行号\\t内容`），支持 offset/limit 分段。修改代码前先用它了解现状；" +
-      "文件上限 2MB，大文件请先用 grep 定位再分段读取。",
+      "文件上限 2MB；单次最多返回约 2,600 字符，并给出下一次 offset，大文件请按提示分段读取。",
+    category: "workspace",
+    alwaysActive: true,
+    outputKind: "file",
     parameters: {
       type: "object",
       properties: {
@@ -94,12 +98,35 @@ export function createReadFileTool(defaultWorkspace: string = process.cwd()): To
         MAX_READ_LINES,
         Math.max(1, Math.floor(typeof args.limit === "number" ? args.limit : DEFAULT_READ_LINES)),
       );
-      const slice = lines.slice(offset - 1, offset - 1 + limit);
-      const numbered = slice.map((line, index) => `${offset + index}\t${line}`).join("\n");
-      const remaining = lines.length - (offset - 1 + slice.length);
       const relPath = relative(workspace, absolute);
-      const tail = remaining > 0 ? `\n...（还有 ${remaining} 行未显示，可用 offset=${offset + slice.length} 继续读取）` : "";
-      return `${relPath}（共 ${lines.length} 行）:\n${numbered}${tail}`;
+      const prefix = `${relPath}（共 ${lines.length} 行）:\n`;
+      const slice = lines.slice(offset - 1, offset - 1 + limit);
+      const numbered: string[] = [];
+      let used = 0;
+      let nextOffset = offset;
+      let truncatedByBudget = false;
+      for (const [index, line] of slice.entries()) {
+        const rendered = `${offset + index}\t${line}`;
+        const separator = numbered.length === 0 ? 0 : 1;
+        if (prefix.length + used + separator + rendered.length > MAX_READ_CHARS) {
+          truncatedByBudget = true;
+          if (numbered.length === 0) {
+            const available = Math.max(1, MAX_READ_CHARS - prefix.length - String(offset).length - 2);
+            numbered.push(`${offset}\t${line.slice(0, available)}…`);
+            nextOffset = offset + 1;
+          }
+          break;
+        }
+        numbered.push(rendered);
+        used += separator + rendered.length;
+        nextOffset = offset + index + 1;
+      }
+      const remaining = lines.length - (nextOffset - 1);
+      const tail = remaining > 0
+        ? `\n...（${truncatedByBudget ? "输出达到字符预算，" : ""}还有 ${remaining} 行未显示，` +
+          `可用 offset=${nextOffset} 继续读取）`
+        : "";
+      return `${prefix}${numbered.join("\n")}${tail}`;
     },
   };
 }

@@ -1,0 +1,32 @@
+{
+  "id": "representative",
+  "name": "代表案例",
+  "version": "2026.10",
+  "cases": [
+    {
+      "id": "beijing-3d-museum",
+      "title": "北京三日游",
+      "days": 3,
+      "budget_per_person_yuan": 2500,
+      "tags": ["representative", "3d", "popular", "museum", "booking"],
+      "request": "去北京玩三天，对历史博物馆特别感兴趣，想去故宫和国家博物馆，注意闭馆日和预约要求"
+    },
+    {
+      "id": "beijing-5d-first-trip",
+      "title": "北京五日游",
+      "days": 5,
+      "budget_per_person_yuan": 4000,
+      "tags": ["representative", "5d", "popular", "history", "booking"],
+      "request": "第一次去北京玩五天，想把故宫、国家博物馆、天坛、颐和园和长城都安排上，节奏适中，注意闭馆日和预约要求"
+    },
+    {
+      "id": "chifeng-7d-remote",
+      "title": "赤峰七日游",
+      "days": 7,
+      "budget_per_person_yuan": 5000,
+      "taste": "不忌口，想尝试当地牛羊肉和特色菜",
+      "tags": ["representative", "7d", "remote-day", "nature", "self-drive"],
+      "request": "从北京出发去赤峰玩七天，想看草原和地质景观，包含乌兰布统、达里湖等远郊目的地，接受包车或自驾，节奏适中，每天车程不要太赶"
+    }
+  ]
+}

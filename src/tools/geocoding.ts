@@ -1,9 +1,12 @@
+import { cancellableFetch } from "./travel-request.ts";
+import type { CoordinateSystem } from "./coordinates.ts";
 type FetchLike = typeof fetch;
 
 import { bestPoiByName, type AmapGeocodeResult, type AmapPoi } from "./amap.ts";
 import { getAmapClient } from "./amap-access.ts";
 
 export interface GeoResult {
+  readonly crs?: CoordinateSystem;
   readonly name: string;
   readonly latitude: number;
   readonly longitude: number;
@@ -50,18 +53,21 @@ export async function geocodeLocation(
   name: string,
   fetchFn: FetchLike = fetch,
   city?: string,
+  signal?: AbortSignal,
 ): Promise<GeoResult | null> {
+  signal?.throwIfAborted();
+  fetchFn = cancellableFetch(fetchFn, signal);
   const cacheKey = `loc:${name}@${city ?? ""}`;
   const cached = cacheGet(cacheKey);
   if (cached !== undefined) return cached;
 
   if (city !== undefined && city !== "") {
-    const verified = await geocodeInCity(name, city, fetchFn);
+    const verified = await geocodeInCity(name, city, fetchFn, signal);
     if (verified !== null) cacheSet(cacheKey, verified);
     return verified;
   }
 
-  const amap = getAmapClient();
+  const amap = getAmapClient(signal);
   if (amap !== undefined) {
     try {
       const result = await amap.geocode(name);
@@ -71,6 +77,7 @@ export async function geocodeLocation(
         return geo;
       }
     } catch {
+      signal?.throwIfAborted();
       // 高德失败（配额/网络）→ 降级 Photon
     }
   }
@@ -83,6 +90,7 @@ export async function geocodeLocation(
       return candidates[0];
     }
   } catch {
+    signal?.throwIfAborted();
     // Photon 不可用时降级
   }
   const fallback = await openMeteoGeocode(name, fetchFn);
@@ -104,22 +112,26 @@ export async function geocodeInCity(
   name: string,
   city: string,
   fetchFn: FetchLike = fetch,
+  signal?: AbortSignal,
 ): Promise<GeoResult | null> {
+  signal?.throwIfAborted();
+  fetchFn = cancellableFetch(fetchFn, signal);
   const cacheKey = `city:${name}@${city}`;
   const cached = cacheGet(cacheKey);
   if (cached !== undefined) return cached;
 
-  const amap = getAmapClient();
+  const amap = getAmapClient(signal);
   if (amap !== undefined) {
     if (regionMatchesCity(name, city)) {
       try {
         const result = await amap.geocode(name, city);
-        if (result !== null && geocodeCityVerdict(result, city) !== "mismatch") {
+        if (result !== null && geocodeCityVerdict(result, city) === "match") {
           const geo = amapToGeoResult(result);
           cacheSet(cacheKey, geo);
           return geo;
         }
       } catch {
+        signal?.throwIfAborted();
         // 失败 → 继续走 POI 检索
       }
     }
@@ -129,10 +141,11 @@ export async function geocodeInCity(
       try {
         pois = await amap.poiSearchInCity(variant, city);
       } catch {
+        signal?.throwIfAborted();
         continue; // 配额/网络失败 → 换下一个变体
       }
       const hit = bestPoiByName(
-        pois.filter((poi) => poiCityVerdict(poi, city) !== "mismatch"),
+        pois.filter((poi) => poiCityVerdict(poi, city) === "match"),
         variant,
       );
       if (hit !== null) {
@@ -145,12 +158,13 @@ export async function geocodeInCity(
     for (const variant of geocodeQueryVariants(name, city)) {
       try {
         const result = await amap.geocode(variant, city);
-        if (result !== null && geocodeCityVerdict(result, city) !== "mismatch") {
+        if (result !== null && geocodeCityVerdict(result, city) === "match") {
           const geo = amapToGeoResult(result);
           cacheSet(cacheKey, geo);
           return geo;
         }
       } catch {
+        signal?.throwIfAborted();
         // 换下一个变体
       }
     }
@@ -160,13 +174,14 @@ export async function geocodeInCity(
   try {
     const candidates = await photonGeocode(name, fetchFn, 3);
     const hit = candidates.find(
-      (candidate) => regionMatchesCity(candidate.admin2, city) || regionMatchesCity(candidate.admin1, city),
+      (candidate) => administrativeVerdict(candidate.admin2, candidate.admin1, candidate.admin3, city) === "match",
     );
     if (hit !== undefined) {
       cacheSet(cacheKey, hit);
       return hit;
     }
   } catch {
+    signal?.throwIfAborted();
     // 未核实
   }
   return null;
@@ -207,24 +222,21 @@ function stripCityPrefix(name: string, city: string): string | null {
 }
 
 /** POI 的省市字段与目标城市的关系：match=同城；mismatch=确定是外地；unknown=字段缺失无从判断 */
-function poiCityVerdict(poi: AmapPoi, city: string): "match" | "mismatch" | "unknown" {
-  const fields = [poi.cityname, poi.pname, poi.adname].filter(
-    (value): value is string => value !== undefined && value !== "",
-  );
-  if (fields.length === 0) return "unknown";
-  return fields.some((field) => regionMatchesCity(field, city)) ? "match" : "mismatch";
+export function poiCityVerdict(poi: AmapPoi, city: string): "match" | "mismatch" | "unknown" {
+  return administrativeVerdict(poi.cityname, poi.pname, poi.adname, city);
 }
 
-/** 地理编码结果的省市字段与目标城市的关系（字段缺失时退回对 formatted_address 的包含判断） */
+function administrativeVerdict(actualCity: string | undefined, province: string | undefined, district: string | undefined, expected: string): "match" | "mismatch" | "unknown" {
+  // 省级查询与市级查询不能混用；直辖市允许 API 用 province 表示城市。
+  if (/(?:省|自治区|特别行政区)$/.test(expected)) return province ? (regionMatchesCity(province, expected) ? "match" : "mismatch") : "unknown";
+  if (/[区县旗]$/.test(expected)) return district ? (regionMatchesCity(district, expected) ? "match" : "mismatch") : "unknown";
+  if (actualCity) return regionMatchesCity(actualCity, expected) ? "match" : "mismatch";
+  if (/^(北京|上海|天津|重庆)(市)?$/.test(expected) && province) return regionMatchesCity(province, expected) ? "match" : "mismatch";
+  return "unknown";
+}
+
 function geocodeCityVerdict(result: AmapGeocodeResult, city: string): "match" | "mismatch" | "unknown" {
-  const fields = [result.city, result.province].filter(
-    (value): value is string => value !== undefined && value !== "",
-  );
-  if (fields.length > 0) {
-    return fields.some((field) => regionMatchesCity(field, city)) ? "match" : "mismatch";
-  }
-  const cityCore = stripAdminSuffix(city);
-  return cityCore !== "" && result.formatted_address.includes(cityCore) ? "match" : "unknown";
+  return administrativeVerdict(result.city, result.province, undefined, city);
 }
 
 function poiToGeoResult(poi: AmapPoi): GeoResult {
@@ -233,6 +245,7 @@ function poiToGeoResult(poi: AmapPoi): GeoResult {
     name: poi.name,
     latitude,
     longitude,
+    crs: "gcj02",
     country: "中国",
     admin1: poi.pname,
     admin2: poi.cityname,
@@ -262,7 +275,7 @@ export function regionMatchesCity(actual: string | undefined, expected: string):
   const a = stripAdminSuffix(actual);
   const b = stripAdminSuffix(expected);
   if (a === "" || b === "") return false;
-  return a === b || a.includes(b) || b.includes(a);
+  return a === b;
 }
 
 /** 展示用行政区标签：省市区去重拼接（「北京市西城区」「浙江省杭州市西湖区」） */
@@ -282,9 +295,12 @@ export async function geocodeCandidates(
   name: string,
   fetchFn: FetchLike = fetch,
   limit: number = 3,
+  signal?: AbortSignal,
 ): Promise<GeoResult[]> {
+  signal?.throwIfAborted();
+  fetchFn = cancellableFetch(fetchFn, signal);
   // 高德主源（配置了 Key 时）：国内地名优先，避免 OSM 歧义（如"西湖"命中日本/台湾）
-  const amap = getAmapClient();
+  const amap = getAmapClient(signal);
   if (amap !== undefined) {
     try {
       // 取多条候选：同名地点 API 会把目标城市排在很后面（北海公园→北京第 10），
@@ -294,6 +310,7 @@ export async function geocodeCandidates(
         return results.map((result) => amapToGeoResult(result));
       }
     } catch {
+      signal?.throwIfAborted();
       // 降级 Photon 多候选
     }
   }
@@ -301,6 +318,7 @@ export async function geocodeCandidates(
     const candidates = await photonGeocode(name, fetchFn, limit);
     if (candidates.length > 0) return candidates;
   } catch {
+    signal?.throwIfAborted();
     // 降级到 Open-Meteo（单结果）
   }
   const fallback = await openMeteoGeocode(name, fetchFn);
@@ -312,7 +330,10 @@ export async function reverseGeocode(
   latitude: number,
   longitude: number,
   fetchFn: FetchLike = fetch,
+  signal?: AbortSignal,
 ): Promise<GeoResult | null> {
+  signal?.throwIfAborted();
+  fetchFn = cancellableFetch(fetchFn, signal);
   const url = `https://photon.komoot.io/reverse?lat=${latitude}&lon=${longitude}&limit=1`;
   const response = await fetchFn(url, {
     headers: { "User-Agent": "minicode-travel-planner/0.1" },
@@ -349,6 +370,7 @@ function photonToGeoResult(feature: PhotonFeature | undefined): GeoResult | null
   if (name === undefined) return null;
   return {
     name,
+    crs: "wgs84",
     latitude: coords[1],
     longitude: coords[0],
     country: props.country,
@@ -364,6 +386,7 @@ function amapToGeoResult(result: AmapGeocodeResult): GeoResult {
     name: result.formatted_address,
     latitude: lat,
     longitude: lng,
+    crs: "gcj02",
     country: "中国",
     admin1: result.province,
     admin2: result.city,
@@ -410,5 +433,5 @@ async function openMeteoGeocode(
     }>;
   };
   const first = data.results?.[0];
-  return first === undefined ? null : first;
+  return first === undefined ? null : { ...first, crs: "wgs84" };
 }

@@ -21,6 +21,45 @@ test("token 校准: EMA 修正系数并影响估算", () => {
   assert.ok(session.calibrationFactor > 0.76);
 });
 
+test("token 估算: tool_calls 参数与正文一样计入上下文", () => {
+  const session = new Session("sess_tool_chars");
+  const argumentsJson = JSON.stringify({ title: "北京五日游", days: ["x".repeat(6000)] });
+  session.add("assistant", "", {
+    toolCalls: [{ id: "call_save", name: "save_itinerary", arguments: argumentsJson }],
+  });
+
+  assert.ok(session.estimateHistoryTokens() > 4000, "工具参数不能因 content 为空而漏算");
+  assert.ok(session.promptCharCount() > argumentsJson.length, "校准字符量应包含调用 id、名称与协议开销");
+});
+
+test("token 压缩: 工具执行完成后可立即压缩参数并保留调用配对", () => {
+  const session = new Session("sess_tool_runtime_trim");
+  const argumentsJson = JSON.stringify({ title: "北京五日游", days: ["x".repeat(7000)] });
+  session.add("assistant", "", {
+    toolCalls: [{ id: "call_save", name: "save_itinerary", arguments: argumentsJson }],
+  });
+  session.add("tool", "已保存「北京五日游」", {
+    toolCallId: "call_save",
+    toolName: "save_itinerary",
+  });
+  const before = session.estimateHistoryTokens();
+
+  assert.equal(session.compactCompletedToolCalls(undefined, 0), 1);
+
+  const call = session.history[0].toolCalls?.[0];
+  assert.equal(call?.id, "call_save");
+  assert.equal(call?.name, "save_itinerary");
+  assert.ok((call?.arguments.length ?? Infinity) < 300);
+  assert.equal(JSON.parse(call?.arguments ?? "{}")._truncated, true);
+  assert.equal(
+    session.history[0].archivedToolCalls?.[0].arguments,
+    argumentsJson,
+    "本地审计副本应保留原始参数，但不参与 Prompt 和 token 估算",
+  );
+  assert.equal(session.history[1].toolCallId, "call_save");
+  assert.ok(session.estimateHistoryTokens() < before / 10, "参数压缩后应立即反映到 token 估算");
+});
+
 test("token 校准: 系数限制在 [0.2, 2.0] 范围内", () => {
   const session = new Session("sess_clamp");
   for (let i = 0; i < 50; i++) {

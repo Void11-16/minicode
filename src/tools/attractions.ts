@@ -1,5 +1,7 @@
+import { cancellableFetch } from "./travel-request.ts";
+import { convertPoint } from "./coordinates.ts";
 import type { Tool } from "./tool.ts";
-import { geocodeLocation, type GeoResult } from "./geocoding.ts";
+import { geocodeLocation, poiCityVerdict, type GeoResult } from "./geocoding.ts";
 import { haversineKm } from "./geo.ts";
 import { requireString } from "./tool.ts";
 import { overpassFallback, type OsmElement } from "./overpass.ts";
@@ -20,6 +22,7 @@ const TYPE_LABELS: Record<string, string> = {
 export function createAttractionsTool(fetchFn: FetchLike = fetch): Tool {
   return {
     name: "search_attractions",
+    recordsPlaceEvidence: true,
     description:
       "搜索某个地点周边的旅游景点和博物馆/纪念馆，返回名称、类型、距离、真实评分（高德数据）与坐标（纬度,经度，可直接写入行程 location）。" +
       "结果按评分降序排列，同一景区的子景点最多保留 2 个避免淹没列表。" +
@@ -27,27 +30,32 @@ export function createAttractionsTool(fetchFn: FetchLike = fetch): Tool {
     parameters: {
       type: "object",
       properties: {
+        city: { type: "string", description: "目标城市，景点名称必须在此城市内核验；不允许命中外地同名地点" },
         location: { type: "string", description: "中心城市或地点名，例如：杭州" },
         radius_km: { type: "number", description: "搜索半径（公里），默认 10，最大 50" },
         limit: { type: "number", description: "返回数量上限，默认 10" },
       },
-      required: ["location"],
+      required: ["location", "city"],
     },
-    async execute(args) {
+    async execute(args, ctx) {
+      ctx?.signal?.throwIfAborted();
+      const request = cancellableFetch(fetchFn, ctx?.signal);
       const location = requireString(args, "location");
+      const city = typeof args.city === "string" ? requireString(args, "city") : ctx?.destination;
+      if (city === undefined) throw new Error("search_attractions 必须提供目标 city，避免命中外地同名地点");
       const radiusKm = clamp(
         typeof args.radius_km === "number" ? args.radius_km : 10,
         1, 50,
       );
       const limit = Math.floor(clamp(typeof args.limit === "number" ? args.limit : 10, 1, 30));
 
-      const geo: GeoResult | null = await geocodeLocation(location, fetchFn);
+      const geo: GeoResult | null = await geocodeLocation(location, request, city, ctx?.signal);
       if (geo === null) {
         return `未找到地点: ${location}`;
       }
 
       // 高德主源（配置了 Key 时）：国内 POI 全 + 真实评分
-      const amap = getAmapClient();
+      const amap = getAmapClient(ctx?.signal);
       let amapError: string | undefined;
       if (amap !== undefined && geo.country === "中国") {
         try {
@@ -55,7 +63,7 @@ export function createAttractionsTool(fetchFn: FetchLike = fetch): Tool {
           // 双路搜索：①"旅游景点"+风景名胜类（110000）；②"博物馆|纪念馆"不限类型。
           // 博物馆在高德属科教文化类（14xxxx），types=110000 完全搜不到，
           // 曾导致杜立特行动纪念馆等 4.2 分场馆被 3.4 分的景区子景点淹没
-          const center = { latitude: geo.latitude, longitude: geo.longitude };
+          const center = { ...convertPoint(geo, "gcj02") };
           // 博物馆搜索失败要可见（配额/网络），否则博物馆不可见会静默回归
           let museumError: string | undefined;
           const [scenicPois, museumPois] = await Promise.all([
@@ -74,7 +82,7 @@ export function createAttractionsTool(fetchFn: FetchLike = fetch): Tool {
           });
           if (pois.length > 0) {
             // 评分降序（无评分沉底），同分按距离：避免 API 原始顺序把高分景点挤出前列
-            const enriched = rankPoisByRating(pois, center);
+            const enriched = rankPoisByRating(pois, center).filter((entry) => entry.distanceKm <= radiusKm && poiCityVerdict(entry.poi, city) === "match");
 
             // 同景区子景点折叠：一个景区（如"衢州古城文化旅游区"）的子 POI 最多保留 2 个高分项
             const perArea = new Map<string, number>();
@@ -91,6 +99,8 @@ export function createAttractionsTool(fetchFn: FetchLike = fetch): Tool {
               const parts = [`${index + 1}. ${entry.poi.name}`, entry.poi.type ?? ""];
               parts.push(`距中心 ${entry.distanceKm.toFixed(1)} 公里`);
               if (entry.rating !== undefined) parts.push(`评分 ${entry.rating.toFixed(1)}`);
+              const hours = entry.poi.biz_ext?.open_time;
+              if (typeof hours === "string" && hours.trim() !== "") parts.push(`开放时间 ${hours}`);
               const coords = formatPoiCoordinates(entry.poi.location);
               if (coords !== null) parts.push(`坐标 ${coords}`);
               if (entry.poi.address !== undefined && entry.poi.address !== "") parts.push(entry.poi.address);
@@ -102,35 +112,38 @@ export function createAttractionsTool(fetchFn: FetchLike = fetch): Tool {
             const warning = museumError === undefined
               ? ""
               : `\n⚠️ 博物馆/纪念馆搜索失败（${museumError}），以上仅为风景名胜结果`;
-            return (
+            const output = (
               `${geo.name} 周边景点（按评分排序，前 ${Math.min(limit, selected.length)} / 共 ${enriched.length} 个，高德数据${collapsedNote}）：\n` +
               lines.join("\n") +
               warning
             );
+            return await ctx?.evidence?.observePlaces("search_attractions", city, output, "amap") ?? output;
           }
         } catch (error) {
+          ctx?.signal?.throwIfAborted();
           // 高德失败（限流/配额/网络）→ 降级 OSM；原因要留给用户看，否则像 OSM 的锅
           amapError = error instanceof Error ? error.message : String(error);
         }
       }
 
+      const osmGeo = { ...geo, ...convertPoint(geo, "wgs84") };
       const query =
         `[out:json][timeout:25];` +
         `(` +
-        `nwr(around:${radiusKm * 1000},${geo.latitude},${geo.longitude})` +
+        `nwr(around:${radiusKm * 1000},${osmGeo.latitude},${osmGeo.longitude})` +
         `[tourism~"^(attraction|viewpoint|museum|zoo|theme_park|aquarium|gallery)$"];` +
         // historic 只取主要类型：[historic]（任意值）在北京等古城会匹配海量微小
         // 元素（每块碑/每个挂牌建筑），服务端处理超载。实测收窄后 3.4s vs 超时。
-        `nwr(around:${radiusKm * 1000},${geo.latitude},${geo.longitude})` +
+        `nwr(around:${radiusKm * 1000},${osmGeo.latitude},${osmGeo.longitude})` +
         `[historic~"^(monument|memorial|castle|ruins|archaeological_site|fort)$"];` +
-        `nwr(around:${radiusKm * 1000},${geo.latitude},${geo.longitude})[leisure=park];` +
+        `nwr(around:${radiusKm * 1000},${osmGeo.latitude},${osmGeo.longitude})[leisure=park];` +
         `);` +
         `out center ${limit * 4};`;
 
-      const data = await overpassFallback(query, amapError, fetchFn);
+      const data = await overpassFallback(query, amapError, request, ctx?.signal);
       const attractions = (data.elements ?? [])
-        .map((element) => toAttraction(element, geo))
-        .filter((a): a is NonNullable<typeof a> => a !== null)
+        .map((element) => toAttraction(element, osmGeo))
+        .filter((a): a is NonNullable<typeof a> => a !== null && a.distanceKm <= radiusKm)
         .sort((a, b) => a.distanceKm - b.distanceKm);
 
       // 按名称去重（OSM 中 node/way/relation 可能重复表示同一景点）
@@ -151,10 +164,11 @@ export function createAttractionsTool(fetchFn: FetchLike = fetch): Tool {
           ` | 坐标 ${a.latitude.toFixed(4)},${a.longitude.toFixed(4)}` +
           `${a.website === undefined ? "" : ` | ${a.website}`}`,
       );
-      return (
+      const output = (
         `${geo.name} 周边景点（前 ${Math.min(limit, unique.length)} / 共 ${unique.length} 个）:\n` +
         lines.join("\n") + degradedNote(amapError)
       );
+      return await ctx?.evidence?.observePlaces("search_attractions", city, output, "osm") ?? output;
     },
   };
 }
@@ -202,7 +216,7 @@ function clamp(value: number, min: number, max: number): number {
 
 /** 提取景区父级前缀：如「衢州古城文化旅游区天王塔」→「衢州古城文化旅游区」 */
 function areaKeyOf(name: string): string {
-  const match = name.match(/^(.{2,14}?(?:旅游区|景区|文化街区|历史文化街区|文化园|风景名胜区))/);
+  const match = name.match(/^(.{2,14}?(?:旅游区|景区|文化街区|历史文化街区|文化园|风景名胜区|博物院|博物馆))/);
   if (match !== null) return match[1];
   const dot = name.indexOf("·");
   if (dot > 1) return name.slice(0, dot);

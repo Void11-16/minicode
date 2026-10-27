@@ -18,8 +18,8 @@ function amapResponse(body: Record<string, unknown>): Response {
 test("search_attractions: 解析 OSM 数据并按距离排序去重", async () => {
   const fetchFn = (async (url: string | URL, init?: RequestInit) => {
     const u = String(url);
-    if (u.includes("geocoding-api")) {
-      return jsonResponse({ results: [{ name: "杭州", latitude: 30.27, longitude: 120.15, country: "中国" }] });
+    if (u.includes("photon.komoot.io")) {
+      return jsonResponse({ features: [{ properties: { name: "杭州", city: "杭州市", country: "中国" }, geometry: { coordinates: [120.15, 30.27] } }] });
     }
     if (u.includes("/api/interpreter")) {
       const headers = init?.headers as Record<string, string>;
@@ -39,7 +39,7 @@ test("search_attractions: 解析 OSM 数据并按距离排序去重", async () =
   }) as typeof fetch;
 
   const tool = createAttractionsTool(fetchFn);
-  const output = await tool.execute({ location: "杭州" });
+  const output = await tool.execute({ location: "杭州", city: "杭州" });
 
   assert.match(output, /杭州 周边景点/);
   assert.match(output, /西湖 \| (景点|公园) \| 距市中心 \d+\.\d 公里/);
@@ -53,14 +53,14 @@ test("search_attractions: 解析 OSM 数据并按距离排序去重", async () =
 
 test("search_attractions: 找不到地点 / 无结果", async () => {
   const fetchFn = (async (url: string | URL) => {
-    if (String(url).includes("geocoding-api")) {
-      return jsonResponse({ results: [{ name: "测试城", latitude: 0, longitude: 0, country: "X" }] });
+    if (String(url).includes("photon.komoot.io")) {
+      return jsonResponse({ features: [{ properties: { name: "测试城", city: "测试城", country: "X" }, geometry: { coordinates: [0, 0] } }] });
     }
     return jsonResponse({ elements: [] });
   }) as typeof fetch;
 
   const tool = createAttractionsTool(fetchFn);
-  assert.match(await tool.execute({ location: "测试城" }), /没有找到有名称的景点/);
+  assert.match(await tool.execute({ location: "测试城", city: "测试城" }), /没有找到有名称的景点/);
 });
 
 test("get_place_reviews: 解析 Bing 结果标题与摘要", async () => {
@@ -377,8 +377,8 @@ test("search_attractions: 查询已收窄 historic 标签（防北京类超载�
   const bodies: string[] = [];
   const fetchFn = (async (url: string | URL, init?: RequestInit) => {
     const u = String(url);
-    if (u.includes("geocoding-api")) {
-      return jsonResponse({ results: [{ name: "北京", latitude: 39.9, longitude: 116.4, country: "中国" }] });
+    if (u.includes("photon.komoot.io")) {
+      return jsonResponse({ features: [{ properties: { name: "北京", city: "北京市", country: "中国" }, geometry: { coordinates: [116.4, 39.9] } }] });
     }
     if (u.includes("overpass-api.de")) {
       bodies.push(String(init?.body));
@@ -388,7 +388,7 @@ test("search_attractions: 查询已收窄 historic 标签（防北京类超载�
   }) as typeof fetch;
 
   const tool = createAttractionsTool(fetchFn);
-  await tool.execute({ location: "北京" });
+  await tool.execute({ location: "北京", city: "北京" });
 
   assert.match(bodies[0], /historic~"\^\(monument\|memorial\|castle\|ruins\|archaeological_site\|fort\)\$"/);
   assert.doesNotMatch(bodies[0], /\[historic\];/); // 不再是任意 historic
@@ -429,14 +429,14 @@ test("search_attractions: 博物馆搜索失败时输出可见警告", async () 
         throw new Error("quota exceeded");
       }
       return amapResponse({
-        pois: [{ id: "p1", name: "西湖", type: "风景名胜", location: "120.15,30.25", biz_ext: { rating: "4.6" } }],
+        pois: [{ id: "p1", name: "西湖", cityname: "杭州市", type: "风景名胜", location: "120.15,30.25", biz_ext: { rating: "4.6" } }],
       });
     }
     return amapResponse({});
   }) as typeof fetch);
 
   const tool = createAttractionsTool();
-  const output = await tool.execute({ location: "杭州" });
+  const output = await tool.execute({ location: "杭州", city: "杭州" });
 
   assert.match(output, /西湖/);
   assert.match(output, /⚠️ 博物馆[/]纪念馆搜索失败（quota exceeded），以上仅为风景名胜结果/);

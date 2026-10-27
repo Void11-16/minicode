@@ -28,7 +28,7 @@ const BRIEF = {
   notes: "带一位老人，节奏放慢",
 };
 
-test("save_travel_brief: 保存结构化需求单并输出确认摘要", async () => {
+test("save_travel_brief: 保存结构化需求单并直接进入规划", async () => {
   const root = await mkdtemp(join(tmpdir(), "minicode-brief-"));
   const save = createSaveTravelBriefTool(root);
 
@@ -40,7 +40,8 @@ test("save_travel_brief: 保存结构化需求单并输出确认摘要", async (
   assert.match(output, /- 人数: 2 人/);
   assert.match(output, /- 单餐人均: ¥100/);
   assert.match(output, /- 必去: 灵隐寺、西湖/);
-  assert.match(output, /确认后即可一步到位生成规划/);
+  assert.match(output, /不要再保存第二份需求单/);
+  assert.match(output, /立即检索候选并开始保存第 1 天行程/);
 
   const saved = JSON.parse(await readFile(join(root, "plans", "briefs", "杭州两日游.json"), "utf8"));
   assert.equal(saved.destination, "杭州");

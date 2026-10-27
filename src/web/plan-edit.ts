@@ -1,11 +1,13 @@
-import { readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { readFile } from "node:fs/promises";
 import { getAmapClient } from "../tools/amap-access.ts";
+import { convertPoint, type CoordinateSystem } from "../tools/coordinates.ts";
+import { poiCityVerdict } from "../tools/geocoding.ts";
 import { rankPoisByRating, type AmapPoi } from "../tools/amap.ts";
 import { geocodeLocation } from "../tools/geocoding.ts";
-import { parseItinerary } from "../tools/itinerary-schema.ts";
-import { renderMarkdown } from "../tools/itinerary.ts";
-import { renderQualityReport, validateItinerary } from "../tools/itinerary-validator.ts";
+import { updateSavedItinerary } from "../tools/itinerary.ts";
+import { planFileFor } from "../tools/plan-files.ts";
+import { TravelEvidenceStore } from "../tools/travel-evidence.ts";
+import type { ToolContext } from "../tools/tool.ts";
 
 /**
  * 行程条目编辑（地图界面的"改行程"）：
@@ -27,7 +29,7 @@ interface PlanItem {
   planned_duration_min?: number;
   opening_hours?: unknown;
   closed_on?: unknown;
-  location?: { name?: string; address?: string; latitude?: number; longitude?: number; source?: string };
+  location?: { crs?: "gcj02" | "wgs84"; name?: string; address?: string; latitude?: number; longitude?: number; source?: string };
   [key: string]: unknown;
 }
 
@@ -53,6 +55,7 @@ export interface SuggestOption {
   readonly cost?: number;
   readonly cuisine?: string;
   readonly distanceKm: number;
+  readonly crs: CoordinateSystem;
 }
 
 export interface SuggestResult {
@@ -68,8 +71,7 @@ const SUGGEST_TTL_MS = 10 * 60_000;
 const suggestCache = new Map<string, { value: SuggestResult; expiresAt: number }>();
 
 export function planPaths(rootDir: string, title: string): { json: string; md: string; qualityJson: string; qualityMd: string } {
-  const safe = title.replace(/[^\p{Script=Han}a-zA-Z0-9-_ ]/gu, "").trim().replace(/\s+/g, "-");
-  const base = join(rootDir, "plans", safe);
+  const base = planFileFor(rootDir, "plans", title, "json").slice(0, -5);
   return {
     json: `${base}.json`,
     md: `${base}.md`,
@@ -96,7 +98,7 @@ export async function suggestPlanOptions(
   }
   const center =
     item.location?.latitude !== undefined && item.location?.longitude !== undefined
-      ? { latitude: item.location.latitude, longitude: item.location.longitude }
+      ? convertPoint({ latitude: item.location.latitude, longitude: item.location.longitude, crs: item.location.crs ?? (item.location.source === "osm" ? "wgs84" : "gcj02") }, "gcj02")
       : firstLocated(day);
   if (center === undefined) {
     return { available: false, reason: "该条目没有坐标，无法就近推荐（可手动输入名称）", options: [] };
@@ -106,7 +108,7 @@ export async function suggestPlanOptions(
     return { available: false, reason: "未配置高德 Key，推荐不可用（可手动输入名称）", options: [] };
   }
 
-  const cacheKey = `${title}|${dayNo}|${itemId}|${center.latitude.toFixed(3)},${center.longitude.toFixed(3)}|${kind}`;
+  const cacheKey = `${planPaths(rootDir, title).json}|${plan.revision ?? 0}|${dayNo}|${itemId}|${center.latitude.toFixed(3)},${center.longitude.toFixed(3)}|${kind}`;
   const hit = suggestCache.get(cacheKey);
   if (hit !== undefined && Date.now() < hit.expiresAt) return hit.value;
 
@@ -126,6 +128,7 @@ export async function suggestPlanOptions(
       if (located === null) return [];
       return [
         {
+          crs: "gcj02" as const,
           name: entry.poi.name,
           address: entry.poi.address,
           latitude: located.latitude,
@@ -139,6 +142,10 @@ export async function suggestPlanOptions(
     })
     .slice(0, 12);
 
+  const destination = String((plan.constraints as Record<string, unknown> | undefined)?.destination ?? "");
+  const evidence = new TravelEvidenceStore(rootDir);
+  await evidence.observePlaces(kind === "meal" ? "search_restaurants" : "search_attractions", destination,
+    options.map((o) => `${o.name} | 坐标 ${o.latitude.toFixed(6)},${o.longitude.toFixed(6)}${o.rating === undefined ? "" : ` | 评分 ${o.rating}`}${o.cost === undefined ? "" : ` | 人均 ¥${o.cost}`}`).join("\n"), "amap");
   const value: SuggestResult = { available: true, options };
   suggestCache.set(cacheKey, { value, expiresAt: Date.now() + SUGGEST_TTL_MS });
   return value;
@@ -146,11 +153,13 @@ export async function suggestPlanOptions(
 
 export interface PlanEditResult {
   readonly quality: { readonly status: string; readonly score: number };
+  readonly revision?: number;
 }
 
 export async function applyPlanEdit(
   rootDir: string,
-  body: { title?: unknown; day?: unknown; item_id?: unknown; op?: unknown; replacement?: unknown; direction?: unknown },
+  body: { title?: unknown; day?: unknown; item_id?: unknown; op?: unknown; replacement?: unknown; direction?: unknown; expected_revision?: unknown },
+  ctx?: ToolContext,
 ): Promise<PlanEditResult> {
   const title = typeof body.title === "string" ? body.title.trim() : "";
   const itemId = typeof body.item_id === "string" ? body.item_id.trim() : "";
@@ -158,40 +167,38 @@ export async function applyPlanEdit(
   if (title === "" || itemId === "" || !Number.isInteger(dayNo) || dayNo < 1) {
     throw new Error("缺少 title / day / item_id");
   }
-  const plan = await readPlan(rootDir, title);
-  const day = plan.days?.[dayNo - 1];
-  if (day === undefined || day.items === undefined) throw new Error(`行程里没有第 ${dayNo} 天`);
-  const items = day.items;
-  const byId = items.findIndex((entry) => entry.id === itemId);
-  const index = byId >= 0 ? byId : items.findIndex((entry) => entry.name === itemId);
-  if (index < 0) throw new Error("未找到该条目（可能已被修改，刷新试试）");
-  const item = items[index];
+  const evidence = ctx?.evidence ?? new TravelEvidenceStore(rootDir);
+  await evidence.load();
+  const snapshot = await updateSavedItinerary(rootDir, title, async (raw) => {
+    const plan = raw as PlanFile;
+    if (body.expected_revision !== undefined && body.expected_revision !== plan.revision) throw new Error("行程版本冲突，请刷新后重试");
+    const day = plan.days?.[dayNo - 1];
+    if (day === undefined || day.items === undefined) throw new Error(`行程里没有第 ${dayNo} 天`);
+    const items = day.items;
+    const byId = items.findIndex((entry) => entry.id === itemId);
+    const index = byId >= 0 ? byId : items.findIndex((entry) => entry.name === itemId);
+    if (index < 0) throw new Error("未找到该条目（可能已被修改，刷新试试）");
+    const item = items[index];
 
-  if (body.op === "replace") {
-    const replacement = isRecord(body.replacement) ? body.replacement : {};
-    await replaceItem(item, replacement);
-  } else if (body.op === "move") {
-    if (body.direction !== "up" && body.direction !== "down") throw new Error("direction 只能是 up / down");
-    moveItem(items, index, body.direction);
-  } else if (body.op === "remove") {
-    items.splice(index, 1);
-  } else {
-    throw new Error("op 只能是 replace / move / remove");
-  }
+    if (body.op === "replace") {
+      const replacement = isRecord(body.replacement) ? body.replacement : {};
+      await replaceItem(item, replacement, String((plan.constraints as Record<string, unknown> | undefined)?.destination ?? ""), evidence);
+    } else if (body.op === "move") {
+      if (body.direction !== "up" && body.direction !== "down") throw new Error("direction 只能是 up / down");
+      moveItem(items, index, body.direction);
+    } else if (body.op === "remove") {
+      items.splice(index, 1);
+    } else {
+      throw new Error("op 只能是 replace / move / remove");
+    }
 
-  const itinerary = parseItinerary(plan); // 编辑后仍须满足行程结构约束
-  const report = validateItinerary(itinerary);
-  const paths = planPaths(rootDir, title);
-  await writeFile(paths.json, JSON.stringify(plan, null, 2), "utf8");
-  await writeFile(paths.md, renderMarkdown(itinerary), "utf8");
-  await writeFile(paths.qualityJson, JSON.stringify(report, null, 2), "utf8");
-  await writeFile(paths.qualityMd, renderQualityReport(report), "utf8");
-  return { quality: { status: report.status, score: report.score } };
+  }, { workspace: rootDir, ...ctx, evidence });
+  return { quality: { status: snapshot.report.status, score: snapshot.report.score }, revision: snapshot.itinerary.revision };
 }
 
 /** 替换条目：优先用推荐卡片带来的坐标；手输名称时按就近 POI → 自由地理编码依次解析 */
-async function replaceItem(item: PlanItem, replacement: Record<string, unknown>): Promise<void> {
-  const name = typeof replacement.name === "string" ? replacement.name.trim() : "";
+async function replaceItem(item: PlanItem, replacement: Record<string, unknown>, city: string, evidence: TravelEvidenceStore): Promise<void> {
+  let name = typeof replacement.name === "string" ? replacement.name.trim() : "";
   if (name === "") throw new Error("缺少替换名称");
 
   let latitude = typeof replacement.latitude === "number" ? replacement.latitude : undefined;
@@ -200,18 +207,23 @@ async function replaceItem(item: PlanItem, replacement: Record<string, unknown>)
   let rating = typeof replacement.rating === "number" ? replacement.rating : undefined;
   let cost = typeof replacement.cost === "number" ? replacement.cost : undefined;
   let cuisine = typeof replacement.cuisine === "string" ? replacement.cuisine : undefined;
+  let crs: CoordinateSystem = replacement.crs === "gcj02" ? "gcj02" : "wgs84";
 
   if (latitude === undefined || longitude === undefined) {
-    const resolved = await resolvePlace(item, name);
+    const resolved = await resolvePlace(item, name, city, evidence);
     if (resolved === null) throw new Error(`没找到地点「${name}」，换个名称或从推荐里选`);
+    name = resolved.name;
     latitude = resolved.latitude;
     longitude = resolved.longitude;
     address = resolved.address ?? address;
     rating = resolved.rating ?? rating;
     cost = resolved.cost ?? cost;
     cuisine = resolved.cuisine ?? cuisine;
+    crs = resolved.crs;
   }
 
+  // 地点身份变化后，旧证据、评分、价格和预约信息全部失效。
+  for (const field of ["evidence_id", "evidence_verified", "evidence_observed_at", "closure_verified", "rating", "cost_per_person", "ticket_price_per_person", "room_price_per_night", "opening_hours", "closed_on", "reservation_required", "cuisine"]) delete item[field];
   item.name = name;
   item.location = {
     name,
@@ -219,16 +231,22 @@ async function replaceItem(item: PlanItem, replacement: Record<string, unknown>)
     latitude,
     longitude,
     source: "手动替换",
+    crs,
   };
-  item.source = "amap";
-  item.confidence = "high";
+  item.source = "manual";
+  item.confidence = "low";
+  if (rating !== undefined) item.rating = rating;
+  if (cost !== undefined) {
+    if (item.type === "accommodation") item.room_price_per_night = cost;
+    else item.cost_per_person = cost;
+  }
   // 旧地点的营业时间/闭馆日对新地点无效，必须清掉
   delete item.opening_hours;
   delete item.closed_on;
   if (item.type === "meal" && cuisine !== undefined && cuisine !== "") item.cuisine = cuisine;
   const parts: string[] = [];
-  if (rating !== undefined) parts.push(`高德${rating}分`);
-  if (cost !== undefined) parts.push(`人均约¥${cost}`);
+  if (rating !== undefined) parts.push(`评分${rating}（待核实）`);
+  if (cost !== undefined) parts.push(item.type === "accommodation" ? `每房每晚约¥${cost}` : `人均约¥${cost}`);
   if (parts.length > 0) item.note = parts.join("｜");
   else delete item.note;
 }
@@ -273,28 +291,31 @@ interface ResolvedPlace {
   readonly name: string;
   readonly latitude: number;
   readonly longitude: number;
+  readonly crs: CoordinateSystem;
   readonly address?: string;
   readonly rating?: number;
   readonly cost?: number;
   readonly cuisine?: string;
 }
 
-async function resolvePlace(item: PlanItem, name: string): Promise<ResolvedPlace | null> {
+async function resolvePlace(item: PlanItem, name: string, city: string, evidence: TravelEvidenceStore): Promise<ResolvedPlace | null> {
   const near =
     item.location?.latitude !== undefined && item.location?.longitude !== undefined
-      ? { latitude: item.location.latitude, longitude: item.location.longitude }
+      ? convertPoint({ latitude: item.location.latitude, longitude: item.location.longitude, crs: item.location.crs ?? (item.location.source === "osm" ? "wgs84" : "gcj02") }, "gcj02")
       : undefined;
   const amap = getAmapClient();
   if (amap !== undefined) {
     try {
       const pois = near !== undefined ? await amap.poiSearch(name, near, 20_000) : [];
-      const first = pois.find((poi) => parsePoiLocation(poi) !== null);
+      const first = pois.find((poi) => parsePoiLocation(poi) !== null && (city === "" || poiCityVerdict(poi, city) === "match"));
       if (first !== undefined) {
         const located = parsePoiLocation(first)!;
+        await evidence.observePlaces(item.type === "meal" ? "search_restaurants" : item.type === "accommodation" ? "search_stays" : "search_attractions", city, `${first.name} | 坐标 ${located.latitude.toFixed(6)},${located.longitude.toFixed(6)}${poiRating(first) === undefined ? "" : ` | 评分 ${poiRating(first)}`}${poiCost(first) === undefined ? "" : ` | 人均 ¥${poiCost(first)}`}`, "amap");
         return {
           name: first.name,
           latitude: located.latitude,
           longitude: located.longitude,
+          crs: "gcj02",
           address: first.address,
           rating: poiRating(first),
           cost: poiCost(first),
@@ -305,9 +326,9 @@ async function resolvePlace(item: PlanItem, name: string): Promise<ResolvedPlace
       // 配额/网络失败 → 自由地理编码兜底
     }
   }
-  const geo = await geocodeLocation(name).catch(() => null);
+  const geo = await geocodeLocation(name, fetch, city || undefined).catch(() => null);
   if (geo === null) return null;
-  return { name: geo.name !== "" ? geo.name : name, latitude: geo.latitude, longitude: geo.longitude };
+  return { name: geo.name !== "" ? geo.name : name, latitude: geo.latitude, longitude: geo.longitude, crs: geo.crs ?? "wgs84" };
 }
 
 async function searchVisitPois(center: { latitude: number; longitude: number }): Promise<AmapPoi[]> {
@@ -354,7 +375,7 @@ function parsePoiLocation(poi: AmapPoi): { latitude: number; longitude: number }
 function firstLocated(day: PlanDay): { latitude: number; longitude: number } | undefined {
   for (const entry of day.items ?? []) {
     if (entry.location?.latitude !== undefined && entry.location?.longitude !== undefined) {
-      return { latitude: entry.location.latitude, longitude: entry.location.longitude };
+      return convertPoint({ latitude: entry.location.latitude, longitude: entry.location.longitude, crs: entry.location.crs ?? (entry.location.source === "osm" ? "wgs84" : "gcj02") }, "gcj02");
     }
   }
   return undefined;

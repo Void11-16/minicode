@@ -12,6 +12,8 @@ export interface AppConfig {
   readonly llmModel?: string;
   /** 估算成本用：输入单价（元/百万 tokens） */
   readonly priceIn?: string;
+  /** 估算成本用：缓存命中的输入单价（元/百万 tokens） */
+  readonly priceCacheIn?: string;
   /** 估算成本用：输出单价（元/百万 tokens） */
   readonly priceOut?: string;
   /** 自定义系统提示词（助手人设）；未设置时用旅行规划默认值 */
@@ -43,6 +45,7 @@ export const CONFIG_KEY_ALIASES: Record<string, keyof AppConfig> = {
   llm_model: "llmModel",
   model: "llmModel",
   price_in: "priceIn",
+  price_cache_in: "priceCacheIn",
   price_out: "priceOut",
   system_prompt: "systemPrompt",
   taste_preferences: "tastePreferences",
@@ -113,7 +116,7 @@ function validateConfig(raw: unknown): AppConfig {
   const config: Partial<AppConfig> = { provider };
   for (const key of [
     "deepseekApiKey", "amapApiKey", "deepseekModel", "llmApiKey", "llmBaseUrl", "llmModel",
-    "priceIn", "priceOut", "systemPrompt", "budgetYuan",
+    "priceIn", "priceCacheIn", "priceOut", "systemPrompt", "budgetYuan",
     "tastePreferences",
   ]) {
     if (typeof source[key] === "string" && source[key] !== "") {

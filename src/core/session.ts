@@ -1,7 +1,29 @@
 import { randomBytes } from "node:crypto";
-import { createMessage, type Message, type PromptMessage } from "./message.ts";
+import {
+  createMessage,
+  isCompactedToolArguments,
+  type Message,
+  type PromptMessage,
+} from "./message.ts";
 import { EMPTY_USAGE, type TokenUsage, type UsageSummary } from "./usage.ts";
 import { TokenEstimator } from "./token-estimator.ts";
+import { normalizeTravelState, type TravelState } from "./travel-state.ts";
+
+/** 工具已经执行完后，历史里只需保留调用语义；完整参数会以文件或工具结果为准 */
+export const HISTORY_TOOL_ARGUMENT_MAX_CHARS = 1200;
+
+/** 把超大工具参数替换成合法 JSON 占位，调用 id/name 保持不变以维持协议配对 */
+export function compactToolCallArguments(
+  argumentsJson: string,
+  maxChars: number = HISTORY_TOOL_ARGUMENT_MAX_CHARS,
+): string {
+  if (argumentsJson.length <= maxChars) return argumentsJson;
+  return JSON.stringify({
+    _truncated: true,
+    original_chars: argumentsJson.length,
+    note: "历史参数占位符，禁止再次提交；如需修改，请重新读取当前数据并构造完整参数。",
+  });
+}
 
 /**
  * 会话状态：维护消息历史。
@@ -16,6 +38,8 @@ export class Session {
   private modelProfileValue: string | undefined;
   private workspaceValue: string | undefined;
   private approvalModeValue: "ask" | "edits" | undefined;
+  private activeToolsValue: string[] = [];
+  private travelStateValue: TravelState | undefined;
   private readonly estimator = new TokenEstimator();
 
   constructor(id: string = defaultSessionId(), initialMessages: readonly Message[] = []) {
@@ -80,6 +104,29 @@ export class Session {
     this.approvalModeValue = mode;
   }
 
+  /** 本会话已按需激活的可选工具；常驻/未分类工具不记录在这里 */
+  get activeTools(): readonly string[] {
+    return this.activeToolsValue;
+  }
+
+  setActiveTools(names: readonly string[]): void {
+    this.activeToolsValue = [...new Set(
+      names.flatMap((name) => {
+        const trimmed = name.trim();
+        return trimmed === "" ? [] : [trimmed];
+      }),
+    )];
+  }
+
+  /** 跨请求保留的精简旅行事实，不依赖易被裁剪的原始工具输出 */
+  get travelState(): TravelState | undefined {
+    return this.travelStateValue;
+  }
+
+  setTravelState(state: TravelState | undefined): void {
+    this.travelStateValue = state === undefined ? undefined : normalizeTravelState(state);
+  }
+
   /** 当前校准系数（透明度/调试用） */
   get calibrationFactor(): number {
     return this.estimator.calibrationFactor;
@@ -105,8 +152,38 @@ export class Session {
 
   /** 按当前校准系数估算历史 token 数 */
   estimateHistoryTokens(): number {
-    const charCount = this.messages.reduce((sum, message) => sum + message.content.length, 0);
-    return this.estimator.estimateMessages(charCount, this.messages.length);
+    const prompt = this.toPrompt();
+    const charCount = prompt.reduce(
+      (sum, message) =>
+        sum +
+        message.content.length +
+        toolCallChars(message) +
+        (message.toolCallId?.length ?? 0) +
+        (message.toolName?.length ?? 0),
+      0,
+    );
+    return this.estimator.estimateMessages(charCount, prompt.length);
+  }
+
+  /**
+   * 与真实请求对齐的字符量（用于 token 校准）。
+   * tool_calls 的参数经常比正文大一个数量级，漏算会让压缩阈值严重失真。
+   */
+  promptCharCount(messages: readonly PromptMessage[] = this.toPrompt()): number {
+    return messages.reduce((sum, message) => {
+      const calls = message.toolCalls?.reduce(
+        (total, call) => total + call.id.length + call.name.length + call.arguments.length + 16,
+        0,
+      ) ?? 0;
+      return (
+        sum +
+        message.content.length +
+        calls +
+        (message.toolCallId?.length ?? 0) +
+        (message.toolName?.length ?? 0) +
+        8
+      );
+    }, 0);
   }
 
   add(role: Message["role"], content: string, extra: Parameters<typeof createMessage>[2] = {}): Message {
@@ -118,13 +195,70 @@ export class Session {
     return message;
   }
 
-  /** 供 LLM 调用：导出为干净的 API 消息格式 */
+  /**
+   * 一批工具执行完成后立即压缩调用参数。
+   * 运行时通常只在一个用户轮次开始时做整体压缩；长行程会在同一轮内跑几十次模型请求，
+   * 因而需要在安全的 tool-result 边界同步瘦身，否则每轮都会重发此前的多 KB 行程参数。
+   * 最近一轮保留完整参数：模型修改行程时应参考真实的上一次调用，而不是复制压缩占位符。
+   */
+  compactCompletedToolCalls(
+    maxChars: number = HISTORY_TOOL_ARGUMENT_MAX_CHARS,
+    keepRecentToolRounds: number = 1,
+  ): number {
+    let compacted = 0;
+    const toolCallMessageIndexes = this.messages.flatMap(
+      (message, index) => message.toolCalls === undefined ? [] : [index],
+    );
+    const recent = new Set(
+      keepRecentToolRounds <= 0
+        ? []
+        : toolCallMessageIndexes.slice(-keepRecentToolRounds),
+    );
+    this.messages = this.messages.map((message, index) => {
+      if (message.toolCalls === undefined || recent.has(index)) return message;
+      // 即使这轮参数很短，也归档整个旧工具轮次。否则几十次搜索的小参数与
+      // 每条数千字符的结果会在整轮规划中不断累积，批次上限只限制了单轮大小。
+      const toolCalls = message.toolCalls.map((call) => {
+        const argumentsJson = compactToolCallArguments(call.arguments, maxChars);
+        if (argumentsJson === call.arguments) return call;
+        compacted += 1;
+        return { ...call, arguments: argumentsJson };
+      });
+      return {
+        ...message,
+        toolCalls,
+        archivedToolCalls: message.archivedToolCalls ?? message.toolCalls,
+      };
+    });
+    return compacted;
+  }
+
+  /**
+   * 供 LLM 调用：导出为干净的 API 消息格式。
+   * 已完成且参数被压缩的工具轮次只保留在本地审计历史里，不再把占位 JSON
+   * 发给模型；否则模型会把占位符当成上一版参数模板并原样重试。
+   */
   toPrompt(): PromptMessage[] {
-    return this.messages.map((m) => {
+    const omittedToolCallIds = new Set(
+      this.messages.flatMap((message) => [
+        ...(message.archivedToolCalls ?? []).map((call) => call.id),
+        ...(message.toolCalls ?? [])
+          .filter((call) => isCompactedToolArguments(call.arguments))
+          .map((call) => call.id),
+      ]),
+    );
+    return this.messages.flatMap((m) => {
+      if (m.role === "tool" && m.toolCallId !== undefined && omittedToolCallIds.has(m.toolCallId)) {
+        return [];
+      }
+      const toolCalls = m.toolCalls?.filter((call) => !omittedToolCallIds.has(call.id));
+      if (m.toolCalls !== undefined && toolCalls?.length === 0 && m.content.trim() === "") {
+        return [];
+      }
       return {
         role: m.role,
         content: m.content,
-        ...(m.toolCalls !== undefined ? { toolCalls: m.toolCalls } : {}),
+        ...(toolCalls === undefined || toolCalls.length === 0 ? {} : { toolCalls }),
         ...(m.toolCallId !== undefined ? { toolCallId: m.toolCallId } : {}),
         ...(m.toolName !== undefined ? { toolName: m.toolName } : {}),
       };
@@ -133,6 +267,8 @@ export class Session {
 
   reset(): void {
     this.messages = [];
+    this.activeToolsValue = [];
+    this.travelStateValue = undefined;
   }
 
   /**
@@ -156,6 +292,8 @@ export class Session {
       modelProfile: this.modelProfileValue,
       workspace: this.workspaceValue,
       approvalMode: this.approvalModeValue,
+      activeTools: [...this.activeToolsValue],
+      travelState: this.travelStateValue,
     };
   }
 
@@ -189,6 +327,10 @@ export class Session {
     if (data.approvalMode === "ask" || data.approvalMode === "edits") {
       session.approvalModeValue = data.approvalMode;
     }
+    if (Array.isArray(data.activeTools)) {
+      session.setActiveTools(data.activeTools.filter((name): name is string => typeof name === "string"));
+    }
+    session.travelStateValue = normalizeTravelState(data.travelState);
     return session;
   }
 }
@@ -206,9 +348,21 @@ export interface SessionData {
   readonly workspace?: string;
   /** 审批模式（trust 不持久化，仅 ask/edits 落盘） */
   readonly approvalMode?: "ask" | "edits";
+  /** 本会话按需激活的可选工具（旧会话缺省为空） */
+  readonly activeTools?: readonly string[];
+  /** 从旅行工具提取的稳定结构化事实（旧会话缺省为空） */
+  readonly travelState?: TravelState;
 }
 
 function defaultSessionId(): string {
   // 随机后缀防碰撞：同一毫秒内连开两个会话（快速点"新会话"）不会共用文件
   return `sess_${Date.now()}_${randomBytes(4).toString("hex")}`;
+}
+
+/** 工具名、参数与协议字段都会进入 prompt，但本地消息正文不一定包含它们 */
+function toolCallChars(message: Pick<PromptMessage, "toolCalls">): number {
+  return message.toolCalls?.reduce(
+    (sum, call) => sum + call.id.length + call.name.length + call.arguments.length + 16,
+    0,
+  ) ?? 0;
 }

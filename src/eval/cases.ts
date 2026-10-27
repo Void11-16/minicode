@@ -7,25 +7,70 @@ import { readFile } from "node:fs/promises";
  */
 export interface EvalCase {
   readonly id: string;
-  /** 保存行程时的标题（与 eval/out/<id>/plans/<title>.json 对应） */
+  /** 保存行程时的标题（与 plans/<title>.json 对应） */
   readonly title: string;
   readonly days: number;
   readonly budget_per_person_yuan?: number;
   /** 口味偏好（传给旅行提示词；缺省用全局配置） */
   readonly taste?: string;
+  /** 套件筛选标签，例如 food / remote-day / representative */
+  readonly tags?: readonly string[];
   /** 用户视角的原始需求（--live 模式直接作为首条消息） */
   readonly request: string;
 }
 
-export async function loadCases(file: string): Promise<EvalCase[]> {
+/**
+ * 评测套件：可版本化、可筛选的案例集合。
+ * 批次会保存套件快照，后续案例文件变化不会悄悄改写历史批次的口径。
+ */
+export interface EvalSuite {
+  readonly id: string;
+  readonly name: string;
+  readonly version: string;
+  readonly cases: readonly EvalCase[];
+}
+
+/** 兼容旧的顶层数组格式；新文件使用带元数据的套件对象 */
+export async function loadSuite(file: string): Promise<EvalSuite> {
   const raw = JSON.parse(await readFile(file, "utf8")) as unknown;
-  if (!Array.isArray(raw) || raw.length === 0) {
-    throw new Error(`${file}: 需要非空的样例数组`);
+  if (Array.isArray(raw)) {
+    if (raw.length === 0) throw new Error(`${file}: 需要非空样例数组`);
+    const cases = parseCases(raw, `${file}[cases]`);
+    return {
+      id: "legacy",
+      name: "Legacy cases",
+      version: "1",
+      cases,
+    };
   }
-  const cases = raw.map((item, index) => parseCase(item, `${file}[${index}]`));
+  if (typeof raw !== "object" || raw === null) {
+    throw new Error(`${file}: 需要评测套件对象或非空样例数组`);
+  }
+  const record = raw as Record<string, unknown>;
+  const id = requireSafeId(record, "id", file);
+  const name = requireField(record, "name", file);
+  const version = requireField(record, "version", file);
+  if (!Array.isArray(record.cases) || record.cases.length === 0) {
+    throw new Error(`${file}: cases 需要非空样例数组`);
+  }
+  return {
+    id,
+    name,
+    version,
+    cases: parseCases(record.cases, `${file}[cases]`),
+  };
+}
+
+/** 兼容旧调用方：读取套件或旧的顶层案例数组，只返回案例 */
+export async function loadCases(file: string): Promise<EvalCase[]> {
+  return [...(await loadSuite(file)).cases];
+}
+
+function parseCases(raw: readonly unknown[], label: string): EvalCase[] {
+  const cases = raw.map((item, index) => parseCase(item, `${label}[${index}]`));
   const ids = new Set<string>();
   for (const item of cases) {
-    if (ids.has(item.id)) throw new Error(`${file}: 样例 id 重复: ${item.id}`);
+    if (ids.has(item.id)) throw new Error(`${label}: 样例 id 重复: ${item.id}`);
     ids.add(item.id);
   }
   return cases;
@@ -48,12 +93,22 @@ function parseCase(raw: unknown, label: string): EvalCase {
   if (record.taste !== undefined && typeof record.taste !== "string") {
     throw new Error(`${label}: taste 需要字符串`);
   }
+  if (
+    record.tags !== undefined &&
+    (!Array.isArray(record.tags) || record.tags.some((tag) => typeof tag !== "string" || tag.trim() === ""))
+  ) {
+    throw new Error(`${label}: tags 需要非空字符串数组`);
+  }
+  const tags = Array.isArray(record.tags)
+    ? [...new Set(record.tags.map((tag) => (tag as string).trim()))]
+    : undefined;
   return {
-    id,
+    id: requireSafeCaseId(id, label),
     title,
     days: record.days,
     ...(record.budget_per_person_yuan === undefined ? {} : { budget_per_person_yuan: record.budget_per_person_yuan }),
     ...(record.taste === undefined ? {} : { taste: record.taste }),
+    ...(tags === undefined ? {} : { tags }),
     request,
   };
 }
@@ -62,6 +117,22 @@ function requireField(record: Record<string, unknown>, key: string, label: strin
   const value = record[key];
   if (typeof value !== "string" || value.trim() === "") {
     throw new Error(`${label}: 缺少非空字符串字段 ${key}`);
+  }
+  return value;
+}
+
+function requireSafeId(record: Record<string, unknown>, key: string, label: string): string {
+  return requireSafeCaseId(requireField(record, key, label), `${label}.${key}`);
+}
+
+export function requireSafeCaseId(value: string, label: string): string {
+  if (
+    value.length > 80 ||
+    !/^[a-z0-9][a-z0-9._-]*$/i.test(value) ||
+    value === "." ||
+    value === ".."
+  ) {
+    throw new Error(`${label}: id 只能包含字母、数字、点、下划线和连字符，且不能以符号开头`);
   }
   return value;
 }

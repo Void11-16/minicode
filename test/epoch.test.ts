@@ -1,12 +1,34 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ContextEpochManager, estimateTokens } from "../src/context/epoch.ts";
+import {
+  ContextEpochManager,
+  estimateHistoryTokens,
+  estimateTokens,
+  renderHistoryForSummary,
+} from "../src/context/epoch.ts";
 import { Session } from "../src/core/session.ts";
 import type { Message } from "../src/core/message.ts";
+import {
+  updateTravelStateFromBrief,
+  updateTravelStateFromItinerary,
+} from "../src/core/travel-state.ts";
 
 test("token 估算: 中文与英文", () => {
   assert.equal(estimateTokens("你好"), 2); // 2 字 × 0.7 → 1.4 → 2
   assert.equal(estimateTokens("hello world"), 8); // 11 字符 × 0.7 → 7.7 → 8
+});
+
+test("导出的历史 token 估算也统计 tool_calls 参数", () => {
+  const argumentsJson = JSON.stringify({ title: "北京五日游", days: ["x".repeat(6000)] });
+  const messages = [{
+    id: "msg_tool_estimate",
+    role: "assistant" as const,
+    content: "",
+    createdAt: Date.now(),
+    toolCalls: [{ id: "call_save", name: "save_itinerary", arguments: argumentsJson }],
+  }];
+
+  assert.ok(estimateHistoryTokens(messages) > 4000);
 });
 
 function makeHistory(count: number): Session {
@@ -140,6 +162,53 @@ test("压缩时截断超长的工具消息（否则保留的最近窗口仍超�
   assert.ok(info!.tokensAfter < info!.tokensBefore / 3, "压缩后估算应大幅低于压缩前");
 });
 
+test("压缩时结构化截断超大的工具调用参数，并保留调用配对", async () => {
+  const session = new Session("sess_tool_args_trim");
+  session.add("user", "规划北京五日游");
+  session.add("assistant", "开始保存");
+  for (let i = 0; i < 3; i++) {
+    session.add("user", `补充第 ${i} 天`);
+  }
+  session.add("assistant", "", {
+    toolCalls: [{
+      id: "call_save",
+      name: "save_itinerary",
+      arguments: JSON.stringify({ title: "北京五日游", days: ["行程数据".repeat(2500)] }),
+    }],
+  });
+  session.add("tool", "已保存「北京五日游」", {
+    toolCallId: "call_save",
+    toolName: "save_itinerary",
+  });
+  session.add("user", "继续");
+  session.add("assistant", "好的");
+
+  const manager = new ContextEpochManager({
+    maxPromptTokens: 100,
+    keepRecent: 8,
+    summarize: async () => "摘要",
+  });
+  const info = await manager.maybeCompact(session);
+  assert.ok(info !== null);
+
+  const kept = session.history.find((message) => message.toolCalls !== undefined);
+  assert.ok(kept?.toolCalls !== undefined);
+  assert.equal(kept.toolCalls[0].id, "call_save");
+  assert.equal(kept.toolCalls[0].name, "save_itinerary");
+  assert.ok(kept.toolCalls[0].arguments.length < 400, "超大参数应缩成结构化占位");
+  assert.equal(JSON.parse(kept.toolCalls[0].arguments)._truncated, true);
+  assert.ok(session.history.some((message) => message.toolCallId === "call_save"), "工具结果配对不能丢");
+  assert.equal(
+    session.toPrompt().some((message) =>
+      message.toolCalls?.some((call) => call.arguments.includes("_truncated")) === true ||
+      message.toolCallId === "call_save"
+    ),
+    false,
+    "压缩占位符只用于本地审计，不能发送给模型",
+  );
+  assert.ok(info!.tokensAfter < info!.tokensBefore / 4, "截断参数后上下文应显著下降");
+});
+
 test("压缩边界不拆散工具调用组（保留窗口不以孤儿 tool 开头）", async () => {
   const session = new Session("sess_boundary");
   session.add("user", "帮我规划");
@@ -166,4 +235,58 @@ test("压缩边界不拆散工具调用组（保留窗口不以孤儿 tool 开�
   assert.equal(kept[0].toolCalls?.[0].id, "c2");
   assert.equal(kept[1].role, "tool");
   assert.equal(kept[1].toolCallId, "c2");
+});
+
+test("摘要转录保留结构化状态、artifact 路径和最新约束", () => {
+  const session = new Session("summary-render");
+  for (let index = 0; index < 30; index += 1) {
+    session.add("user", `旧消息 ${index} ${"普通内容".repeat(20)}`);
+  }
+  session.add("tool", [
+    "大结果预览",
+    `artifact=.minicode/artifacts/summary/search-${"x".repeat(120)}.txt`,
+    "普通内容".repeat(400),
+    "类型 博物馆 | 坐标 39.9042,116.4074",
+  ].join("\n"), { toolName: "search_attractions" });
+  session.add("user", "最终约束：必须保留故宫，并且不要安排长途赶路");
+
+  const brief = updateTravelStateFromBrief(undefined, {
+    title: "北京两日游",
+    destination: "北京",
+    pace: "轻松",
+    mustVisit: ["故宫"],
+    avoid: ["长途赶路"],
+  });
+  const state = updateTravelStateFromItinerary(brief, {
+    title: "北京两日游",
+    days: [{
+      date: "2026-11-01",
+      items: [{
+        type: "visit",
+        name: "故宫",
+        place_type: "古迹",
+        location: { latitude: 39.9163, longitude: 116.3972 },
+      }],
+    }],
+  });
+
+  const rendered = renderHistoryForSummary(session.history, state, 2_000);
+  assert.ok(rendered.length <= 2_000);
+  assert.match(rendered, /需要精确保留的结构化旅行状态/);
+  assert.match(rendered, /故宫\[visit\/古迹\]/);
+  assert.match(rendered, /最终约束：必须保留故宫/);
+  assert.match(rendered, /artifact=\.minicode\/artifacts/);
+});
+
+test("消息极多时摘要中间层仍严格受 maxChars 硬上限约束", () => {
+  const messages: Message[] = Array.from({ length: 500 }, (_, index) => ({
+    id: `message-${index}`,
+    role: index % 2 === 0 ? "user" : "assistant",
+    content: `第 ${index} 条 ${"历史内容".repeat(100)}`,
+    createdAt: index,
+  }));
+
+  const rendered = renderHistoryForSummary(messages, undefined, 1_200);
+  assert.ok(rendered.length <= 1_200);
+  assert.match(rendered, /历史转录/);
 });

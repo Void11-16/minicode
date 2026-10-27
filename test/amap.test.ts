@@ -83,7 +83,7 @@ test("AmapClient: 撞到 10021 先退避重试一次，别整条链路降级到 
 test("AmapClient: geocode 解析坐标", async () => {
   const fetchFn = amapOnlyFetch(() =>
     amapResponse({
-      geocodes: [{ formatted_address: "浙江省杭州市西湖区", location: "120.130396,30.259242" }],
+      geocodes: [{ formatted_address: "浙江省杭州市西湖区", city: "杭州市", province: "浙江省", location: "120.130396,30.259242" }],
     }),
   );
   const client = new AmapClient({ apiKey: "k", fetchFn });
@@ -100,7 +100,7 @@ test("AmapClient: POI 搜索带 biz_ext", async () => {
     requests.push(url);
     return amapResponse({
       pois: [{
-        id: "p1", name: "雷峰塔", type: "风景名胜;风景名胜",
+        id: "p1", name: "雷峰塔", cityname: "杭州市", type: "风景名胜;风景名胜",
         location: "120.15,30.23", distance: "",
         biz_ext: { rating: "4.7", cost: "40" },
       }],
@@ -445,14 +445,14 @@ test("search_attractions: 高德路径（含评分与自算距离）", async () 
   setAmapKey("test-key", amapOnlyFetch((url) => {
     if (url.pathname.includes("geocode")) {
       return amapResponse({
-        geocodes: [{ formatted_address: "浙江省杭州市西湖区", location: "120.130396,30.259242" }],
+        geocodes: [{ formatted_address: "浙江省杭州市西湖区", city: "杭州市", province: "浙江省", location: "120.130396,30.259242" }],
       });
     }
     if (url.pathname.includes("place")) {
       return amapResponse({
         pois: [
-          { id: "a", name: "雷峰塔", type: "风景名胜;风景名胜", location: "120.1500,30.2310", biz_ext: { rating: "4.7" }, address: "南山路15号" },
-          { id: "b", name: "断桥残雪", type: "风景名胜;观景点", location: "120.1400,30.2600", address: "北山街" },
+          { id: "a", name: "雷峰塔", cityname: "杭州市", type: "风景名胜;风景名胜", location: "120.1500,30.2310", biz_ext: { rating: "4.7" }, address: "南山路15号" },
+          { id: "b", name: "断桥残雪", cityname: "杭州市", type: "风景名胜;观景点", location: "120.1400,30.2600", address: "北山街" },
         ],
       });
     }
@@ -462,7 +462,7 @@ test("search_attractions: 高德路径（含评分与自算距离）", async () 
   // 用独立 fetch 保证 geocodeLocation 也走高德 mock（不走真实网络）
   // 注意: geocoding 模块读全局 amap client，fetchFn 参数只影响 Photon 兜底
   const tool = createAttractionsTool(amapOnlyFetch(() => amapResponse({})));
-  const output = await tool.execute({ location: "杭州西湖", radius_km: 10, limit: 5 });
+  const output = await tool.execute({ location: "杭州西湖", city: "杭州", radius_km: 10, limit: 5 });
 
   assert.match(output, /高德数据/);
   assert.match(output, /雷峰塔 \| 风景名胜;风景名胜 \| 距中心 \d+\.\d 公里 \| 评分 4\.7 \| 坐标 30\.2310,120\.1500 \| 南山路15号/);
@@ -494,7 +494,7 @@ test("search_stays: 高德路径（含评分与参考价）", async () => {
   assert.match(output, /高德数据/);
   assert.match(output, /杭州君悦酒店/);
   assert.match(output, /评分 4\.8/);
-  assert.match(output, /参考价 ¥1200起/);
+  assert.match(output, /参考价 ¥1200\/房\/晚起/);
 
   setAmapKey(undefined);
 });

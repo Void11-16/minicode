@@ -9,6 +9,6 @@ export function setAmapKey(key: string | undefined, fetchFn: FetchLike = fetch):
   amapClient = key !== undefined && key !== "" ? new AmapClient({ apiKey: key, fetchFn }) : undefined;
 }
 
-export function getAmapClient(): AmapClient | undefined {
-  return amapClient;
+export function getAmapClient(signal?: AbortSignal): AmapClient | undefined {
+  return signal === undefined ? amapClient : amapClient?.withSignal(signal);
 }
