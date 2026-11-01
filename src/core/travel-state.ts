@@ -34,7 +34,8 @@ export interface TravelItineraryState {
   readonly revision?: number;
   readonly timeline?: string;
   readonly itineraryId?: string;
-  readonly daySummaries?: readonly { date?: string; day: number; itemCount: number }[];
+  readonly daySummaries?: readonly { date?: string; day: number; itemCount: number; strictPass?: boolean }[];
+  readonly repairDays?: readonly number[];
   readonly dayCount: number;
   readonly itemCount: number;
   readonly score?: number;
@@ -203,10 +204,12 @@ export function updateTravelStateFromSnapshot(current: TravelState | undefined, 
   const state = updateTravelStateFromItinerary(current, snapshot.itinerary as unknown as Record<string, unknown>);
   const report = snapshot.report;
   return { ...state, itinerary: { ...state.itinerary!, revision: snapshot.itinerary.revision, itineraryId: snapshot.itinerary.itinerary_id,
+    repairDays: report.repair_days,
+    daySummaries: state.itinerary?.daySummaries?.map((day) => ({ ...day, strictPass: report.daily?.find((item) => item.day === day.day)?.strict_pass })),
     timeline: snapshot.itinerary.days.map((day, index) => `D${index + 1} ${day.date ?? ""}: ` + day.items.map((item) => `[${item.id}]${item.time ?? ""}${item.end_time === undefined ? "" : `-${item.end_time}`} ${item.type}${item.subtype === undefined ? "" : `/${item.subtype}`} ${item.name}${item.planned_duration_min === undefined ? "" : ` ${item.planned_duration_min}分钟`}`).join("；")).join("\n"),
     score: report.score, issueCount: report.issue_count,
     strictPass: report.issue_count.P0 === 0 && report.issue_count.P1 === 0,
-    complete: !report.issues.some((issue) => issue.code === "title-day-mismatch"),
+    complete: (report.scoring?.completeness ?? 1) === 1 && !report.issues.some((issue) => ["title-day-mismatch", "missing-requested-date", "unexpected-itinerary-date"].includes(issue.code)),
     issues: report.issues.map((issue) => ({ level: issue.level, message: issue.message, code: issue.code, day: issue.day })),
   } };
 }
@@ -250,7 +253,7 @@ export function updateTravelStateFromQuality(
 }
 
 /** 每轮注入的紧凑状态卡；放在临时 system 消息尾部，避免破坏历史前缀缓存。 */
-export function renderTravelState(state: TravelState | undefined): string | undefined {
+export function renderTravelState(state: TravelState | undefined, maxChars = 16000): string | undefined {
   if (state === undefined || (state.brief === undefined && state.itinerary === undefined)) return undefined;
   const lines = [
     "【结构化旅行状态卡】以下是跨请求保留的事实；工具原文可能已裁剪，应以本卡和已落盘行程为准。",
@@ -312,7 +315,7 @@ export function renderTravelState(state: TravelState | undefined): string | unde
     }
   }
   const rendered = lines.join("\n");
-  return rendered.length <= 16000 ? rendered : `${rendered.slice(0, 15980)}\n…（状态卡过长，已截断）`;
+  return rendered.length <= maxChars ? rendered : `${rendered.slice(0, Math.max(0, maxChars - 20))}\n…（状态卡过长，已截断）`;
 }
 
 /** 反序列化旧数据或损坏数据时只在字段合法时恢复 */
@@ -401,9 +404,10 @@ function normalizeItinerary(raw: Record<string, unknown>): TravelItineraryState 
     ...optional("revision", positiveNumber(raw.revision)),
     ...optional("timeline", stringValue(raw.timeline)),
     ...optional("itineraryId", stringValue(raw.itineraryId)),
+    ...(Array.isArray(raw.repairDays) ? { repairDays: raw.repairDays.filter((day): day is number => typeof day === "number" && Number.isInteger(day) && day >= 1 && day <= dayCount) } : {}),
     ...(Array.isArray(raw.daySummaries) ? { daySummaries: raw.daySummaries.flatMap((value) => {
       const day = objectValue(value);
-      return day !== null && positiveNumber(day.day) !== undefined && nonNegativeNumber(day.itemCount) !== undefined ? [{ date: stringValue(day.date), day: day.day as number, itemCount: day.itemCount as number }] : [];
+      return day !== null && positiveNumber(day.day) !== undefined && nonNegativeNumber(day.itemCount) !== undefined ? [{ date: stringValue(day.date), day: day.day as number, itemCount: day.itemCount as number, ...(typeof day.strictPass === "boolean" ? { strictPass: day.strictPass } : {}) }] : [];
     }) } : {}),
     issues,
   };

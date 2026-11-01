@@ -281,7 +281,7 @@ test("上下文压缩: 摘要器收到被压缩的会话（后台会话用自己
       compacted.push(session);
       return "摘要";
     },
-    maxPromptTokens: 100, // 强制触发压缩
+    maxPromptTokens: 500, // 完整输入预算；压缩后的工具定义和近期消息也必须能容纳
     keepRecent: 2,
     maxToolRounds: 5,
   });

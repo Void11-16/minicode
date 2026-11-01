@@ -84,6 +84,7 @@ const COMPLETE_DAYS = [
         source: "amap",
         confidence: "medium",
       },
+      { id: "lunch-break", time: "12:00", end_time: "13:00", type: "rest", name: "午餐休整", source: "manual", confidence: "high" },
       {
         id: "transport-1",
         time: "13:30",
@@ -321,8 +322,8 @@ test("save_itinerary: 保存质量报告，strict 只拦截行程类 P1（餐饮
   const soft = await validate.execute({ title: "餐饮提醒", strict: true });
   assert.match(soft, /状态: 通过/);
   assert.match(soft, /餐饮参考（不参与评分）/);
-  assert.match(soft, /没有午餐推荐/);
-  assert.match(soft, /没有晚餐推荐/);
+  assert.match(soft, /午餐候选 0\/2/);
+  assert.match(soft, /晚餐候选 0\/2/);
 
   // 行程类 P1（景点缺游玩时长）：strict 仍然拦截
   await save.execute({ title: "行程硬伤", days: [{ items: [{ time: "09:00", type: "visit", name: "西湖公园" }] }] });

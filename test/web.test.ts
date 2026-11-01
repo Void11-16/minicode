@@ -581,10 +581,10 @@ test("web: 工具轮次耗尽返回质量报告，用户授权追加后继续", 
     assert.equal(request.assessment.currentLimit, 2);
     assert.equal(request.assessment.suggestedAdditionalRounds, 15);
     assert.equal(request.assessment.quality.available, true);
-    assert.equal(request.assessment.quality.score, 91);
+    assert.equal(request.assessment.quality.score, 93);
     assert.equal(request.assessment.quality.strict_pass, false);
     assert.deepEqual(request.assessment.quality.issue_count, { P0: 0, P1: 1, P2: 1 });
-    assert.equal(request.assessment.quality.potential_score, 98);
+    assert.equal(request.assessment.quality.potential_score, 99);
     assert.match(request.assessment.repair.summary, /理论上可把评分提升/);
     assert.match(stream, /当前版本尚未通过 strict 校验/);
     assert.doesNotMatch(stream, /已使用追加轮次完成完善与复验/);
@@ -1279,14 +1279,14 @@ test("web: 行程路线接口返回真实路径几何（高德方向 API；景�
     assert.equal(dayResponse.status, 200);
     const dayData = await dayResponse.json();
     assert.deepEqual(dayData.days.map((day: { day: number }) => day.day), [1]);
-    assert.deepEqual(dayData.days[0].legs, data.days[0].legs);
+    assert.deepEqual(dayData.days[0].legs, data.days[0].legs.map((leg: { source?: string }) => leg.source === "amap" ? { ...leg, source: "cache" } : leg));
     const secondDayResponse = await fetch(
       `http://127.0.0.1:${running.port}/api/plans/${encodeURIComponent("测试路线")}/routes?day=2`,
     );
     assert.equal(secondDayResponse.status, 200);
     const secondDayData = await secondDayResponse.json();
     assert.deepEqual(secondDayData.days.map((day: { day: number }) => day.day), [2]);
-    assert.deepEqual(secondDayData.days[0].legs, data.days[1].legs);
+    assert.deepEqual(secondDayData.days[0].legs, data.days[1].legs.map((leg: { source?: string }) => leg.source === "amap" ? { ...leg, source: "cache" } : leg));
     assert.equal(calls.length, 4, "按天重取应命中持久路线缓存，不重复调用高德");
   } finally {
     setAmapKey(undefined);

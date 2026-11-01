@@ -1,3 +1,5 @@
+import { createExecutionBudget, type CumulativeToolBudget } from "../core/execution-budget.ts";
+import type { RequestContextMetrics } from "../context/request.ts";
 import { SessionScheduler } from "./scheduler.ts";
 import { ContextEpochManager, type CompactInfo } from "../context/epoch.ts";
 import {
@@ -25,13 +27,14 @@ const DEFAULT_MAX_TOOL_ROUNDS = 30;
  * 所以上限放到 150：真不够时由用户逐次授权追加（至少 +15 轮）。
  */
 const BUDGET_EXTENSION_STEP = 15;
-const ROUND_LIMIT_CEILING = 150;
 
 export interface AgentRuntimeOptions {
   /** 上下文压缩用的摘要器（通常走 LLM）；session 是被压缩的会话，用于选对模型 */
   readonly summarize: (session: Session, messages: readonly Message[]) => Promise<string>;
   readonly maxPromptTokens?: number;
   readonly keepRecent?: number;
+  readonly createBudget?: (session: Session) => CumulativeToolBudget;
+  readonly onRequestContext?: (sessionId: string, metrics: RequestContextMetrics) => void;
   /**
    * 每轮的工具调用预算：固定值或按会话解析（可异步读需求单，按行程天数调整；
    * input 是本轮用户输入，首轮需求单还没落盘时可据此匹配已有需求单）。
@@ -72,7 +75,7 @@ export interface AgentRuntimeOptions {
  *   - queue  排队为下一个轮次（默认）
  *   - steer  注入当前正在执行的轮次 —— 在工具轮之间被模型看到，实时改变方向
  *     （若当前没有执行中的轮次，等同于 queue）
- * - 每轮开始前做 Context Epoch 检查，历史过大时自动压缩
+ * - 每次模型请求前按完整输入做 Context Epoch 检查
  */
 export class AgentRuntime {
   private readonly scheduler = new SessionScheduler();
@@ -165,7 +168,7 @@ export class AgentRuntime {
     }
   }
 
-  private async runTurn(sessionId: string, input: string): Promise<string> {
+  private async runTurn(sessionId: string, input: string, taskBudget?: CumulativeToolBudget): Promise<string> {
     debugLog("runtime", `turn 开始 session=${sessionId} input="${input.slice(0, 50)}"`);
     const agent = this.agents.get(sessionId);
     if (agent === undefined) {
@@ -175,20 +178,24 @@ export class AgentRuntime {
     this.activeTurns.add(sessionId);
     try {
       this.options.onTurnStart?.(sessionId, input);
-      // Context Epoch：历史过大时先压缩再开跑
-      const compact = await this.epoch.maybeCompact(agent.session);
-      if (compact !== null) {
-        this.options.onCompact?.(sessionId, compact);
-      }
+      // 由 Agent 在每次模型请求前按完整输入检查，而非仅在用户轮次开始时检查历史。
 
       // 工具轮次预算：先按会话需求解析（例如 7 天行程给更多轮）；
       // 用尽后暂停并让用户基于当前质量决定是否继续追加，绝对上限 150 轮
-      const resolvedLimit = await this.resolveRoundLimit(agent.session, input);
+      taskBudget ??= this.options.createBudget?.(agent.session) ?? createExecutionBudget(agent.session);
+      const resolvedLimit = Math.min(taskBudget.maxRounds, await this.resolveRoundLimit(agent.session, input));
       let limit = resolvedLimit;
       let previousFingerprint: string | undefined;
       const reply = await agent.run(input, {
         // 通用 agent 场景（读文件→改代码→跑测试→修）需要更多轮次；上限保护仍在
         maxToolRounds: () => limit,
+        cumulativeBudget: taskBudget,
+        onRequestContext: (metrics) => this.options.onRequestContext?.(sessionId, metrics),
+        maxPromptTokens: this.options.maxPromptTokens,
+        compactContext: async (tokens) => {
+          const compact = await this.epoch.maybeCompact(agent.session, tokens);
+          if (compact !== null) this.options.onCompact?.(sessionId, compact);
+        },
         onBudgetExhausted: async (current) => {
           // 需求单可能在本次轮次里才落盘：重新解析一次，让续跑量跟得上真实行程工作量
           const refreshedLimit = await this.resolveRoundLimit(agent.session, input);
@@ -198,7 +205,7 @@ export class AgentRuntime {
             session: agent.session,
             initialLimit: resolvedLimit,
             currentLimit: current,
-            ceiling: ROUND_LIMIT_CEILING,
+            ceiling: taskBudget!.maxRounds,
             extensionStep,
             previousFingerprint,
           });
@@ -221,7 +228,7 @@ export class AgentRuntime {
             };
           }
           const next = Math.min(
-            ROUND_LIMIT_CEILING,
+            taskBudget!.maxRounds,
             current + assessment.suggestedAdditionalRounds,
           );
           if (next <= current) return { continue: false };
@@ -245,7 +252,7 @@ export class AgentRuntime {
       const leftover = this.drainSteered(sessionId);
       if (leftover.length > 0) {
         this.scheduler
-          .submit(sessionId, () => this.runTurn(sessionId, leftover.join("\n")))
+          .submit(sessionId, () => this.runTurn(sessionId, leftover.join("\n"), taskBudget))
           .catch(() => {
             // 错误已通过 onTurnError 上报，这里避免未处理的 rejection
           });

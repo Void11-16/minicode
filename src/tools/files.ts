@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { Tool, ToolContext } from "./tool.ts";
 import { requireString } from "./tool.ts";
@@ -7,6 +7,7 @@ const MAX_FILE_BYTES = 2 * 1024 * 1024;
 const DEFAULT_READ_LINES = 500;
 const MAX_READ_LINES = 2000;
 const MAX_READ_CHARS = 2600;
+const MAX_READ_BYTES = 2000;
 const MAX_LIST_ENTRIES = 300;
 const MAX_GREP_MATCHES = 200;
 
@@ -58,13 +59,50 @@ async function friendlyStat(absolute: string, label: string) {
   }
 }
 
+/** 字节页只读固定大小的缓冲；UTF-8 末尾不完整字符留到下一页，不丢字节。 */
+async function readBytePage(absolute: string, label: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<string> {
+  const offset = args.byte_offset ?? 0;
+  const limit = args.byte_limit ?? MAX_READ_BYTES;
+  if (typeof offset !== "number" || !Number.isSafeInteger(offset) || offset < 0) throw new Error("byte_offset 必须是非负安全整数");
+  if (typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 4 || limit > MAX_READ_BYTES) throw new Error(`byte_limit 必须是 4—${MAX_READ_BYTES} 的整数`);
+  if (args.offset !== undefined || args.limit !== undefined) throw new Error("字节分页不能与行号 offset/limit 混用");
+  signal?.throwIfAborted();
+  const handle = await open(absolute, "r");
+  try {
+    const size = (await handle.stat()).size;
+    if (offset > size) throw new Error(`byte_offset 超过文件大小 ${size}`);
+    const buffer = Buffer.alloc(limit);
+    const wanted = Math.min(limit, size - offset);
+    let bytesRead = 0;
+    while (bytesRead < wanted) {
+      signal?.throwIfAborted();
+      const read = await handle.read(buffer, bytesRead, wanted - bytesRead, offset + bytesRead);
+      if (read.bytesRead === 0) throw new Error("文件在读取期间缩短，请重新读取");
+      bytesRead += read.bytesRead;
+    }
+    signal?.throwIfAborted();
+    let text: string;
+    try {
+      const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+      text = decoder.decode(buffer.subarray(0, bytesRead), { stream: offset + bytesRead < size });
+    } catch {
+      throw new Error("文件不是有效 UTF-8，或 byte_offset 不在字符边界；请使用上一页返回的 byte_offset");
+    }
+    const next = offset + Buffer.byteLength(text, "utf8");
+    return `${label}（UTF-8 字节页 ${offset}—${next}，共 ${size} 字节）:\n${text}\n` +
+      (next < size ? `【续读】byte_offset=${next}，byte_limit=${limit}` : "【文件结束】");
+  } finally {
+    await handle.close();
+  }
+}
+
 /** 读取工作区内文本文件，带行号输出，支持分段读大文件 */
 export function createReadFileTool(defaultWorkspace: string = process.cwd()): Tool {
   return {
     name: "read_file",
     description:
       "读取工作区内的文本文件，输出带行号（格式 `行号\\t内容`），支持 offset/limit 分段。修改代码前先用它了解现状；" +
-      "文件上限 2MB；单次最多返回约 2,600 字符，并给出下一次 offset，大文件请按提示分段读取。",
+      "行号模式文件上限 2MB，单次约 2,600 字符；更大文件、artifact 或超长单行用 byte_offset=0 开始按 UTF-8 字节分页，按返回游标续读，无整文件大小限制。",
     category: "workspace",
     alwaysActive: true,
     outputKind: "file",
@@ -74,6 +112,8 @@ export function createReadFileTool(defaultWorkspace: string = process.cwd()): To
         path: { type: "string", description: "文件路径（相对工作区或绝对路径）" },
         offset: { type: "number", description: "起始行号（1 起），可选" },
         limit: { type: "number", description: `读取行数，默认 ${DEFAULT_READ_LINES}，最大 ${MAX_READ_LINES}` },
+        byte_offset: { type: "integer", description: "UTF-8 字节分页起点，0 起；与行号 offset/limit 互斥，续读必须用返回的游标" },
+        byte_limit: { type: "integer", description: `每页字节数，4—${MAX_READ_BYTES}，默认 ${MAX_READ_BYTES}；与 byte_offset 配合使用` },
       },
       required: ["path"],
     },
@@ -85,9 +125,12 @@ export function createReadFileTool(defaultWorkspace: string = process.cwd()): To
       if (info.isDirectory()) {
         throw new Error(`${path} 是一个目录，请用 list_files 浏览`);
       }
+      if (args.byte_offset !== undefined || args.byte_limit !== undefined) {
+        return readBytePage(absolute, relative(workspace, absolute), args, ctx?.signal);
+      }
       if (info.size > MAX_FILE_BYTES) {
         throw new Error(
-          `文件过大（${(info.size / 1024 / 1024).toFixed(1)}MB，上限 2MB）：请用 grep 定位内容，或用 bash 的 sed/head 查看局部`,
+          `文件过大（${(info.size / 1024 / 1024).toFixed(1)}MB，行号模式上限 2MB）：请用 byte_offset=0 开始分页读取`,
         );
       }
 
@@ -105,6 +148,7 @@ export function createReadFileTool(defaultWorkspace: string = process.cwd()): To
       let used = 0;
       let nextOffset = offset;
       let truncatedByBudget = false;
+      let nextByteOffset: number | undefined;
       for (const [index, line] of slice.entries()) {
         const rendered = `${offset + index}\t${line}`;
         const separator = numbered.length === 0 ? 0 : 1;
@@ -112,8 +156,10 @@ export function createReadFileTool(defaultWorkspace: string = process.cwd()): To
           truncatedByBudget = true;
           if (numbered.length === 0) {
             const available = Math.max(1, MAX_READ_CHARS - prefix.length - String(offset).length - 2);
-            numbered.push(`${offset}\t${line.slice(0, available)}…`);
-            nextOffset = offset + 1;
+            const end = /[\uD800-\uDBFF]/.test(line[available - 1] ?? "") ? available - 1 : available;
+            numbered.push(`${offset}\t${line.slice(0, end)}…`);
+            const before = lines.slice(0, offset - 1).join("\n") + (offset > 1 ? "\n" : "");
+            nextByteOffset = Buffer.byteLength(before + line.slice(0, end), "utf8");
           }
           break;
         }
@@ -122,7 +168,9 @@ export function createReadFileTool(defaultWorkspace: string = process.cwd()): To
         nextOffset = offset + index + 1;
       }
       const remaining = lines.length - (nextOffset - 1);
-      const tail = remaining > 0
+      const tail = nextByteOffset !== undefined
+        ? `\n...（本行尚未读完，用 byte_offset=${nextByteOffset} 继续读取，后续按返回的字节游标翻页）`
+        : remaining > 0
         ? `\n...（${truncatedByBudget ? "输出达到字符预算，" : ""}还有 ${remaining} 行未显示，` +
           `可用 offset=${nextOffset} 继续读取）`
         : "";

@@ -3,6 +3,8 @@ import { cancellableFetch } from "./travel-request.ts";
 import type { Tool } from "./tool.ts";
 import { requireNumber } from "./tool.ts";
 
+import type { RouteGeometry } from "./amap.ts";
+
 type FetchLike = typeof fetch;
 
 const MODES = new Set(["driving", "walking", "cycling"]);
@@ -18,12 +20,13 @@ export async function fetchOsrmRoute(
   to: GeoPoint,
   mode: string,
   fetchFn: FetchLike,
-): Promise<{ distanceM: number; durationSec: number }> {
+  includeGeometry = false,
+): Promise<{ distanceM: number; durationSec: number; geometry?: RouteGeometry }> {
   from = convertPoint(from, "wgs84");
   to = convertPoint(to, "wgs84");
   const url =
     `https://router.project-osrm.org/route/v1/${mode}/` +
-    `${from.longitude},${from.latitude};${to.longitude},${to.latitude}?overview=false`;
+    `${from.longitude},${from.latitude};${to.longitude},${to.latitude}?overview=${includeGeometry ? "full&geometries=geojson" : "false"}`;
   const response = await fetchFn(url, { signal: AbortSignal.timeout(30_000) });
   if (!response.ok) {
     throw new Error(`路由服务返回 ${response.status}`);
@@ -31,13 +34,20 @@ export async function fetchOsrmRoute(
 
   const data = (await response.json()) as {
     code?: string;
-    routes?: Array<{ distance: number; duration: number }>;
+    routes?: Array<{ distance: number; duration: number; geometry?: { coordinates?: number[][] } }>;
   };
   const route = data.routes?.[0];
   if (data.code !== "Ok" || route === undefined) {
     throw new Error(`路线规划失败: ${data.code ?? "无路线"}`);
   }
-  return { distanceM: route.distance, durationSec: route.duration };
+  const points = includeGeometry ? (route.geometry?.coordinates ?? []).flatMap(([longitude, latitude]) => {
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude) || Math.abs(latitude) > 90 || Math.abs(longitude) > 180) return [];
+    const p = convertPoint({ latitude, longitude, crs: "wgs84" }, "gcj02");
+    return [[p.latitude, p.longitude] as [number, number]];
+  }) : [];
+  return { distanceM: route.distance, durationSec: route.duration,
+    ...(points.length < 2 ? {} : { geometry: { distanceM: route.distance, durationSec: route.duration, points } }) };
+
 }
 
 /** OSRM 公共路由服务（免费无 Key） */

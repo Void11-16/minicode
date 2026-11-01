@@ -122,3 +122,19 @@ export function formatUsage(
   }
   return result;
 }
+
+/** 只保存大小与用量，不保存提示词正文或工具参数。 */
+export interface RequestContextMetrics {
+  readonly systemChars: number;
+  readonly historyChars: number;
+  readonly transientChars: number;
+  readonly toolDefinitionChars: number;
+  readonly totalChars: number;
+  readonly estimatedInputTokens: number;
+  readonly inputLimit: number;
+}
+export interface RequestContextRecord extends RequestContextMetrics {
+  readonly at: number;
+  readonly actualPromptTokens?: number;
+  readonly cacheHitTokens?: number;
+}

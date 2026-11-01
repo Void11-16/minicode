@@ -5,7 +5,7 @@ import {
   type Message,
   type PromptMessage,
 } from "./message.ts";
-import { EMPTY_USAGE, type TokenUsage, type UsageSummary } from "./usage.ts";
+import { EMPTY_USAGE, type TokenUsage, type UsageSummary, type RequestContextMetrics, type RequestContextRecord } from "./usage.ts";
 import { TokenEstimator } from "./token-estimator.ts";
 import { normalizeTravelState, type TravelState } from "./travel-state.ts";
 
@@ -33,6 +33,7 @@ export class Session {
   readonly id: string;
   private messages: Message[] = [];
   private usageSummary: UsageSummary = EMPTY_USAGE;
+  private requestContextsValue: RequestContextRecord[] = [];
   private epochNumber = 0;
   private titleValue: string | undefined;
   private modelProfileValue: string | undefined;
@@ -40,6 +41,8 @@ export class Session {
   private approvalModeValue: "ask" | "edits" | undefined;
   private activeToolsValue: string[] = [];
   private travelStateValue: TravelState | undefined;
+  /** 宿主当前模式，不随历史摘要或磁盘会话恢复覆盖。 */
+  private travelModeValue = false;
   private readonly estimator = new TokenEstimator();
 
   constructor(id: string = defaultSessionId(), initialMessages: readonly Message[] = []) {
@@ -53,6 +56,18 @@ export class Session {
 
   get usage(): UsageSummary {
     return this.usageSummary;
+  }
+
+  get requestContexts(): readonly RequestContextRecord[] { return this.requestContextsValue.map((item) => ({ ...item })); }
+
+  recordRequestContext(metrics: RequestContextMetrics): void {
+    this.requestContextsValue.push({ ...metrics, at: Date.now() });
+    this.requestContextsValue = this.requestContextsValue.slice(-200);
+  }
+
+  completeRequestContext(usage: TokenUsage): void {
+    const index = this.requestContextsValue.length - 1;
+    if (index >= 0) this.requestContextsValue[index] = { ...this.requestContextsValue[index]!, actualPromptTokens: usage.promptTokens, cacheHitTokens: usage.promptCacheHitTokens ?? 0 };
   }
 
   /** 当前上下文纪元编号（每次压缩 +1，随会话持久化） */
@@ -103,6 +118,10 @@ export class Session {
   setApprovalMode(mode: "ask" | "edits"): void {
     this.approvalModeValue = mode;
   }
+
+  get travelMode(): boolean { return this.travelModeValue; }
+
+  setTravelMode(enabled: boolean): void { this.travelModeValue = enabled; }
 
   /** 本会话已按需激活的可选工具；常驻/未分类工具不记录在这里 */
   get activeTools(): readonly string[] {
@@ -197,8 +216,8 @@ export class Session {
 
   /**
    * 一批工具执行完成后立即压缩调用参数。
-   * 运行时通常只在一个用户轮次开始时做整体压缩；长行程会在同一轮内跑几十次模型请求，
-   * 因而需要在安全的 tool-result 边界同步瘦身，否则每轮都会重发此前的多 KB 行程参数。
+   * 工具安全边界先移除旧组，完整输入检查再决定是否需要摘要，
+   * 避免在每次模型请求里重复发送多 KB 行程参数。
    * 最近一轮保留完整参数：模型修改行程时应参考真实的上一次调用，而不是复制压缩占位符。
    */
   compactCompletedToolCalls(
@@ -269,6 +288,7 @@ export class Session {
     this.messages = [];
     this.activeToolsValue = [];
     this.travelStateValue = undefined;
+    this.requestContextsValue = [];
   }
 
   /**
@@ -286,6 +306,7 @@ export class Session {
       id: this.id,
       messages: this.messages.map((m) => ({ ...m })),
       usage: this.usageSummary,
+      ...(this.requestContextsValue.length === 0 ? {} : { requestContexts: this.requestContexts }),
       epoch: this.epochNumber,
       title: this.titleValue,
       calibration: this.estimator.calibrationFactor,
@@ -330,6 +351,12 @@ export class Session {
     if (Array.isArray(data.activeTools)) {
       session.setActiveTools(data.activeTools.filter((name): name is string => typeof name === "string"));
     }
+    if (Array.isArray(data.requestContexts)) {
+      const required = ["systemChars", "historyChars", "transientChars", "toolDefinitionChars", "totalChars", "estimatedInputTokens", "inputLimit", "at"];
+      const allowed = new Set([...required, "actualPromptTokens", "cacheHitTokens"]);
+      session.requestContextsValue = data.requestContexts.filter((record) => record && typeof record === "object" &&
+        required.every((key) => Object.hasOwn(record, key)) && Object.entries(record).every(([key, value]) => allowed.has(key) && typeof value === "number" && Number.isFinite(value) && value >= 0)).slice(-200).map((record) => ({ ...record }));
+    }
     session.travelStateValue = normalizeTravelState(data.travelState);
     return session;
   }
@@ -339,6 +366,7 @@ export interface SessionData {
   readonly id: string;
   readonly messages: readonly Message[];
   readonly usage?: UsageSummary;
+  readonly requestContexts?: readonly RequestContextRecord[];
   readonly epoch?: number;
   readonly title?: string;
   readonly calibration?: number;

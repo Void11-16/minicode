@@ -109,13 +109,13 @@ test("工具预算评估: 重新校验已保存行程，区分可修复项与外
   assert.equal(assessment.quality.available, true);
   assert.equal(assessment.quality.title, "杭州一日游");
   assert.equal(assessment.quality.status, "needs_revision");
-  assert.equal(assessment.quality.score, 91);
+  assert.equal(assessment.quality.score, 93);
   assert.equal(assessment.quality.strict_pass, false);
   assert.deepEqual(assessment.quality.issue_count, { P0: 0, P1: 1, P2: 1 });
   assert.equal(assessment.quality.meal_note_count, 2);
-  assert.equal(assessment.quality.potential_score, 98);
+  assert.equal(assessment.quality.potential_score, 99);
   assert.equal(assessment.repair.canImprove, true);
-  assert.match(assessment.repair.summary, /理论上可把评分提升到约 98/);
+  assert.match(assessment.repair.summary, /理论上可把评分提升到约 99/);
   assert.match(assessment.repair.summary, /1 项依赖外部信息/);
 
   const byCode = new Map(assessment.repair.items.map((item) => [item.code, item]));
@@ -124,7 +124,7 @@ test("工具预算评估: 重新校验已保存行程，区分可修复项与外
 
   const guidance = budgetGuidance(assessment);
   assert.match(guidance, /用户已授权追加工具轮次/);
-  assert.match(guidance, /当前已保存版本「杭州一日游」评分 91\/100/);
+  assert.match(guidance, /当前已保存版本「杭州一日游」评分 93\/100/);
   assert.match(guidance, /timeline-gap/);
   assert.doesNotMatch(guidance, /unverified-coordinates/);
 });

@@ -105,17 +105,26 @@ export interface TransitRouteResult {
   readonly walkingDistanceM: number;
   /** 分段描述，如 ["地铁1号线", "步行 660 米", "7路"] */
   readonly segments: string[];
+  /** 公交方案与工具耗时使用同一方案；所有几何均为 GCJ-02。 */
+  readonly geometry?: RouteGeometry;
 }
 
 /** 路径几何：沿真实道路的点串 + 距离/耗时 */
+export interface RoutePart {
+  readonly mode: "walking" | "transit";
+  readonly points: ReadonlyArray<readonly [number, number]>;
+}
+
 export interface RouteGeometry {
   readonly distanceM: number;
   readonly durationSec: number;
+  readonly parts?: readonly RoutePart[];
   /** [lat, lng] 点串（已从高德 "lng,lat" 转换） */
   readonly points: ReadonlyArray<readonly [number, number]>;
 }
 
 interface AmapDirectionResponse {
+  data?: AmapDirectionResponse["route"];
   route?: {
     paths?: Array<{
       distance?: string;
@@ -126,11 +135,12 @@ interface AmapDirectionResponse {
 }
 
 interface AmapTransitOption {
+  distance?: string;
   duration?: string;
   walking_distance?: string;
   segments?: Array<{
-    walking?: { distance?: string };
-    bus?: { buslines?: Array<{ name?: string }> };
+    walking?: { distance?: string; steps?: Array<{ polyline?: string }> };
+    bus?: { buslines?: Array<{ name?: string; polyline?: string }> };
   }>;
 }
 
@@ -181,19 +191,20 @@ export class AmapClient {
       throw new Error(`高德服务 HTTP ${response.status}`);
     }
 
-    const data = (await response.json()) as { status?: string; infocode?: string; info?: string };
+    const data = (await response.json()) as { status?: string; infocode?: string; info?: string; errcode?: number; errmsg?: string };
     // 高德约定: status "1" + infocode "10000" = 成功
     if (data.status === "1" && data.infocode === "10000") return data as T;
+    // v4 骑行接口使用 errcode=0，不能按 v3 的 status/infocode 判断。
+    if (url.pathname.startsWith("/v4/") && data.errcode === 0) return data as T;
+    const code = data.infocode ?? (data.errcode === undefined ? "UNKNOWN" : String(data.errcode));
 
-    if (data.infocode === QPS_INFOCODE && retriesLeft > 0) {
+    if (code === QPS_INFOCODE && retriesLeft > 0) {
       await abortableDelay(QPS_RETRY_DELAY_MS, undefined, { signal: this.signal });
       return this.getJson<T>(url, retriesLeft - 1);
     }
     const reason =
-      (data.infocode !== undefined ? ERROR_MESSAGES[data.infocode] : undefined) ??
-      data.info ??
-      `infocode ${data.infocode ?? "?"}`;
-    const error = new AmapServiceError(data.infocode ?? "UNKNOWN", reason);
+      ERROR_MESSAGES[code] ?? data.info ?? data.errmsg ?? `infocode ${code}`;
+    const error = new AmapServiceError(code, reason);
     if (["10001", "10003", "10019", "10044"].includes(error.code)) { this.circuit.error = error; this.circuit.day = ["10003", "10044"].includes(error.code) ? serviceDay() : undefined; }
     throw error;
   }
@@ -290,7 +301,7 @@ export class AmapClient {
       }),
     );
     // API 返回的多条方案不保证按耗时排序（实测第一条常带多余换乘），取最短的
-    const transit = (data.route?.transits ?? []).reduce<AmapTransitOption | undefined>(
+    const transit = (data.route?.transits ?? []).filter((option) => Number.isFinite(Number(option.duration)) && Number(option.duration) > 0).reduce<AmapTransitOption | undefined>(
       (fastest, transit) =>
         fastest === undefined || Number(transit.duration ?? "0") < Number(fastest.duration ?? "0")
           ? transit
@@ -300,10 +311,18 @@ export class AmapClient {
     if (transit === undefined) return null;
 
     const segments: string[] = [];
+    const parts: RoutePart[] = [];
+    const addPart = (mode: RoutePart["mode"], polyline?: string) => {
+      const points = parsePolyline(polyline);
+      if (points.length >= 2) parts.push({ mode, points });
+    };
     for (const segment of transit.segments ?? []) {
       const walkDistance = Number(segment.walking?.distance ?? "0");
       if (walkDistance > 50) segments.push(`步行${Math.round(walkDistance / 10) * 10}米`);
-      for (const line of segment.bus?.buslines ?? []) {
+      for (const step of segment.walking?.steps ?? []) addPart("walking", step.polyline);
+      // 同一段 buslines 是可选线路，只取第一条，避免把互斥方案拼在一起。
+      for (const line of (segment.bus?.buslines ?? []).slice(0, 1)) {
+        addPart("transit", line.polyline);
         if (line.name !== undefined && line.name !== "") segments.push(line.name.split("(")[0]);
       }
     }
@@ -311,6 +330,11 @@ export class AmapClient {
       durationSec: Number(transit.duration ?? "0"),
       walkingDistanceM: Number(transit.walking_distance ?? "0"),
       segments,
+      ...(parts.length === 0 ? {} : { geometry: {
+        durationSec: Number(transit.duration),
+        distanceM: Number(transit.distance ?? "0"),
+        points: parts.flatMap((part) => part.points), parts,
+      } }),
     };
   }
 
@@ -353,39 +377,30 @@ export class AmapClient {
   }
 
   /**
-   * 步行/驾车路径规划（v3 direction/walking | direction/driving），
-   * 返回沿真实道路的几何点串。无方案或失败返回 null。
+   * 步行/驾车使用 v3，骑行使用 v4；无方案返回 null，供应商错误保留错误码抛出。
    */
   async directionRoute(
-    mode: "walking" | "driving",
+    mode: "walking" | "driving" | "cycling",
     origin: GeoPoint,
     destination: GeoPoint,
   ): Promise<RouteGeometry | null> {
     origin = convertPoint({ ...origin, crs: origin.crs ?? "gcj02" }, "gcj02");
     destination = convertPoint({ ...destination, crs: destination.crs ?? "gcj02" }, "gcj02");
     const data = await this.getJson<AmapDirectionResponse>(
-      this.buildUrl(`/v3/direction/${mode}`, {
+      this.buildUrl(mode === "cycling" ? "/v4/direction/bicycling" : `/v3/direction/${mode}`, {
         origin: `${origin.longitude},${origin.latitude}`,
         destination: `${destination.longitude},${destination.latitude}`,
       }),
     );
-    const path = data.route?.paths?.[0];
+    const path = (data.route ?? data.data)?.paths?.[0];
     if (path === undefined) return null;
 
-    // 几何按 step 分段给出（"lng,lat;lng,lat"），逐段拼接为完整路径
-    const points: Array<[number, number]> = [];
-    for (const step of path.steps ?? []) {
-      if (typeof step.polyline !== "string" || step.polyline === "") continue;
-      for (const pair of step.polyline.split(";")) {
-        const [lng, lat] = pair.split(",").map(Number);
-        if (Number.isNaN(lng) || Number.isNaN(lat)) continue;
-        points.push([lat, lng]);
-      }
-    }
-    if (points.length < 2) return null;
+    const points = (path.steps ?? []).flatMap((step) => parsePolyline(step.polyline));
+    const distanceM = Number(path.distance), durationSec = Number(path.duration);
+    if (points.length < 2 || !Number.isFinite(distanceM) || distanceM < 0 || !Number.isFinite(durationSec) || durationSec < 0) return null;
     return {
-      distanceM: Number(path.distance ?? "0"),
-      durationSec: Number(path.duration ?? "0"),
+      distanceM,
+      durationSec,
       points,
     };
   }
@@ -511,4 +526,15 @@ export function formatPoiCoordinates(location: string): string | null {
   const [longitude, latitude] = location.split(",").map(Number);
   if (Number.isNaN(longitude) || Number.isNaN(latitude)) return null;
   return `${latitude.toFixed(4)},${longitude.toFixed(4)}`;
+}
+
+/** 拒绝非有限值和越界坐标，防止损坏的几何进入地图与缓存。 */
+function parsePolyline(polyline?: string): Array<[number, number]> {
+  if (typeof polyline !== "string") return [];
+  return polyline.split(";").flatMap((pair) => {
+    const fields = pair.split(",");
+    if (fields.length !== 2 || fields.some((field) => field.trim() === "")) return [];
+    const [lon, lat] = fields.map(Number);
+    return Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180 ? [[lat, lon] as [number, number]] : [];
+  });
 }

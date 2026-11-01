@@ -22,12 +22,16 @@ export type LLMResult = LLMResponse & { readonly usage?: TokenUsage };
 /** 所有 LLM 提供商的统一接口 */
 export interface ChatProvider {
   readonly name: string;
+  /** Provider 在历史之外加入的固定提示词，用于完整请求计量。 */
+  readonly systemPrompt?: string;
 
   /**
    * 输入完整对话历史，返回一条 assistant 回复。
    * 实现方负责处理重试与错误抛出。
    */
   chat(history: readonly PromptMessage[]): Promise<string>;
+  /** 无工具的完整结果，供摘要与收尾统计 usage。 */
+  chatWithUsage?(history: readonly PromptMessage[], signal?: AbortSignal): Promise<LLMResult>;
 
   /**
    * 流式对话：每个增量片段通过 onDelta 回调，返回完整回复。

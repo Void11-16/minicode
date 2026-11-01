@@ -81,7 +81,7 @@ test("Web 手输地点通过地理编码兜底时保留 GCJ02 坐标系", async 
 
 test("餐饮候选按实体去重；复制已核实餐厅不能充足四个候选", () => {
   const meal = { name: "同一家", type: "meal", subtype: "lunch", evidence_id: "same", evidence_verified: true, rating: 4.8, cost_per_person: 50 };
-  const plan = parseItinerary({ title: "去重", constraints: { recommendations: true }, days: [{ items: Array.from({ length: 4 }, (_, i) => ({ ...meal, id: String(i) })) }] });
+  const plan = parseItinerary({ title: "去重", constraints: { recommendations: true, recommendation_mode: "strict", meal_candidates_target: 4 }, days: [{ items: Array.from({ length: 4 }, (_, i) => ({ ...meal, id: String(i) })) }] });
   assert.equal(recommendationCoverage(plan).slots[0].count, 1);
   assert.ok(validateItinerary(plan).issues.some((issue) => issue.code === "recommendation-slot-coverage"));
   const branches = parseItinerary({ title: "不同分店", days: [{ items: Array.from({ length: 4 }, (_, i) => ({ ...meal, evidence_id: `branch-${i}`, id: String(i) })) }] });

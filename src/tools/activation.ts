@@ -85,14 +85,14 @@ export function isActivationTool(name: string): boolean {
 }
 
 /** 未分类工具和显式 alwaysActive 工具不由目录状态控制 */
-export function isAlwaysActiveTool(tool: Tool): boolean {
-  return tool.alwaysActive === true || tool.category === undefined;
+export function isAlwaysActiveTool(tool: Tool, session?: Session): boolean {
+  return tool.alwaysActive === true || (tool.alwaysActive === "travel" && session?.travelMode === true) || (tool.alwaysActive !== "travel" && tool.category === undefined);
 }
 
 export function activeToolNames(registry: ToolRegistry, session: Session): ReadonlySet<string> {
   const names = new Set(activeOptionalToolNames(registry, session));
   for (const tool of registry.list()) {
-    if (isAlwaysActiveTool(tool)) names.add(tool.name);
+    if (isAlwaysActiveTool(tool, session)) names.add(tool.name);
   }
   return names;
 }
@@ -103,7 +103,7 @@ export function activateToolForUse(
   registry: ToolRegistry,
   session: Session,
 ): boolean {
-  if (isAlwaysActiveTool(tool) || session.activeTools.includes(tool.name)) return true;
+  if (isAlwaysActiveTool(tool, session) || session.activeTools.includes(tool.name)) return true;
   const active = activeOptionalToolNames(registry, session);
   if (active.size >= MAX_ACTIVE_TOOLS) return false;
   session.setActiveTools([...active, tool.name]);
@@ -123,7 +123,7 @@ export function executeToolCatalog(
 
 export function toolLoadingGuide(registry: ToolRegistry, session: Session): string | undefined {
   const inactiveCount = registry.list().filter(
-    (tool) => !isAlwaysActiveTool(tool) && !session.activeTools.includes(tool.name),
+    (tool) => !isAlwaysActiveTool(tool, session) && !session.activeTools.includes(tool.name),
   ).length;
   if (inactiveCount === 0) return undefined;
   const active = [...activeToolNames(registry, session)];
@@ -159,7 +159,7 @@ function findTools(
   return [
     `工具目录（显示 ${visible.length}/${matches.length}，共 ${registry.size} 个）：`,
     ...visible.map(({ tool }) => {
-      const state = session.activeTools.includes(tool.name) ? "已激活" : isAlwaysActiveTool(tool) ? "常驻" : "未激活";
+      const state = session.activeTools.includes(tool.name) ? "已激活" : isAlwaysActiveTool(tool, session) ? "常驻" : "未激活";
       return (
         `- ${tool.name} [${tool.category ?? "extension"} / ${state} / ` +
         `${tool.outputKind ?? "generic"}] ${tool.description.slice(0, 100)}`
@@ -181,7 +181,7 @@ function activateTools(
     return category === undefined ? [] : [category];
   }));
   const candidates = registry.list().filter((tool) =>
-    !isAlwaysActiveTool(tool) && (
+    !isAlwaysActiveTool(tool, session) && (
       requestedNames.includes(tool.name) ||
       (tool.category !== undefined && requestedCategories.has(tool.category))
     )
@@ -220,7 +220,7 @@ function deactivateTools(
     return category === undefined ? [] : [category];
   }));
   const removable = registry.list()
-    .filter((tool) => !isAlwaysActiveTool(tool))
+    .filter((tool) => !isAlwaysActiveTool(tool, session))
     .filter((tool) => names.has(tool.name) || (tool.category !== undefined && categories.has(tool.category)))
     .map((tool) => tool.name);
   if (removable.length === 0) return "没有可卸载的匹配工具。";
@@ -234,7 +234,7 @@ function activeOptionalToolNames(registry: ToolRegistry, session: Session): Set<
   const names = new Set<string>();
   for (const name of session.activeTools) {
     const tool = registry.get(name);
-    if (tool === undefined || isAlwaysActiveTool(tool) || names.has(name)) continue;
+    if (tool === undefined || isAlwaysActiveTool(tool, session) || names.has(name)) continue;
     names.add(name);
     if (names.size >= MAX_ACTIVE_TOOLS) break;
   }

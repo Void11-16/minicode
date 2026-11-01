@@ -1,3 +1,4 @@
+import type { RecommendationMode } from "./recommendation-policy.ts";
 import type { CoordinateSystem } from "./coordinates.ts";
 
 export const ITINERARY_ITEM_TYPES = [
@@ -15,6 +16,7 @@ export type MealSubtype = "breakfast" | "lunch" | "dinner" | "snack";
 export type ItineraryConfidence = "high" | "medium" | "low";
 
 export interface ItineraryLocation {
+  readonly poi_id?: string;
   readonly crs?: CoordinateSystem;
   readonly name?: string;
   readonly address?: string;
@@ -69,7 +71,11 @@ export interface ItineraryOpeningHours {
   readonly intervals?: readonly { readonly opens: string; readonly closes: string }[];
 }
 
+export type ItineraryDayType = "full" | "arrival" | "departure" | "transfer";
 export interface ItineraryDay {
+  readonly day_type?: ItineraryDayType;
+  readonly available_start?: string;
+  readonly available_end?: string;
   readonly date?: string;
   readonly theme?: string;
   readonly items: readonly ItineraryItem[];
@@ -98,6 +104,9 @@ export interface ItineraryConstraints {
   readonly require_routes?: boolean;
   readonly require_place_evidence?: boolean;
   readonly recommendations?: boolean;
+  readonly recommendation_mode?: RecommendationMode;
+  readonly meal_candidates_target?: number;
+  readonly meal_evidence_target?: number;
 }
 
 const TYPE_ALIASES: Record<string, ItineraryItemType> = {
@@ -208,6 +217,8 @@ export function parseItinerary(raw: unknown): Itinerary {
     dates.set(day.date, index);
   }
   const constraints = objectOf(source.constraints);
+  if (constraints?.recommendation_mode !== undefined && !["off", "advisory", "strict"].includes(String(constraints.recommendation_mode))) throw new Error("recommendation_mode 不合法");
+  if (constraints?.meal_candidates_target !== undefined && (!Number.isInteger(constraints.meal_candidates_target) || Number(constraints.meal_candidates_target) < 1 || Number(constraints.meal_candidates_target) > 20)) throw new Error("meal_candidates_target 需要 1-20 的整数");
   if (source.budget_source !== undefined && !["brief", "explicit"].includes(String(source.budget_source))) throw new Error("budget_source 不合法");
   return { title, days,
     ...(source.budget_source === undefined ? {} : { budget_source: source.budget_source as "brief" | "explicit" }),
@@ -223,6 +234,9 @@ export function parseItinerary(raw: unknown): Itinerary {
       ...(constraints.destination === undefined ? {} : { destination: optionalString(constraints.destination) }),
       ...(constraints.day_start === undefined ? {} : { day_start: optionalTime(constraints.day_start, "day_start") }),
       ...(constraints.day_end === undefined ? {} : { day_end: optionalTime(constraints.day_end, "day_end") }),
+      ...(constraints.recommendation_mode === undefined ? {} : { recommendation_mode: constraints.recommendation_mode as RecommendationMode }),
+      ...(constraints.meal_candidates_target === undefined ? {} : { meal_candidates_target: Number(constraints.meal_candidates_target) }),
+      ...(constraints.meal_evidence_target === undefined ? {} : { meal_evidence_target: boundedNumber(constraints.meal_evidence_target, "meal_evidence_target", 0, 1) }),
       ...Object.fromEntries(["require_accommodation", "require_routes", "require_place_evidence", "recommendations"].flatMap((key) => constraints[key] === undefined ? [] : [[key, parseBoolean(constraints[key], key)]])),
     } }),
   };
@@ -237,7 +251,13 @@ function parseDay(raw: unknown, dayIndex: number, ids: Map<string, number>): Iti
 
   const date = optionalString(source.date);
   const theme = optionalString(source.theme);
+  if (source.day_type !== undefined && !["full", "arrival", "departure", "transfer"].includes(String(source.day_type))) throw new Error("day_type 不合法");
+  const availableStart = optionalTime(source.available_start, "available_start"), availableEnd = optionalTime(source.available_end, "available_end");
+  if (availableStart !== undefined && availableEnd !== undefined && timeToMinutes(availableStart) >= timeToMinutes(availableEnd)) throw new Error("当天可用时段必须先开始后结束");
   return {
+    ...(source.day_type === undefined ? {} : { day_type: source.day_type as ItineraryDayType }),
+    ...(availableStart === undefined ? {} : { available_start: availableStart }),
+    ...(availableEnd === undefined ? {} : { available_end: availableEnd }),
     ...(date !== undefined ? { date } : {}),
     ...(theme !== undefined ? { theme } : {}),
     items: source.items.map((item, itemIndex) =>
@@ -398,6 +418,7 @@ function parseLocation(raw: unknown): ItineraryLocation {
   const sourceName = optionalString(source.source);
   if (source.crs !== undefined && source.crs !== "wgs84" && source.crs !== "gcj02") throw new Error("location.crs 不合法");
   return {
+    ...(source.poi_id === undefined ? {} : { poi_id: optionalString(source.poi_id) }),
     ...(source.crs === undefined ? {} : { crs: source.crs as CoordinateSystem }),
     ...(name !== undefined ? { name } : {}),
     ...(address !== undefined ? { address } : {}),

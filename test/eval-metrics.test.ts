@@ -28,6 +28,7 @@ function visit(id: string, name: string, time: string, endTime: string): Itinera
 function fixture(): Itinerary {
   return {
     title: "测试两日游",
+    constraints: { meal_candidates_target: 4 },
     days: [
       {
         date: "2026-10-01",
@@ -116,7 +117,7 @@ test("评测指标：案例期望天数缺失时不能得到满分", () => {
   const metrics = computeItineraryMetrics(partial, { expectedDays: 5 });
   assert.equal(metrics.days, 1);
   assert.equal(metrics.expectedDays, 5);
-  assert.equal(metrics.issueCounts.P1, 4);
+  assert.equal(metrics.issueCounts.P1, 1, "餐饮默认不阻断；只有缺少要求天数属于正式 P1");
   assert.equal(metrics.status, "needs_revision");
   assert.ok(metrics.score <= 20, "1/5 天半成品的评分不应超过完整度上限");
   assert.ok(metrics.issueCodes.includes("expected-day-count-mismatch"));

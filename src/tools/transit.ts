@@ -8,6 +8,8 @@ import { getAmapClient } from "./amap-access.ts";
 import { fetchOsrmRoute } from "./route.ts";
 import { isRemoteDayTravel, REMOTE_DAY_TEMPLATE } from "./remote-day-policy.ts";
 
+import type { RouteGeometry } from "./amap.ts";
+
 type FetchLike = typeof fetch;
 
 interface LegResult {
@@ -18,6 +20,7 @@ interface LegResult {
   readonly distanceKm: number;
   readonly detail: string;
   readonly estimated: boolean;
+  readonly geometry?: RouteGeometry;
 }
 
 /** 单段通勤超过该分钟数时标记建议调整（顺序/住宿） */
@@ -31,7 +34,7 @@ const LONG_LEG_MINUTES = 60;
 export function createPlanRoutesTool(fetchFn: FetchLike = fetch): Tool {
   return {
     name: "plan_day_routes",
-    alwaysActive: true,
+    alwaysActive: "travel",
     description:
       "规划行程中相邻地点之间的通勤：按访问顺序传入地点列表，逐段返回交通方式（公交/地铁优先，" +
       "降级驾车）与耗时、步行距离、全天通勤总时长，并标记超过 60 分钟的路段。" +
@@ -106,7 +109,7 @@ export function createPlanRoutesTool(fetchFn: FetchLike = fetch): Tool {
         ? `\n\n远郊日模板已触发。${REMOTE_DAY_TEMPLATE}`
         : "";
 
-      const evidence = await ctx?.evidence?.observeRoutes(legs.map((leg, i) => ({ city, from_point: locations[i], to_point: locations[i + 1], from: stops[i], to: stops[i + 1], mode: leg.mode === "公交/地铁" ? "transit" : leg.mode === "步行" ? "walking" : "driving", duration_min: Math.ceil(leg.durationMin), distance_km: leg.distanceKm, estimated: leg.estimated })));
+      const evidence = await ctx?.evidence?.observeRoutes(legs.map((leg, i) => ({ city, from_point: locations[i], to_point: locations[i + 1], from: stops[i], to: stops[i + 1], mode: leg.mode === "公交/地铁" ? "transit" : leg.mode === "步行" ? "walking" : "driving", duration_min: Math.ceil(leg.durationMin), distance_km: leg.distanceKm, estimated: leg.estimated, ...(leg.geometry === undefined ? {} : { geometry: leg.geometry }) })));
       const evidenceText = evidence === undefined ? "" : `\n路线证据（保存 transport.from/to 和 route_evidence_id）：\n${evidence.map((e) => `${e.from} → ${e.to}: ${e.id} / ${e.duration_min}分钟 / ${e.mode}`).join("\n")}`;
       return `${city} 行程通勤规划（${stops.length} 个地点，${legs.length} 段）:\n${lines.join("\n")}\n${summary}${remoteGuidance}${evidenceText}`;
     },
@@ -129,7 +132,7 @@ async function planLeg(
     if (amap !== undefined) {
       try {
         const route = await amap.directionRoute(preferred, from, to);
-        if (route !== null && route.durationSec > 0) return { from: from.name, to: to.name, mode: preferred === "walking" ? "步行" : "驾车", durationMin: route.durationSec / 60, distanceKm: route.distanceM / 1000, detail: `真实道路距离 ${(route.distanceM / 1000).toFixed(1)} 公里（高德）`, estimated: false };
+        if (route !== null && route.durationSec > 0) return { from: from.name, to: to.name, mode: preferred === "walking" ? "步行" : "驾车", durationMin: route.durationSec / 60, distanceKm: route.distanceM / 1000, detail: `真实道路距离 ${(route.distanceM / 1000).toFixed(1)} 公里（高德）`, estimated: false, geometry: route };
       } catch { signal?.throwIfAborted(); }
     }
     if (preferred === "walking") return { from: from.name, to: to.name, mode: "步行", durationMin: distanceKm / 4.5 * 60, distanceKm, detail: "步行路由不可用，仅为直线距离估算，不能作为已核验路线", estimated: true };
@@ -148,9 +151,10 @@ async function planLeg(
           to: to.name,
           mode: "公交/地铁",
           durationMin: transit.durationSec / 60,
-          distanceKm,
+          distanceKm: transit.geometry?.distanceM ? transit.geometry.distanceM / 1000 : distanceKm,
           detail: `${parts}，步行共 ${Math.round(transit.walkingDistanceM)} 米`,
           estimated: false,
+          ...(transit.geometry === undefined ? {} : { geometry: transit.geometry }),
         };
       }
     } catch {
@@ -160,7 +164,7 @@ async function planLeg(
   }
 
   try {
-    const route = await fetchOsrmRoute(from, to, "driving", fetchFn);
+    const route = await fetchOsrmRoute(from, to, "driving", fetchFn, true);
     return {
       from: from.name,
       to: to.name,
@@ -169,6 +173,7 @@ async function planLeg(
       distanceKm: route.distanceM / 1000,
       detail: `距离 ${(route.distanceM / 1000).toFixed(1)} 公里${amap === undefined ? "（未配置 amap_api_key，公交方案不可用）" : ""}`,
       estimated: false,
+      ...(route.geometry === undefined ? {} : { geometry: route.geometry }),
     };
   } catch {
     signal?.throwIfAborted();

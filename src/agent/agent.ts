@@ -1,3 +1,12 @@
+import { mkdir } from "node:fs/promises";
+import { join } from "node:path";
+import { atomicWrite } from "../tools/plan-files.ts";
+import { createExecutionBudget, type CumulativeToolBudget } from "../core/execution-budget.ts";
+export type { CumulativeToolBudget } from "../core/execution-budget.ts";
+import { summarizeContext } from "../context/summarize.ts";
+import { ContextEpochManager } from "../context/epoch.ts";
+import { measureRequestContext, ContextInputLimitError, DEFAULT_MAX_INPUT_TOKENS, type RequestContextMetrics } from "../context/request.ts";
+import { travelFocusDay, renderFocusedTravelState } from "../core/travel-context.ts";
 import type { Session } from "../core/session.ts";
 import type { ChatProvider } from "../llm/provider.ts";
 import { isCompactedToolArguments, type PromptMessage, type ToolCall } from "../core/message.ts";
@@ -17,7 +26,6 @@ import {
   TOOL_ACTIVATION_DEFINITIONS,
 } from "../tools/activation.ts";
 import {
-  renderTravelState,
   type TravelState,
   updateTravelStateFromBrief,
   updateTravelStateFromItinerary,
@@ -27,6 +35,14 @@ import {
 } from "../core/travel-state.ts";
 import { compactToolResults, type ToolResultForContext } from "./tool-output.ts";
 
+function safeEmit(callback:()=>void):void{
+  try{
+    callback();
+  }catch{
+    //事件回调失败不中断agent
+  }
+}
+
 export interface AgentEvent {
   readonly type: "tool_start" | "tool_end" | "tool_error" | "tool_denied";
   readonly name: string;
@@ -35,20 +51,11 @@ export interface AgentEvent {
   readonly error?: string;
 }
 
-export interface CumulativeToolBudget {
-  rounds: number;
-  calls: number;
-  tokens: number;
-  stagnantRounds?: number;
-  blockedReason?: string;
-  readonly maxRounds: number;
-  readonly maxCalls: number;
-  readonly maxTokens?: number;
-  /** Host may impose a monetary cap from actual usage and configured prices. */
-  readonly costExceeded?: () => boolean;
-}
-
 export interface RunOptions {
+  readonly maxPromptTokens?: number;
+  /** 在每次完整请求构造后检查，工具结果已配对，允许安全压缩。 */
+  readonly compactContext?: (estimatedRequestTokens: number) => Promise<unknown>;
+  readonly onRequestContext?: (metrics: RequestContextMetrics) => void;
   /** Reuse the same object across automatic recovery turns; counters never reset. */
   readonly cumulativeBudget?: CumulativeToolBudget;
   /**
@@ -170,14 +177,17 @@ export class ChatAgent {
     this.currentController?.abort();
   }
 
-  async send(userInput: string): Promise<string> {
+  async send(userInput: string, options: RunOptions = {}): Promise<string> {
     const trimmed = userInput.trim();
     if (trimmed === "") {
       throw new Error("输入不能为空");
     }
 
     this.sessionValue.add("user", trimmed);
-    const reply = await this.provider.chat(this.sessionValue.toPrompt());
+    const history = await this.preparePlainHistory([], options);
+    const measured = this.provider.chatWithUsage === undefined ? undefined : await this.provider.chatWithUsage(history, this.currentController?.signal);
+    if (measured?.usage !== undefined) { this.sessionValue.addUsage(measured.usage); this.sessionValue.completeRequestContext(measured.usage); }
+    const reply = measured?.type === "text" ? measured.content : await this.provider.chat(history);
     this.sessionValue.add("assistant", reply);
     return reply;
   }
@@ -228,15 +238,24 @@ export class ChatAgent {
     this.briefSavedThisRun = false;
     this.committedSnapshot = undefined;
     this.savedThisRun = false;
-    const cumulative = options.cumulativeBudget ?? { rounds: 0, calls: 0, tokens: 0, maxRounds: 150, maxCalls: 300 };
+    const cumulative = options.cumulativeBudget ?? createExecutionBudget(this.sessionValue);
+    let accountedTokens = this.sessionValue.usage.totalTokens;
+    const syncUsage = () => { cumulative.tokens += Math.max(0, this.sessionValue.usage.totalTokens - accountedTokens); accountedTokens = this.sessionValue.usage.totalTokens; };
     const exhausted = () => cumulative.rounds >= cumulative.maxRounds || cumulative.calls >= cumulative.maxCalls || (cumulative.maxTokens !== undefined && cumulative.tokens >= cumulative.maxTokens) || cumulative.costExceeded?.() === true;
 
+    if (exhausted()) {
+      const reply = "已达到累计轮次、调用、token 或费用预算，本次未发送新的模型请求。";
+      this.sessionValue.add("user", trimmed); this.sessionValue.add("assistant", reply);
+      await this.checkpoint(options);
+      return reply;
+    }
     // 能力一次性解析并自然收窄类型（循环内不再判空/断言）
     const tools = this.tools;
     const chatWithTools = this.provider.chatWithTools;
     if (tools === undefined || tools.size === 0 || chatWithTools === undefined) {
       // 不支持工具 → 降级纯对话
-      const reply = await this.send(userInput);
+      const reply = await this.send(userInput, options);
+      syncUsage();
       await this.checkpoint(options);
       return reply;
     }
@@ -293,41 +312,64 @@ export class ChatAgent {
 
         // 剩余轮数不足时注入收尾提醒（仅本次请求可见，不进入会话历史，避免污染后续轮次）
         const remaining = limit - executed - 1;
-        const loadingGuide = toolLoadingGuide(tools, this.sessionValue);
-        const artifactGuide = renderArtifactGuide(this.sessionValue);
-        const travelState = renderTravelState(this.sessionValue.travelState);
-        const draftGate = shouldForceDraft(this.sessionValue.travelState, executed);
-        const travelProgress = travelProgressGuidance(draftGate);
-        const evidence = this.sessionValue.travelState?.brief === undefined ? "" : tools.evidence.summary(this.sessionValue.travelState.brief.destination, this.sessionValue.travelState.places.map((place) => place.name));
-        const transientMessages = [
-          ...(evidence === "" ? [] : [{ role: "system" as const, content: evidence }]),
-          ...(loadingGuide === undefined
-            ? []
-            : [{ role: "system" as const, content: loadingGuide } satisfies PromptMessage]),
-          ...(artifactGuide === undefined
-            ? []
-            : [{ role: "system" as const, content: artifactGuide } satisfies PromptMessage]),
-          ...(travelState === undefined
-            ? []
-            : [{ role: "system" as const, content: travelState } satisfies PromptMessage]),
-          ...(travelProgress === undefined
-            ? []
-            : [{ role: "system" as const, content: travelProgress } satisfies PromptMessage]),
-          ...(failureGuidance === undefined
-            ? []
-            : [{ role: "system" as const, content: failureGuidance } satisfies PromptMessage]),
-          ...(budgetGuidance === undefined
-            ? []
-            : [{ role: "system" as const, content: budgetGuidance } satisfies PromptMessage]),
-          ...(remaining < WRAP_UP_HINT_ROUNDS ? [wrapUpHint(remaining)] : []),
-        ];
-        const history = this.sessionValue.toPrompt();
-        const requestHistory = transientMessages.length === 0
-          ? history
-          : [...history, ...transientMessages];
-        // 记录真实请求字符量（含 tool_calls 参数与临时提示），响应后校准估算系数
-        const requestChars = this.sessionValue.promptCharCount(requestHistory);
-        const requestTools = this.requestToolDefinitions(tools, draftGate);
+        const buildRequest = (dynamicChars: number) => {
+          const loadingGuide = toolLoadingGuide(tools, this.sessionValue);
+          const artifactGuide = renderArtifactGuide(this.sessionValue);
+          const focusInput = [...this.sessionValue.history].reverse().find((message) => message.role === "user")?.content ?? trimmed;
+          const focusDay = travelFocusDay(this.sessionValue.travelState, focusInput);
+          const travelState = renderFocusedTravelState(this.sessionValue.travelState, focusDay, Math.floor(dynamicChars * 0.6));
+          const draftGate = shouldForceDraft(this.sessionValue.travelState, executed);
+          const travelProgress = travelProgressGuidance(draftGate);
+          const focusNames = [...(this.sessionValue.travelState?.places.filter((place) => place.day === focusDay).map((place) => place.name) ?? []), ...recentEvidenceNames(this.sessionValue)];
+          const evidence = this.sessionValue.travelState?.brief === undefined ? "" : tools.evidence.summary(this.sessionValue.travelState.brief.destination, [...focusNames, ...this.sessionValue.travelState.brief.mustVisit], Math.floor(dynamicChars * 0.4));
+          const transientMessages = [
+            ...(evidence === "" ? [] : [{ role: "system" as const, content: evidence }]),
+            ...(loadingGuide === undefined
+              ? []
+              : [{ role: "system" as const, content: loadingGuide } satisfies PromptMessage]),
+            ...(artifactGuide === undefined
+              ? []
+              : [{ role: "system" as const, content: artifactGuide } satisfies PromptMessage]),
+            ...(travelState === undefined
+              ? []
+              : [{ role: "system" as const, content: travelState } satisfies PromptMessage]),
+            ...(travelProgress === undefined
+              ? []
+              : [{ role: "system" as const, content: travelProgress } satisfies PromptMessage]),
+            ...(failureGuidance === undefined
+              ? []
+              : [{ role: "system" as const, content: failureGuidance } satisfies PromptMessage]),
+            ...(budgetGuidance === undefined
+              ? []
+              : [{ role: "system" as const, content: budgetGuidance } satisfies PromptMessage]),
+            ...(remaining < WRAP_UP_HINT_ROUNDS ? [wrapUpHint(remaining)] : []),
+          ];
+          const history = this.sessionValue.toPrompt();
+          const requestHistory = transientMessages.length === 0
+            ? history
+            : [...history, ...transientMessages];
+          // 记录真实请求字符量（含 tool_calls 参数与临时提示），响应后校准估算系数
+          const requestTools = this.requestToolDefinitions(tools);
+          const metrics = measureRequestContext(this.sessionValue, this.provider.systemPrompt, history, transientMessages, requestTools, options.maxPromptTokens);
+          return { requestHistory, requestTools, metrics };
+        };
+        let request = buildRequest(10_000);
+        if (request.metrics.estimatedInputTokens > request.metrics.inputLimit) {
+          await this.compactContext(request.metrics.estimatedInputTokens, options);
+          request = buildRequest(10_000);
+        }
+        if (request.metrics.estimatedInputTokens > request.metrics.inputLimit) {
+          this.sessionValue.compactCompletedToolCalls(undefined, 1);
+          request = buildRequest(2_000);
+        }
+        syncUsage();
+        if (exhausted()) break;
+        this.sessionValue.recordRequestContext(request.metrics);
+        options.onRequestContext?.(request.metrics);
+        debugLog("context", JSON.stringify(request.metrics));
+        if (request.metrics.estimatedInputTokens > request.metrics.inputLimit) throw new ContextInputLimitError(request.metrics);
+        const { requestHistory, requestTools } = request;
+        const requestChars = request.metrics.totalChars;
 
         // 优先流式（最终回答逐字输出），Provider 不支持时降级
         let result;
@@ -351,9 +393,9 @@ export class ChatAgent {
 
         if (result.usage !== undefined) {
           this.sessionValue.addUsage(result.usage);
-          cumulative.tokens += result.usage.totalTokens;
-          // 只在历史足够长时校准：短会话中系统提示+工具定义的固定 token
-          // 占主导，会把观测系数拉到严重失真（实测会冲到 clamp 上限）
+          this.sessionValue.completeRequestContext(result.usage);
+          syncUsage();
+          // 用完整请求校准；短输入的协议固定开销占比高，仍需最低样本长度。
           if (requestChars >= 3000) {
             this.sessionValue.calibrateTokens(result.usage.promptTokens, requestChars);
           }
@@ -497,6 +539,7 @@ export class ChatAgent {
           ? "检测到同一工具错误连续重复，已熔断工具调用"
           : "工具调用轮次已全部用尽",
       );
+      syncUsage();
       if (wrapUp !== undefined && wrapUp.trim() !== "") {
         if (controller.signal.aborted) throw new TurnAbortedError();
         this.sessionValue.add("assistant", wrapUp);
@@ -507,6 +550,31 @@ export class ChatAgent {
     } finally {
       this.currentController = undefined;
     }
+  }
+
+  private async compactContext(tokens: number, options: RunOptions): Promise<void> {
+    if (options.compactContext !== undefined) { await options.compactContext(tokens); return; }
+    await new ContextEpochManager({ maxPromptTokens: options.maxPromptTokens ?? DEFAULT_MAX_INPUT_TOKENS,
+      archive: async (session, epoch) => {
+        const directory = join(this.workspace, ".minicode", "epochs");
+        await mkdir(directory, { recursive: true });
+        await atomicWrite(join(directory, `${encodeURIComponent(session.id)}-${epoch}.json`), JSON.stringify(session.toData()));
+      },
+      summarize: (session, messages) => summarizeContext(this.provider, session, messages, this.currentController?.signal, options.maxPromptTokens),
+    }).maybeCompact(this.sessionValue, tokens);
+  }
+
+  private async preparePlainHistory(transient: readonly PromptMessage[], options: RunOptions = {}): Promise<PromptMessage[]> {
+    const measure = () => measureRequestContext(this.sessionValue, this.provider.systemPrompt, this.sessionValue.toPrompt(), transient, [], options.maxPromptTokens);
+    let metrics = measure();
+    if (metrics.estimatedInputTokens > metrics.inputLimit) {
+      await this.compactContext(metrics.estimatedInputTokens, options);
+      metrics = measure();
+    }
+    this.sessionValue.recordRequestContext(metrics);
+    options.onRequestContext?.(metrics);
+    if (metrics.estimatedInputTokens > metrics.inputLimit) throw new ContextInputLimitError(metrics);
+    return [...this.sessionValue.toPrompt(), ...transient];
   }
 
   private canonicalReply(requireSave = true): string | undefined {
@@ -549,8 +617,15 @@ export class ChatAgent {
         "并给用户一句可操作的下一步（例如回复「继续」接着修），不要声称已完成或已通过校验。" +
         (guidance === undefined ? "" : `\n\n${guidance}`),
     };
-    const history = [...this.sessionValue.toPrompt(), instruction];
     try {
+      const history = await this.preparePlainHistory([instruction]);
+      if (this.provider.chatWithUsage !== undefined) {
+        const result = await this.provider.chatWithUsage(history, this.currentController?.signal);
+        if (result.usage !== undefined) { this.sessionValue.addUsage(result.usage); this.sessionValue.completeRequestContext(result.usage); }
+        if (result.type !== "text") return undefined;
+        onTextDelta?.(result.content);
+        return result.content;
+      }
       if (this.provider.chatStream !== undefined) {
         return await this.provider.chatStream.call(this.provider, history, onTextDelta ?? (() => {}));
       }
@@ -602,8 +677,9 @@ export class ChatAgent {
     ctx: ToolContext,
     onEvent?: (event: AgentEvent) => void,
   ): Promise<{ readonly output: string; readonly error?: string }> {
+    safeEmit(()=>{
     onEvent?.({ type: "tool_start", name: call.name, arguments: call.arguments });
-
+    });
     try {
       const output = isActivationTool(call.name)
         ? executeToolCatalog(
@@ -613,7 +689,9 @@ export class ChatAgent {
             this.sessionValue,
           )
         : await this.executeRegisteredTool(call, tools, ctx);
+      safeEmit(()=>{
       onEvent?.({ type: "tool_end", name: call.name, output });
+      });
       return { output };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -623,9 +701,9 @@ export class ChatAgent {
     }
   }
 
-  private requestToolDefinitions(tools: ToolRegistry, _draftGate: boolean) {
+  private requestToolDefinitions(tools: ToolRegistry) {
     const active = activeToolNames(tools, this.sessionValue);
-    const hasOptionalTools = tools.list().some((tool) => !isAlwaysActiveTool(tool));
+    const hasOptionalTools = tools.list().some((tool) => !isAlwaysActiveTool(tool, this.sessionValue));
     const optionalDefinitions = tools
       .definitions(active)
       .filter((definition) => !isActivationTool(definition.name));
@@ -642,7 +720,7 @@ export class ChatAgent {
     const tool = tools.get(call.name);
     if (
       tool !== undefined &&
-      !isAlwaysActiveTool(tool) &&
+      !isAlwaysActiveTool(tool, this.sessionValue) &&
       !this.sessionValue.activeTools.includes(tool.name)
     ) {
       const activation = activateToolForUse(tool, tools, this.sessionValue);
@@ -801,6 +879,21 @@ function repeatedFailureGuidance(name: string, error: string, count: number): st
   ].join("\n");
 }
 
+/** 未保存当前日时，也保留最近正在核实的地点与路线端点，不依赖完整工具原文。 */
+function recentEvidenceNames(session: Session): string[] {
+  const names = new Set<string>();
+  for (const message of session.history.slice(-20).reverse()) {
+    for (const call of message.archivedToolCalls ?? message.toolCalls ?? []) {
+      const args = safeArguments(call.arguments);
+      if (args === null) continue;
+      if (typeof args.place === "string") names.add(args.place);
+      if (Array.isArray(args.stops)) for (const name of args.stops) if (typeof name === "string") names.add(name);
+    }
+    if (names.size >= 20) break;
+  }
+  return [...names].slice(0, 20);
+}
+
 /** 只保留少量归档索引；完整结果需要时用 read_file 按需读取。 */
 function renderArtifactGuide(session: Session): string | undefined {
   const artifacts = new Map<string, { toolName: string; order: number }>();
@@ -815,7 +908,7 @@ function renderArtifactGuide(session: Session): string | undefined {
     .slice(0, 8);
   if (recent.length === 0) return undefined;
   return [
-    "【工具原文归档索引】以下大结果不在上下文内；需要核对或继续修改时用 read_file 分段读取：",
+    "【工具原文归档索引】以下大结果不在上下文内；用 read_file(path=以下路径, byte_offset=0) 分页读取，后续使用返回的字节游标：",
     ...recent.map(([path, item]) => `- ${item.toolName}: ${path}`),
   ].join("\n");
 }

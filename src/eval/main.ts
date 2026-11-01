@@ -1,4 +1,3 @@
-import { MIN_RECOMMENDATION_EVIDENCE_RATE } from "../tools/recommendation-policy.ts";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 import {
@@ -58,7 +57,6 @@ interface Summary {
   readonly strictFailures: string[];
 }
 
-const STRICT_MIN_EVIDENCE_RATE = MIN_RECOMMENDATION_EVIDENCE_RATE;
 const root = join(import.meta.dirname, "..", "..");
 const outRoot = join(root, "eval", "out");
 const baselineDir = join(root, "eval", "baselines");
@@ -300,11 +298,7 @@ function strictFailuresFor(evalCase: EvalCase, metrics: ItineraryEvalMetrics | n
   if (metrics.issueCounts.P0 > 0 || metrics.issueCounts.P1 > 0) {
     failures.push(`${evalCase.id}: P0 ${metrics.issueCounts.P0} / P1 ${metrics.issueCounts.P1}`);
   }
-  if (metrics.mealEvidenceRate < STRICT_MIN_EVIDENCE_RATE) {
-    failures.push(
-      `${evalCase.id}: 推荐证据率 ${(metrics.mealEvidenceRate * 100).toFixed(0)}% < 80%`,
-    );
-  }
+
   return failures;
 }
 

@@ -1,3 +1,4 @@
+import { createExecutionBudget, executionInputLimit } from "../core/execution-budget.ts";
 import * as readline from "node:readline";
 import { join } from "node:path";
 import { Session } from "../core/session.ts";
@@ -26,7 +27,7 @@ import { createPermissionMemory, decidePermission, permissionModeOf } from "../s
 import type { PermissionMemory } from "../service/permission-policy.ts";
 import { appendFile, mkdir } from "node:fs/promises";
 import { readFileSync } from "node:fs";
-import { renderHistoryForSummary } from "../context/epoch.ts";
+import { summarizeContext } from "../context/summarize.ts";
 
 
 /**
@@ -154,18 +155,7 @@ export class CliApp {
   }
 
   // 摘要走被压缩会话自己的 Provider：后台会话触发压缩时不能借当前选中会话的模型
-  summarizeForCompact = async (session: Session, messages: readonly Message[]): Promise<string> => {
-    const transcript = renderHistoryForSummary(messages, session.travelState);
-    return this.providerForSession(session).chat([
-      {
-        role: "user",
-        content:
-          "请把以下对话历史压缩成可继续执行任务的摘要。保留用户约束、日期、预算、已访问地点及类型、" +
-          "已保存行程、质量问题和 artifact 路径；删除寒暄、重复工具过程和不影响后续决策的原文。" +
-          `直接输出摘要本身：\n\n${transcript}`,
-      },
-    ]);
-  };
+  summarizeForCompact = (session: Session, messages: readonly Message[]) => summarizeContext(this.providerForSession(session), session, messages, undefined, executionInputLimit(this.config));
 
   /** /config 变更后重建 provider 与当前 agent（保留会话历史） */
   applyConfig(next: AppConfig): void {
@@ -178,6 +168,7 @@ export class CliApp {
 
   switchSession(session: Session): ChatAgent {
     this.currentSessionId = session.id;
+    session.setTravelMode(this.travelMode);
     const agent = new ChatAgent(session, this.providerForSession(session), this.registry, process.cwd());
     this.runtime.registerAgent(session.id, agent);
     return agent;
@@ -206,6 +197,8 @@ export class CliApp {
     this.sessionService = new SessionService(this.store);
     this.runtime = new AgentRuntime({
       summarize: this.summarizeForCompact,
+      maxPromptTokens: executionInputLimit(this.config),
+      createBudget: (session) => createExecutionBudget(session, this.config, this.pricingFor(session)),
       archive: (session, epoch) => this.store.archive(session, epoch),
       // 工具轮次按行程需求动态给：多天行程的搜索/口碑/餐饮/逐日保存+校验远超默认 30 轮；
       // 需求单还没落盘的首轮按会话文本里的天数估算
@@ -242,6 +235,7 @@ export class CliApp {
         console.error(`错误: ${error instanceof Error ? error.message : String(error)}\n`);
       },
     });
+    currentSession.setTravelMode(this.travelMode);
     const agent = new ChatAgent(currentSession, this.providerForSession(currentSession), this.registry, process.cwd());
     this.runtime.registerAgent(this.currentSessionId, agent);
   }

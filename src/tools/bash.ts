@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import type { Tool } from "./tool.ts";
 import { requireString } from "./tool.ts";
+import { CommandOutputBuffer } from "./command-output.ts";
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_TIMEOUT_MS = 600_000;
@@ -85,7 +86,8 @@ export function createBashTool(defaultWorkspace: string = process.cwd()): Tool {
     description:
       "在工作区执行 shell 命令（默认登录 shell，继承用户 PATH），返回退出码与输出。用于跑测试、构建、git 操作、装依赖等。" +
       "只读命令（ls/cat/git status 等）自动放行；含管道/重定向/命令链接的命令与变更类命令会先请求确认。" +
-      "需要切换目录时用 `cd dir && cmd` 形式（会请求确认）。输出上限 30KB。",
+      "需要切换目录时用 `cd dir && cmd` 形式（会请求确认）。stdout/stderr 分别保留最多 15,000 字符的首尾，中间输出丢弃；需完整日志请在命令中重定向到文件。",
+    outputKind: "command",
     parameters: {
       type: "object",
       properties: {
@@ -118,8 +120,8 @@ export function createBashTool(defaultWorkspace: string = process.cwd()): Tool {
           detached: true, // 独立进程组：kill(-pid) 可连同子进程一起终止
         });
 
-        let stdout = "";
-        let stderr = "";
+        const stdout = new CommandOutputBuffer(MAX_OUTPUT_CHARS / 2);
+        const stderr = new CommandOutputBuffer(MAX_OUTPUT_CHARS / 2);
         let settled = false;
         let timedOut = false;
         let aborted = false;
@@ -142,11 +144,9 @@ export function createBashTool(defaultWorkspace: string = process.cwd()): Tool {
           settled = true;
           clearTimeout(timer);
           ctx?.signal?.removeEventListener("abort", onAbort);
-          const combined = `${stdout}${stderr === "" ? "" : `\n[stderr]\n${stderr}`}`;
-          const truncated = combined.length > MAX_OUTPUT_CHARS;
-          const body = truncated
-            ? `${combined.slice(0, MAX_OUTPUT_CHARS)}\n...(输出已截断，超过 30KB)`
-            : combined;
+          const out = stdout.finish();
+          const err = stderr.finish();
+          const body = `${out}${err === "" ? "" : `\n[stderr]\n${err}`}`;
           resolvePromise(`$ ${command}\n${note}\n---\n${body}`);
         };
 
@@ -167,10 +167,10 @@ export function createBashTool(defaultWorkspace: string = process.cwd()): Tool {
         if (ctx?.signal?.aborted === true) onAbort();
 
         child.stdout.on("data", (chunk: Buffer) => {
-          stdout += chunk.toString("utf8");
+          stdout.append(chunk);
         });
         child.stderr.on("data", (chunk: Buffer) => {
-          stderr += chunk.toString("utf8");
+          stderr.append(chunk);
         });
         child.on("error", (error) => {
           finish(`启动失败: ${error.message}`);

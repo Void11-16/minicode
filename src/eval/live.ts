@@ -1,7 +1,7 @@
+import { createExecutionBudget, executionInputLimit } from "../core/execution-budget.ts";
 import { createHash } from "node:crypto";
 import { copyFile, readFile, writeFile } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
-import { MIN_RECOMMENDATION_EVIDENCE_RATE } from "../tools/recommendation-policy.ts";
 import { ChatAgent } from "../agent/agent.ts";
 import {
   BASE_SYSTEM_PROMPT,
@@ -55,7 +55,6 @@ export const EVAL_TOOL_ROUND_CEILING = 150;
 export const EVAL_BUDGET_EXTENSION_STEP = 15;
 /** 自动续跑只用于补半成品；连续无进展即停止，避免评测无限消耗 */
 const MAX_COMPLETENESS_RETRIES = 2;
-const STRICT_MIN_EVIDENCE_RATE = MIN_RECOMMENDATION_EVIDENCE_RATE;
 
 interface LiveContext {
   readonly config: Awaited<ReturnType<ConfigStore["load"]>>;
@@ -385,8 +384,15 @@ async function runAttempt(input: {
   const registry = createDefaultRegistry({ writeRoot: input.directory, workspace: input.directory });
   const provider = providerFor(input.context, input.systemPrompt);
   const session = new Session();
+  session.setTravelMode(true);
   const agent = new ChatAgent(session, provider, registry, input.directory);
-  const initialRounds = initialToolRoundsForCase(input.evalCase);
+  const cumulativeBudget = createExecutionBudget(session, input.context.config, {
+    inputPerM: input.context.pricing.input_per_million_tokens,
+    outputPerM: input.context.pricing.output_per_million_tokens,
+    cacheInputPerM: input.context.pricing.cache_input_per_million_tokens ?? input.context.pricing.input_per_million_tokens,
+    hasCachePrice: input.context.pricing.cache_input_per_million_tokens !== undefined,
+  });
+  const initialRounds = Math.min(cumulativeBudget.maxRounds, initialToolRoundsForCase(input.evalCase));
   let currentRounds = initialRounds;
   let toolRounds = 0;
   let toolCalls = 0;
@@ -394,27 +400,24 @@ async function runAttempt(input: {
   const extensions: EvalBudgetExtension[] = [];
   let previousFingerprint: string | undefined;
 
-  const cumulativeBudget = {
-    rounds: 0, calls: 0, tokens: 0, maxRounds: EVAL_TOOL_ROUND_CEILING, maxCalls: 300, maxTokens: 2_000_000,
-    costExceeded: () => estimateCostYuan(session.usage, input.context.pricing.input_per_million_tokens, input.context.pricing.output_per_million_tokens, input.context.pricing.cache_input_per_million_tokens) >= 3,
-  };
   const runTurn = (message: string): Promise<string> =>
     agent.run(message, {
       cumulativeBudget,
+      maxPromptTokens: executionInputLimit(input.context.config),
       // 需求单落盘后可读取日期、节奏、必去点和交通备注，预算随之升高但不回落
       maxToolRounds: async () => {
         const brief = await briefForSessionTitle(
           input.directory,
           `${input.evalCase.title}\n${input.evalCase.request}`,
         );
-        currentRounds = Math.max(
+        currentRounds = Math.min(cumulativeBudget.maxRounds, Math.max(
           currentRounds,
           toolRoundsForBrief(
             brief,
             EVAL_FALLBACK_TOOL_ROUNDS,
             `${input.evalCase.days}天\n${input.evalCase.request}`,
           ),
-        );
+        ));
         return currentRounds;
       },
       onToolRound: (info) => {
@@ -428,7 +431,7 @@ async function runAttempt(input: {
           session,
           initialLimit: initialRounds,
           currentLimit: current,
-          ceiling: EVAL_TOOL_ROUND_CEILING,
+          ceiling: cumulativeBudget.maxRounds,
           extensionStep: EVAL_BUDGET_EXTENSION_STEP,
         });
         previousFingerprint = assessment.fingerprint;
@@ -441,7 +444,7 @@ async function runAttempt(input: {
           };
         }
         const next = Math.min(
-          EVAL_TOOL_ROUND_CEILING,
+          cumulativeBudget.maxRounds,
           current + assessment.suggestedAdditionalRounds,
         );
         if (next <= current) return false;
@@ -478,7 +481,7 @@ async function runAttempt(input: {
     let snapshot = await loadAttemptItinerary(input.directory, input.evalCase);
     itineraryPath = snapshot.path;
     metrics = snapshot.metrics;
-    if (itineraryPath === null && cumulativeBudget.rounds < cumulativeBudget.maxRounds && cumulativeBudget.calls < cumulativeBudget.maxCalls && !cumulativeBudget.costExceeded()) {
+    if (itineraryPath === null && cumulativeBudget.rounds < cumulativeBudget.maxRounds && cumulativeBudget.calls < cumulativeBudget.maxCalls && !cumulativeBudget.costExceeded?.()) {
       input.onProgress?.("  ↻ 首轮未产出行程，追加一次确认后重试");
       completionRetries += 1;
       await runTurn(
@@ -492,7 +495,7 @@ async function runAttempt(input: {
     while (
       metrics !== null &&
       metrics.days < input.evalCase.days &&
-      completionRetries < MAX_COMPLETENESS_RETRIES && cumulativeBudget.rounds < cumulativeBudget.maxRounds && cumulativeBudget.calls < cumulativeBudget.maxCalls && !cumulativeBudget.costExceeded()
+      completionRetries < MAX_COMPLETENESS_RETRIES && cumulativeBudget.rounds < cumulativeBudget.maxRounds && cumulativeBudget.calls < cumulativeBudget.maxCalls && !cumulativeBudget.costExceeded?.()
     ) {
       const previousDays = metrics.days;
       input.onProgress?.(
@@ -544,6 +547,7 @@ async function runAttempt(input: {
     initialRounds,
     currentRounds,
     extensions,
+    cumulativeBudget.maxRounds,
   );
   const failure = caught ?? failureFor(input.evalCase, itineraryPath, metrics);
   const status = statusForFailure(failure);
@@ -643,11 +647,7 @@ function failureFor(
     const codes = metrics.issueCodes.length === 0 ? "" : `（${metrics.issueCodes.join(", ")}）`;
     reasons.push(`P0 ${metrics.issueCounts.P0} / P1 ${metrics.issueCounts.P1}${codes}`);
   }
-  if (metrics.mealEvidenceRate < STRICT_MIN_EVIDENCE_RATE) {
-    reasons.push(
-      `${evalCase.id}: 推荐证据率 ${(metrics.mealEvidenceRate * 100).toFixed(0)}% < 80%`,
-    );
-  }
+
   if (reasons.length === 0) return null;
   return {
     stage: "quality_gate",
@@ -697,9 +697,11 @@ function attemptTelemetry(
   initialRounds: number,
   currentRounds: number,
   extensions: readonly EvalBudgetExtension[],
+  ceilingRounds: number,
 ): EvalAttemptTelemetry {
   return {
     duration_ms: durationMs,
+    request_contexts: session.requestContexts,
     tool_rounds: toolRounds,
     tool_calls: toolCalls,
     completion_retries: completionRetries,
@@ -719,7 +721,7 @@ function attemptTelemetry(
     budget: {
       initial_rounds: initialRounds,
       current_rounds: currentRounds,
-      ceiling_rounds: EVAL_TOOL_ROUND_CEILING,
+      ceiling_rounds: ceilingRounds,
       extensions,
     },
   };

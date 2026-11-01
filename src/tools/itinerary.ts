@@ -1,3 +1,4 @@
+import { formatRecommendationPolicy } from "./recommendation-policy.ts";
 import { mkdir, readdir, readFile } from "node:fs/promises";
 import { dirname, resolve, join } from "node:path";
 import type { Tool, ToolContext, ItinerarySnapshot } from "./tool.ts";
@@ -26,27 +27,26 @@ import {
 export function createSaveItineraryTool(rootDir: string = process.cwd()): Tool {
   return {
     name: "save_itinerary",
-    alwaysActive: true,
+    alwaysActive: "travel",
     description:
-      "保存结构化行程单（JSON + Markdown + 质量报告）。保存前执行基础质量核验：P0 拒绝保存，" +
-      "P1/P2 会写入质量报告；strict=true 时 P0/P1 都拒绝。生成完整行程后应调用 validate_itinerary " +
-      "并以 strict=true 通过后再向用户交付。修改行程时先 load_itinerary 读取当前版本，只改动用户要求的部分。" +
-      "餐饮条目为沿途候选餐厅（可无 time；午餐/晚餐建议各 4-6 个候选、覆盖不同价位与菜系），不参与景点路线规划。" +
-      "条目较多时用 merge=true 分批保存：默认按稳定 id 更新条目、保留未提交的条目。整天替换须显式 merge_mode=replace_day；" +
-      "其余天原样保留；避免一次输出全部条目导致工具参数超出模型单次输出上限而被截断。",
+      "保存行程 JSON、Markdown 和质量报告，返回版本及主要问题。P0 拒绝保存；strict=true 同时拒绝 P1。" +
+      "分天保存用 merge=true，按日期和稳定 id 更新、保留未提交条目；merge_mode=replace_day 才删除当天未提交项。" +
+      "地点/路线引用 evidence_id/route_evidence_id，程序回填核验数据。保存后按返回问题修订，无需立即重复校验；完整行程最终调用 validate_itinerary(strict=true)。",
     parameters: {
       type: "object",
       properties: {
+        recommendation_policy: { type: "object", description: "餐饮默认只建议，目标2家/餐；strict 才阻断整体验收，off 不检查推荐质量。设置后随行程保存。", properties: {
+          mode: { type: "string", enum: ["advisory", "strict", "off"] }, min_candidates: { type: "integer", minimum: 1, maximum: 20 }, min_evidence_rate: { type: "number", minimum: 0, maximum: 1 },
+        } },
         expected_revision: { type: "integer", description: "可选，提交前读取的版本号；不匹配时拒绝覆盖" },
         travelers: { type: "integer", description: "出行人数，缺省 2 人" },
         room_count: { type: "integer", description: "住宿房间数，缺省按每间 2 人估算" },
-        title: { type: "string", description: "行程标题，例如：杭州两日游" },
+        title: { type: "string", description: "与需求单一致的标题" },
         strict: { type: "boolean", description: "默认 false；true 时 P0/P1 问题都会拒绝保存" },
         merge: {
           type: "boolean",
           description:
-            "默认 false（整体覆盖保存）；true 时按日期、条目 id 增量更新，保留未提交条目；" +
-            "匹配不到或没有 date 的天追加，其余天保留。分天保存大行程时使用。",
+            "false 整体覆盖；true 按日期/id 更新，未匹配日期追加",
         },
         merge_mode: { type: "string", enum: ["patch_items", "replace_day"], description: "merge=true 时默认 patch_items；replace_day 明确删除当天未提交的条目" },
         budget_per_person_yuan: { type: "number", description: "人均总预算（元），可选；用于质量核验" },
@@ -56,34 +56,36 @@ export function createSaveItineraryTool(rootDir: string = process.cwd()): Tool {
           items: {
             type: "object",
             properties: {
-              date: { type: "string", description: "日期，例如 2026-10-01，可选" },
-              theme: { type: "string", description: "当天主题，例如 西湖环线，可选" },
+              day_type: { type: "string", enum: ["full", "arrival", "departure", "transfer"], description: "默认full；按已知到离时间或转场安排填写，不能为绕过校验随意降级" },
+              available_start: { type: "string", description: "当天已知可用开始 HH:MM" },
+              available_end: { type: "string", description: "当天已知可用结束 HH:MM" },
+              date: { type: "string", description: "日期 YYYY-MM-DD" },
+              theme: { type: "string", description: "当天主题" },
               items: {
                 type: "array",
                 description: "当天时间线（按时间排序）",
                 items: {
                   type: "object",
                   properties: {
-                    id: { type: "string", description: "稳定条目 ID；缺省时自动生成" },
-                    evidence_id: { type: "string", description: "地点搜索返回的证据 ID；坐标、评分、人均由程序回填" },
-                    route_evidence_id: { type: "string", description: "plan_day_routes 返回的路段证据 ID；同时填写 from/to/transport_mode" },
-                    time: { type: "string", description: "开始时间 HH:MM，例如 09:00" },
+                    id: { type: "string", description: "稳定条目 ID；省略则生成" },
+                    evidence_id: { type: "string", description: "搜索证据 ID，自动回填地点数据" },
+                    route_evidence_id: { type: "string", description: "路线证据 ID，配合 from/to/transport_mode" },
+                    time: { type: "string", description: "开始 HH:MM" },
                     end_time: { type: "string", description: "结束时间 HH:MM，必须晚于 time" },
                     type: {
                       type: "string",
                       enum: [...ITINERARY_ITEM_TYPES],
-                      description: "visit / meal / transport / rest / free_time / accommodation / note",
+                      description: "条目类型",
                     },
                     subtype: {
                       type: "string",
                       enum: ["breakfast", "lunch", "dinner", "snack"],
-                      description: "仅 type=meal 时填写餐段；景点请用 place_type 填写博物馆/古迹/公园等",
+                      description: "meal 的餐段",
                     },
                     place_type: {
                       type: "string",
                       description:
-                        "业务细分类型。visit 填 search_attractions 返回的类型（古迹/博物馆/公园/街区等）；" +
-                        "meal 可填菜系；用于跨天去重和类型多样性控制",
+                        "visit 用搜索返回类型；meal 可用菜系",
                     },
                     name: { type: "string", description: "地点或事项名" },
                     location: {
@@ -109,7 +111,7 @@ export function createSaveItineraryTool(rootDir: string = process.cwd()): Tool {
                     distance_km: { type: "number", description: "transport 距离（公里），正数" },
                     room_price_per_night: { type: "number", description: "住宿每房每晚参考价（元），不要填写为人均价格" },
                     room_count: { type: "integer", description: "本次住宿订房数，默认使用行程房间数" },
-                    stay_nights: { type: "integer", description: "本次住宿晚数，0 为不付费锚点；默认非末日住 1 晚，末日 0 晚，同日同酒店不重复计费" },
+                    stay_nights: { type: "integer", description: "晚数：0 不收费；默认末日 0、其余 1，同日同酒店去重" },
                     cost_per_person: { type: "number", description: "人均消费（元），非负数" },
                     ticket_price_per_person: { type: "number", description: "人均门票（元），非负数" },
                     opening_hours: {
@@ -134,7 +136,7 @@ export function createSaveItineraryTool(rootDir: string = process.cwd()): Tool {
                     },
                     reservation_required: { type: "boolean", description: "是否需要预约" },
                     cuisine: { type: "string", description: "餐厅菜系" },
-                    source: { type: "string", description: "数据来源，例如 amap / official / search" },
+                    source: { type: "string", description: "数据来源" },
                     confidence: {
                       type: "string",
                       enum: ["high", "medium", "low"],
@@ -181,6 +183,9 @@ async function saveItineraryUnlocked(rootDir: string, args: Record<string, unkno
   const evidence = ctx?.evidence ?? new TravelEvidenceStore(rootDir);
   await evidence.load();
   await evidence.refresh();
+  const policy = args.recommendation_policy;
+  if (policy !== undefined && (policy === null || typeof policy !== "object" || Array.isArray(policy))) throw new Error("recommendation_policy 必须为对象");
+  const recommendation = policy as { mode?: unknown; min_candidates?: unknown; min_evidence_rate?: unknown } | undefined;
   const constraints = { ...incoming.constraints, ...saved?.constraints,
     ...(brief === undefined ? {} : {
       destination: brief.destination, start_date: brief.startDate, end_date: brief.endDate,
@@ -190,6 +195,9 @@ async function saveItineraryUnlocked(rootDir: string, args: Record<string, unkno
       day_start: "10:00", day_end: "18:00", require_accommodation: true,
       require_routes: true, require_place_evidence: true, recommendations: true,
     }),
+    ...(recommendation?.mode === undefined ? {} : { recommendation_mode: recommendation.mode }),
+    ...(recommendation?.min_candidates === undefined ? {} : { meal_candidates_target: recommendation.min_candidates }),
+    ...(recommendation?.min_evidence_rate === undefined ? {} : { meal_evidence_target: recommendation.min_evidence_rate }),
   };
   const itinerary: Itinerary = parseItinerary({ ...merged,
     itinerary_id: saved?.itinerary_id ?? evidenceId([resolve(rootDir), title]),
@@ -204,7 +212,12 @@ async function saveItineraryUnlocked(rootDir: string, args: Record<string, unkno
     }) })),
   });
   const strict = args.strict === true;
-  const report = validateItinerary(itinerary, budget === undefined ? {} : { budget_per_person_yuan: budget });
+  const changedDays = itinerary.days.flatMap((day, index) => {
+    const before = day.date === undefined ? saved?.days[index] : saved?.days.find((old) => old.date === day.date);
+    return JSON.stringify(before) === JSON.stringify(day) ? [] : [index + 1];
+  });
+  const constraintChange = JSON.stringify(saved?.constraints) !== JSON.stringify(itinerary.constraints);
+  const report = validateItinerary(itinerary, { ...(budget === undefined ? {} : { budget_per_person_yuan: budget }), changed_days: constraintChange ? itinerary.days.map((_, index) => index + 1) : changedDays });
   if (report.issue_count.P0 > 0 || (strict && report.issue_count.P1 > 0)) {
     throw new Error(`行程质量校验未通过:\n${renderQualityReport(report)}`);
   }
@@ -229,10 +242,17 @@ async function saveItineraryUnlocked(rootDir: string, args: Record<string, unkno
     savedLabel,
     `版本: ${itinerary.itinerary_id}@${itinerary.revision}；可读交付以 ${base}.md 为准`,
     ...(merge && args.merge_mode === "replace_day" ? [`显式整天替换：原条目 ${saved?.days.reduce((sum, day) => sum + day.items.length, 0) ?? 0}，现条目 ${itemCount}；未提交的当天条目已删除`] : []),
+    `分日验收: ${(report.daily ?? []).filter((day) => report.changed_days?.includes(day.day)).map((day) => `D${day.day} ${day.strict_pass ? "日内通过" : day.status === "needs_confirmation" ? "资料待确认" : "待修改"}`).join("；") || "本次未改变日期内容"}`,
+    ...(report.repair_days?.length ? [`局部修复日期: ${report.repair_days.join("、")}；跨天冲突优先改本次变动日期，不必重写其他已通过日期`] : []),
+    ...(report.recommendation_policy === undefined ? [] : [`餐饮策略: ${formatRecommendationPolicy(report.recommendation_policy)}`]),
     `质量: ${report.score} / 100（P0 ${report.issue_count.P0} / P1 ${report.issue_count.P1} / P2 ${report.issue_count.P2}）`,
     ...(targetDays === undefined || targetDays === itinerary.days.length
       ? []
       : [`完整性: ${itinerary.days.length}/${targetDays} 天，尚未完成，不能按完整行程交付`]),
+    `strict: ${report.issue_count.P0 === 0 && report.issue_count.P1 === 0 ? "通过" : "未通过"}（整体验收，包含跨天重复和缺失日期；分日通过不代表整体已完成）`,
+    ...report.issues.slice().sort((a, b) => a.level.localeCompare(b.level)).slice(0, 6).map((issue) =>
+      `[${issue.level}]${issue.day === undefined ? "" : ` Day ${issue.day}`}${issue.item_id === undefined ? "" : ` ${issue.item_id}`} ${issue.code}: ${issue.message}`),
+    ...(report.issues.length > 6 ? [`其余 ${report.issues.length - 6} 项见质量报告；同一版本无需重复调用 validate_itinerary`] : []),
     ...(report.meal_notes.length > 0 ? [`餐饮建议 ${report.meal_notes.length} 条（仅供参考，不影响评分）`] : []),
     `${file}（结构化数据）`,
     `${base}.md（可读版本）`,
@@ -297,7 +317,7 @@ function mergeSavedItinerary(saved: Itinerary | null, incoming: Itinerary, repla
 export function createLoadItineraryTool(rootDir: string = process.cwd()): Tool {
   return {
     name: "load_itinerary",
-    alwaysActive: true,
+    alwaysActive: "travel",
     description:
       "读取已保存的行程。先传 summary=true 查看各天/条目摘要；修改某天时再传 day=N 只读取那一天，" +
       "避免整份 JSON 重复进入上下文。用户要求修改行程时必须先读取当前版本，改完受影响的条目后保存。",
@@ -378,16 +398,18 @@ function renderItinerarySummary(itinerary: Itinerary, selectedDay?: number): str
 export function createValidateItineraryTool(rootDir: string = process.cwd()): Tool {
   return {
     name: "validate_itinerary",
-    alwaysActive: true,
+    alwaysActive: "travel",
     description:
       "核验已保存的行程：时间顺序与重叠、时间线空档、赶路时间、游玩时长、过长交通、当日总时长、景点路线折返、跨天重复、闭馆、预算、数据置信度。" +
-      "继承已保存的预算与交付约束。需求单生成的行程中，午晚餐候选数量与真实评分/价格证据覆盖率属于正式 P1，和 live 评测共用规则；" +
-      "其他餐饮细节单列「餐饮参考」。生成或修改行程后必须调用；strict=true 时 P0/P1 问题会抛错，要求修正后重试。",
+      "继承已保存的预算、日期和餐饮策略，与 live 评测共用规则；" +
+      "默认餐饮问题仅作建议。scope=day 只验收指定日并展示跨天关联，交付前 scope=all 做整体验收；strict=true 拦截对应范围的 P0/P1。保存本身已校验，不必对同一版本重复调用。",
     parameters: {
       type: "object",
       properties: {
         title: { type: "string", description: "行程标题（保存时的标题）" },
-        strict: { type: "boolean", description: "默认 false；true 时 P0/P1 问题会失败，包括已约定的餐饮覆盖率" },
+        scope: { type: "string", enum: ["all", "day"], description: "默认all；day须传day，日内验收不代替整体验收" },
+        day: { type: "integer", description: "分日验收日期下标，从1开始" },
+        strict: { type: "boolean", description: "默认 false；true 时 P0/P1 问题会失败；餐饮仅在显式 strict 策略下参与" },
         budget_per_person_yuan: { type: "number", description: "人均总预算（元），可选" },
       },
       required: ["title"],
@@ -406,6 +428,9 @@ export function createValidateItineraryTool(rootDir: string = process.cwd()): To
 
         const budget = optionalNonNegativeNumber(args.budget_per_person_yuan, "budget_per_person_yuan");
         const itinerary = parseItinerary(JSON.parse(raw));
+        if (args.scope !== undefined && args.scope !== "all" && args.scope !== "day") throw new Error("scope 必须为 all 或 day");
+        const dayNo = args.day;
+        if (args.scope === "day" && (typeof dayNo !== "number" || !Number.isInteger(dayNo) || dayNo < 1 || dayNo > itinerary.days.length)) throw new Error("分日验收须指定有效 day");
         const report = validateItinerary(
           itinerary,
           budget === undefined ? {} : { budget_per_person_yuan: budget },
@@ -413,10 +438,16 @@ export function createValidateItineraryTool(rootDir: string = process.cwd()): To
         ctx?.onItinerary?.({ itinerary, report, file: itineraryFile(rootDir, title) });
         await atomicWrite(itineraryFile(rootDir, title).replace(/\.json$/, ".quality.json"), JSON.stringify(report, null, 2));
         await atomicWrite(itineraryFile(rootDir, title).replace(/\.json$/, ".quality.md"), renderQualityReport(report));
-        if (args.strict === true && (report.issue_count.P0 > 0 || report.issue_count.P1 > 0)) {
-          throw new Error(`行程质量校验未通过（strict）:\n${renderQualityReport(report)}`);
-        }
-        return renderQualityReport(report);
+        const dayReport = args.scope === "day" ? report.daily?.find((day) => day.day === dayNo) : undefined;
+        const pass = dayReport === undefined ? report.issue_count.P0 === 0 && report.issue_count.P1 === 0 : dayReport.strict_pass;
+        const text = dayReport === undefined ? renderQualityReport(report) : [
+          `Day ${dayNo} 日内验收：${pass ? "通过" : "未通过"}，${dayReport.score}分。`,
+          ...dayReport.issues.map((item) => `[${item.level}] ${item.code}: ${item.message}`),
+          ...report.issues.filter((item) => item.related_days?.includes(Number(dayNo)) && item.day !== dayNo).map((item) => `跨天关联：${item.message}`),
+          `整体仍有 P0 ${report.issue_count.P0} / P1 ${report.issue_count.P1}；最终需 scope=all，不能以分日验收替代。`,
+        ].join("\n");
+        if (args.strict === true && !pass) throw new Error(`行程质量校验未通过（strict）:\n${text}`);
+        return text;
       }, ctx?.signal);
     },
   };

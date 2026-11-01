@@ -1,3 +1,6 @@
+import { setTimeout as delay } from "node:timers/promises";
+import { bestPoiByName, type AmapPoi } from "../tools/amap.ts";
+import { poiCityVerdict } from "../tools/geocoding.ts";
 import { convertPoint, type CoordinateSystem } from "../tools/coordinates.ts";
 import { haversineKm } from "../tools/geo.ts";
 
@@ -30,17 +33,19 @@ export interface PlanJson {
 export interface Coordinate {
   latitude: number;
   longitude: number;
+  poiId?: string;
 }
 
 /** 单点解析器：按查询名 + 参考中心找权威坐标；失败返回 null */
-export type CoordinateResolver = (query: string, near: Coordinate) => Promise<Coordinate | null>;
+export interface ResolveContext { city?: string; poiId?: string }
+export type CoordinateResolver = (query: string, near: Coordinate, context: ResolveContext) => Promise<Coordinate | null>;
 
 /** 已校准标记：带此 source 的条目跳过重复解析（避免反复消耗高德配额） */
 const RESOLVED_SOURCE = "amap-resolved";
 const MAX_ITEMS_PER_PLAN = 60;
 
 /** 结果缓存：同一查询 + 邻域在 TTL 内不重复请求 */
-const cache = new Map<string, { value: Coordinate | null; expiresAt: number }>();
+const caches = new WeakMap<CoordinateResolver, Map<string, { value: Coordinate | null; expiresAt: number }>>();
 const CACHE_TTL_MS = 24 * 60 * 60_000;
 /** 失败结果只短缓存：高德限流(QPS)是瞬时故障，不能毒化 24 小时 */
 const NULL_TTL_MS = 10 * 60_000;
@@ -54,7 +59,7 @@ const MAX_RESOLVE_DRIFT_KM = 8;
 export async function resolvePlanCoordinates(
   plan: PlanJson,
   resolve: CoordinateResolver,
-  options: { intervalMs?: number } = {},
+  options: { intervalMs?: number; signal?: AbortSignal } = {},
 ): Promise<{ plan: PlanJson; resolved: number; attempted: number }> {
   const intervalMs = options.intervalMs ?? DEFAULT_INTERVAL_MS;
   const items = collectItems(plan);
@@ -67,6 +72,7 @@ export async function resolvePlanCoordinates(
   let attempted = 0;
 
   for (const item of collectItems(next)) {
+    options.signal?.throwIfAborted();
     if (attempted >= MAX_ITEMS_PER_PLAN) break;
     const location = item.location;
     if (location === undefined || item.evidence_verified === true || location.source === RESOLVED_SOURCE) continue;
@@ -79,16 +85,18 @@ export async function resolvePlanCoordinates(
     // 会因离质心更近而被错认；解析结果与原坐标偏差过大也直接拒绝（匹配错误的保护）
     const originLatitude = location.latitude;
     const originLongitude = location.longitude;
-    const itemNear = convertPoint({ latitude: originLatitude, longitude: originLongitude, crs: location.crs ?? "gcj02" }, "gcj02");
+    const itemNear = convertPoint({ latitude: originLatitude, longitude: originLongitude, crs: location.crs ?? (location.source === "osm" ? "wgs84" : "gcj02") }, "gcj02");
+    const constraints = plan.constraints as { destination?: string } | undefined;
+    const context = { city: constraints?.destination, poiId: typeof location.poi_id === "string" ? location.poi_id : undefined };
     let coordinate: Coordinate | null = null;
     for (const variant of queryVariants(query)) {
       if (intervalMs > 0) {
-        await new Promise((resolve_) => setTimeout(resolve_, intervalMs));
+        await delay(intervalMs, undefined, { signal: options.signal });
       }
-      coordinate = await cachedResolve(resolve, variant, itemNear);
+      coordinate = await cachedResolve(resolve, variant, itemNear, context, options.signal);
       if (
         coordinate !== null &&
-        haversineKm(originLatitude, originLongitude, coordinate.latitude, coordinate.longitude) > MAX_RESOLVE_DRIFT_KM
+        haversineKm(itemNear.latitude, itemNear.longitude, coordinate.latitude, coordinate.longitude) > MAX_RESOLVE_DRIFT_KM
       ) {
         coordinate = null; // 同名异地（分店/同名地点）：拒绝后继续尝试下一个变体
       }
@@ -99,6 +107,7 @@ export async function resolvePlanCoordinates(
     location.longitude = coordinate.longitude;
     location.source = RESOLVED_SOURCE;
     location.crs = "gcj02";
+    if (coordinate.poiId !== undefined) location.poi_id = coordinate.poiId;
     resolved += 1;
   }
 
@@ -179,16 +188,48 @@ async function cachedResolve(
   resolve: CoordinateResolver,
   query: string,
   near: Coordinate,
+  context: ResolveContext,
+  signal?: AbortSignal,
 ): Promise<Coordinate | null> {
-  const key = `${query}@${near.latitude.toFixed(2)},${near.longitude.toFixed(2)}`;
+  let cache = caches.get(resolve);
+  if (cache === undefined) { cache = new Map(); caches.set(resolve, cache); }
+  const key = JSON.stringify([query, near.latitude, near.longitude, context.city, context.poiId]);
   const hit = cache.get(key);
   if (hit !== undefined && Date.now() < hit.expiresAt) return hit.value;
 
-  const value = await resolve(query, near).catch(() => null);
+  signal?.throwIfAborted();
+  const value = await resolve(query, near, context).catch(() => { signal?.throwIfAborted(); return null; });
+  signal?.throwIfAborted();
   if (cache.size >= CACHE_MAX) {
     const oldest = cache.keys().next().value;
     if (oldest !== undefined) cache.delete(oldest);
   }
   cache.set(key, { value, expiresAt: Date.now() + (value === null ? NULL_TTL_MS : CACHE_TTL_MS) });
   return value;
+}
+
+/** 城市、名称、实体 ID 与距离联合匹配；同名分店接近时保留原坐标，等待确认。 */
+export function selectCalibrationPoi(pois: readonly AmapPoi[], query: string, near: Coordinate, context: ResolveContext): Coordinate | null {
+  if (!context.city && !context.poiId) return null;
+  const candidates = pois.flatMap((poi) => {
+    if (context.city && poiCityVerdict(poi, context.city) !== "match") return [];
+    if (context.poiId && poi.id !== context.poiId) return [];
+    const facility = /(停车|售票|检票|出入口|入口|出口|厕所|卫生间|公交站|地铁站|游客中心)/;
+    if (facility.test(poi.name) && !facility.test(query)) return [];
+    if (bestPoiByName([poi], query) === null) return [];
+    const [longitude, latitude] = poi.location.split(",").map(Number);
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude) || Math.abs(latitude) > 90 || Math.abs(longitude) > 180) return [];
+    const distance = haversineKm(near.latitude, near.longitude, latitude, longitude);
+    return distance <= MAX_RESOLVE_DRIFT_KM ? [{ poi, latitude, longitude, distance }] : [];
+  });
+  const best = bestPoiByName(candidates.map((c) => c.poi), query);
+  if (best === null || best === undefined) return null;
+  const normalize = (s: string) => s.replace(/[\s（）()·-]/g, "");
+  const tier = (name: string) => normalize(name) === normalize(query) ? 3 : (normalize(name).includes(normalize(query)) || normalize(query).includes(normalize(name))) ? 2 : 1;
+  const matches = candidates.filter((c) => tier(c.poi.name) === tier(best.name)).sort((a, b) => a.distance - b.distance);
+  const first = matches[0];
+  if (first === undefined) return null;
+  // 没有持久化实体 ID 时，近邻同名点不能仅凭 API 返回顺序决定。
+  if (!context.poiId && matches[1] && matches[1].distance - first.distance < 1) return null;
+  return { latitude: first.latitude, longitude: first.longitude, poiId: first.poi.id };
 }

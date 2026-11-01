@@ -13,6 +13,7 @@ export interface BaselineSample {
   readonly days: number;
   readonly status: string;
   readonly score: number;
+  readonly scoreVersion?: string;
   readonly issues: { readonly P0: number; readonly P1: number; readonly P2: number };
   readonly issueCodes: readonly string[];
   readonly evidenceRate: number;
@@ -55,6 +56,7 @@ function sampleFrom(id: string, title: string, metrics: ItineraryEvalMetrics): B
     days: metrics.days,
     status: metrics.status,
     score: metrics.score,
+    scoreVersion: metrics.scoreVersion,
     issues: metrics.issueCounts,
     issueCodes: [...metrics.issueCodes],
     evidenceRate: metrics.mealEvidenceRate,
@@ -141,6 +143,7 @@ function verdictOf(
   previous: BaselineSample | null,
   current: BaselineSample | null,
 ): DiffVerdict {
+  if (previous && current && (previous.scoreVersion ?? "legacy-count-v1") !== (current.scoreVersion ?? "legacy-count-v1")) return "incomparable";
   if (kind === "same") return "same";
   if (kind === "changed" && previous !== null && current !== null) return verdictFor(previous, current);
   return "incomparable";
@@ -160,7 +163,7 @@ function kindFor(
 }
 
 function isSameSample(before: BaselineSample, after: BaselineSample): boolean {
-  return before.score === after.score
+  return (before.scoreVersion ?? "legacy-count-v1") === (after.scoreVersion ?? "legacy-count-v1") && before.score === after.score
     && before.status === after.status
     && before.days === after.days
     && before.issues.P0 === after.issues.P0
@@ -209,6 +212,7 @@ function renderRow(row: DiffRow): string[] {
   if (row.before === null || row.after === null) return [`${row.id} 无对比数据`];
   if (row.kind === "same") return [`= ${row.id} 无变化`];
 
+  if ((row.before.scoreVersion ?? "legacy-count-v1") !== (row.after.scoreVersion ?? "legacy-count-v1")) return [`· ${row.id} 评分口径变化：${row.before.scoreVersion ?? "legacy-count-v1"} → ${row.after.scoreVersion ?? "legacy-count-v1"}，不计为改善或变差`];
   const marker = row.verdict === "improved" ? "改善" : row.verdict === "regressed" ? "变差" : "变化";
   const head: string[] = [];
   if (row.before.score !== row.after.score) head.push(`评分 ${row.before.score} → ${row.after.score}（${signed(row.after.score - row.before.score)}）`);

@@ -290,10 +290,10 @@ test("路线证据必须排在对应停留之间，且每天均需住宿锚点",
   assert.ok(report.issues.some((issue) => issue.code === "missing-accommodation" && issue.day === 2));
 });
 
-test("半日/无住宿/无餐厅版本不能靠删除信息通过完整交付", () => {
+test("半日或无住宿仍阻断完整交付；无餐厅仅作建议", () => {
   const raw = { title: "完整度回归", constraints: { day_start: "10:00", day_end: "18:00", require_accommodation: true, recommendations: true }, days: [{ items: [visit("下午景点", "15:00", "16:00")] }] };
   const issues = codes(raw);
-  for (const code of ["incomplete-day-start", "incomplete-day-end", "missing-accommodation", "recommendation-slot-coverage", "recommendation-evidence-coverage"]) assert.ok(issues.includes(code), code);
+  for (const code of ["incomplete-day-start", "incomplete-day-end", "missing-accommodation"]) assert.ok(issues.includes(code), code);
   assert.equal(hasRecommendationEvidence({ id: "fake", type: "meal", name: "未知餐厅", note: "评分待核实；人均未知" }), false);
 });
 
@@ -320,7 +320,7 @@ test("状态卡恢复真实需求标题，餐饮参考不是行程 P1", () => {
 for (const days of [3, 5]) test(`${days} 日增量流水线：最终回复、流式输出、状态、JSON/Markdown 保持同一版本`, async () => {
   const root = await temp();
   const registry = new ToolRegistry(root).register(createSaveItineraryTool(root)).register(createLoadItineraryTool(root));
-  const script: LLMResult[] = Array.from({ length: days }, (_, index) => call("save_itinerary", { title: `合成${days}日游`, constraints: { recommendations: true }, merge: true, days: [{ date: `2026-11-0${index + 1}`, items: [visit(`第${index + 1}天`)] }] }, `save-${index}`));
+  const script: LLMResult[] = Array.from({ length: days }, (_, index) => call("save_itinerary", { title: `合成${days}日游`, constraints: { recommendations: true, day_start: "09:00", day_end: "18:00" }, merge: true, days: [{ date: `2026-11-0${index + 1}`, items: [visit(`第${index + 1}天`)] }] }, `save-${index}`));
   script.push(call("load_itinerary", { title: `合成${days}日游`, day: 1, summary: true }));
   script.push({ type: "text", content: "虚构的模型总结：只有首日上午，已完美通过" });
   const provider = new Script(script);

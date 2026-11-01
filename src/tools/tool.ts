@@ -65,7 +65,7 @@ export interface Tool {
   /** 目录检索词；不要用它们替代 description */
   readonly keywords?: readonly string[];
   /** 常驻工具：每个请求都发送完整定义，只用于极小且高频的核心能力 */
-  readonly alwaysActive?: boolean;
+  readonly alwaysActive?: boolean | "travel";
   /** 返回结果类型，供裁剪结果和模型快速判断数据结构 */
   readonly outputKind?: ToolOutputKind;
   /** 执行工具，返回 LLM 可读的文本结果（出错时 throw，由 Agent 捕获回传） */

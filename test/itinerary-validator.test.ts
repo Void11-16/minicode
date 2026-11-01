@@ -67,6 +67,7 @@ const COMPLETE_ITINERARY = parseItinerary({
           source: "amap",
           confidence: "medium",
         },
+        { id: "lunch-break", time: "12:00", end_time: "13:00", type: "rest", name: "午餐休整", source: "manual", confidence: "high" },
         {
           id: "transport",
           time: "13:30",
@@ -311,7 +312,7 @@ test("validate_itinerary: 发现时间冲突、餐段、交通与预算问题", 
   );
   assert.ok(codes.includes("budget-exceeded"));
   // 餐饮问题单独成列：不参与状态与评分
-  assert.ok(mealCodes.includes("missing-lunch"));
+  assert.ok(mealCodes.includes("recommendation-slot-coverage"));
   assert.ok(mealCodes.includes("meal-outside-window"));
   assert.ok(!codes.includes("missing-lunch"), "餐饮问题不应出现在行程问题里");
   assert.match(renderQualityReport(report), /## P0/);
@@ -678,11 +679,11 @@ test("validate_itinerary: 餐饮问题只进'餐饮参考'，不改变状态与�
   assert.equal(report.status, "ok", "餐饮问题不影响行程状态");
   assert.equal(report.score, 100, "餐饮问题不影响评分");
   const mealCodes = report.meal_notes.map((item) => item.code);
-  assert.ok(mealCodes.includes("missing-dinner"));
+  assert.ok(mealCodes.includes("recommendation-slot-coverage"));
   assert.ok(mealCodes.includes("meal-merged-candidates"));
   assert.ok(mealCodes.includes("meal-outside-window"));
   assert.ok(
-    !report.issues.some((item) => ["missing-dinner", "meal-merged-candidates", "meal-outside-window"].includes(item.code)),
+    !report.issues.some((item) => ["recommendation-slot-coverage", "meal-merged-candidates", "meal-outside-window"].includes(item.code)),
     "餐饮问题不应混进行程问题",
   );
   assert.match(renderQualityReport(report), /餐饮参考（不参与评分）/);
@@ -988,10 +989,10 @@ test("validate_itinerary: 餐食候选不足触发 P2 提示", () => {
       ],
     }],
   });
-  const issues = validateItinerary(few).meal_notes.filter((item) => item.code === "few-meal-options");
+  const issues = validateItinerary(few).meal_notes.filter((item) => item.code === "recommendation-slot-coverage");
   assert.equal(issues.length, 2);
   assert.equal(issues[0].level, "P2");
-  assert.match(issues[0].message, /午餐候选只有 1 个，建议提供 4-6 个/);
+  assert.match(issues[0].message, /午餐候选 1\/2/);
 
   const mealCandidates = (subtype: string, longitudeBase: number) =>
     Array.from({ length: 4 }, (_, index) => ({
@@ -1010,7 +1011,7 @@ test("validate_itinerary: 餐食候选不足触发 P2 提示", () => {
       ],
     }],
   });
-  assert.ok(!validateItinerary(enough).meal_notes.some((item) => item.code === "few-meal-options"));
+  assert.ok(!validateItinerary(enough).meal_notes.some((item) => item.code === "recommendation-slot-coverage"));
 });
 
 test("validate_itinerary: 多候选餐食按均价估算预算，不重复累加", () => {

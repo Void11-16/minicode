@@ -22,6 +22,13 @@ export interface AppConfig {
   readonly tastePreferences?: string;
   /** 单会话花费预算（元）；估算成本达到后暂停发送。0 = 不限制 */
   readonly budgetYuan?: string;
+  /** 完整请求输入预算，不是模型窗口容量。 */
+  readonly maxPromptTokens?: string;
+  readonly maxTaskTokens?: string;
+  readonly maxToolCalls?: string;
+  readonly maxTaskRounds?: string;
+  /** 单次任务费用上限（元），默认 3，0 不限。 */
+  readonly taskBudgetYuan?: string;
 }
 
 export const DEFAULT_CONFIG: AppConfig = { provider: "auto" };
@@ -51,6 +58,11 @@ export const CONFIG_KEY_ALIASES: Record<string, keyof AppConfig> = {
   taste_preferences: "tastePreferences",
   taste: "tastePreferences",
   budget_yuan: "budgetYuan",
+  max_prompt_tokens: "maxPromptTokens",
+  max_task_tokens: "maxTaskTokens",
+  max_tool_calls: "maxToolCalls",
+  max_task_rounds: "maxTaskRounds",
+  task_budget_yuan: "taskBudgetYuan",
 };
 
 export class ConfigStore {
@@ -117,7 +129,7 @@ function validateConfig(raw: unknown): AppConfig {
   for (const key of [
     "deepseekApiKey", "amapApiKey", "deepseekModel", "llmApiKey", "llmBaseUrl", "llmModel",
     "priceIn", "priceCacheIn", "priceOut", "systemPrompt", "budgetYuan",
-    "tastePreferences",
+    "tastePreferences", "maxPromptTokens", "maxTaskTokens", "maxToolCalls", "maxTaskRounds", "taskBudgetYuan",
   ]) {
     if (typeof source[key] === "string" && source[key] !== "") {
       (config as Record<string, unknown>)[key] = source[key];

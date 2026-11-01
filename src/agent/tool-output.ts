@@ -1,6 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
 import type { ToolOutputKind } from "../tools/tool.ts";
+import { structuredToolPreview } from "./tool-preview.ts";
 
 /** 单条工具结果进入上下文的默认上限 */
 export const TOOL_RESULT_MAX_CHARS = 3_000;
@@ -63,7 +64,7 @@ async function compactToolResult(
   const maxChars = options.maxChars ?? TOOL_RESULT_MAX_CHARS;
   const kind = result.error === undefined ? result.outputKind ?? "generic" : "error";
   const header = `[tool-result type=${kind} chars=${result.output.length}]`;
-  if (result.output.length + header.length <= maxChars) {
+  if (result.output.length + header.length + 1 <= maxChars) {
     return {
       callId: result.callId,
       text: `${header}\n${result.output}`,
@@ -87,10 +88,10 @@ async function compactToolResult(
       ? `${header} truncated=true artifact=unavailable\n` +
         "原文落盘失败；以下仅保留按重要字段裁剪的预览，请不要假设存在完整归档：\n"
       : `${header} truncated=true artifact=${artifactPath}\n` +
-        "原文已落盘；需要完整数据时用 read_file 分段读取该 artifact。以下为按重要字段裁剪的预览：\n";
+        "原文已落盘；完整数据用 read_file(path=artifact, byte_offset=0) 分页读取，按返回游标续读。以下仅为预览：\n";
   const text = prefix.length >= maxChars
     ? prefix.slice(0, Math.max(0, maxChars))
-    : `${prefix}${preview(result.output, maxChars - prefix.length)}`;
+    : `${prefix}${structuredToolPreview(kind, result.output, maxChars - prefix.length) ?? preview(result.output, maxChars - prefix.length)}`;
   return {
     callId: result.callId,
     text,

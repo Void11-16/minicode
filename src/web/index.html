@@ -3014,6 +3014,39 @@
       let routeGeneration = 0;
       const routeRequests = new Map();
       const loadedRouteDays = new Set();
+      const routeControllers = new Map();
+      let planController = null;
+      let mapListController = null;
+      const routeStates = new Map();
+      const ROUTE_STATUS_LABELS = { loading: "路线加载中", ready: "真实路线", same_point: "同一地点，无需通勤", estimated: "仅有估算，尚未核验", no_route: "未查询到路线", no_geometry: "已有交通方案，暂缺路线几何", quota: "地图配额或频率受限", key: "地图 Key 配置异常", no_key: "未配置地图 Key", no_city: "公交路线缺少城市", unsupported: "暂不支持此交通方式", needs_confirmation: "交通条目与端点不一致，待确认", network: "路线网络请求失败", service_error: "地图服务异常", error: "路线加载失败" };
+      const ROUTE_MODE_LABELS = { walking: "步行", driving: "驾车", transit: "公交/地铁", cycling: "骑行", taxi: "出租车" };
+
+      function cancelRouteRequests() {
+        for (const controller of routeControllers.values()) controller.abort();
+        routeControllers.clear();
+        routeRequests.clear();
+        planController?.abort();
+      }
+
+      function endpointMatches(endpoint, item) {
+        return endpoint && endpoint.id === (item.id ?? item.name ?? "") &&
+          Math.abs(endpoint.latitude - item.location.latitude) < 1e-7 &&
+          Math.abs(endpoint.longitude - item.location.longitude) < 1e-7;
+      }
+
+      function routeDayMatches(day, dayNo) {
+        const items = currentItinerary?.days?.[dayNo - 1]?.items ?? [];
+        const stops = items.filter((item) => ["visit", "accommodation", "rest"].includes(item.type) && Number.isFinite(item.location?.latitude) && Number.isFinite(item.location?.longitude));
+        return Array.isArray(day.legs) && day.legs.length === Math.max(0, stops.length - 1) &&
+          day.legs.every((leg, i) => endpointMatches(leg.from, stops[i]) && endpointMatches(leg.to, stops[i + 1]));
+      }
+
+      function prioritizeRouteDay(dayNo) {
+        for (const [key, controller] of routeControllers) {
+          if (key !== `${routeGeneration}:${dayNo}`) controller.abort();
+        }
+        void ensureRouteDay(currentPlanTitle, dayNo, routeGeneration);
+      }
       const markerById = new Map(); // 条目 id → 地图标记（侧边栏点击定位用）
       const planMeta = new Map();   // 行程标题 → { updatedAt, quality }（质量报告 + 更新时间）
       let showMeals = false; // 侧边栏默认不显示美食候选（太多），用顶栏「🍜 美食」按钮切换
@@ -3141,17 +3174,24 @@
             for (let i = 1; i < waypoints.length; i++) {
               const from = waypoints[i - 1].location;
               const to = waypoints[i].location;
-              const leg = Array.isArray(legs) && legs.length === waypoints.length - 1 ? legs[i - 1] : null;
+              const candidate = Array.isArray(legs) && legs.length === waypoints.length - 1 ? legs[i - 1] : null;
+              const leg = candidate && endpointMatches(candidate.from, waypoints[i - 1]) && endpointMatches(candidate.to, waypoints[i]) ? candidate : null;
               const real = leg !== null && Array.isArray(leg.points) && leg.points.length >= 2;
               const points = real ? leg.points : [[from.latitude, from.longitude], [to.latitude, to.longitude]];
-              // 白色描边压在彩色线下面：路线从底图上"浮"起来，且交叉处不糊在一起
-              // 「全部」视图几条天的线会叠在一起，画细一点、透明度低一点，避免糊成一团
+              if (leg?.status === "same_point") continue;
               const multiDay = dayIndex === -1;
-              L.polyline(points, { color: "#ffffff", weight: multiDay ? 6 : 8, opacity: multiDay ? 0.7 : 0.85, lineJoin: "round", lineCap: "round" }).addTo(routeLayer);
-              const line = { color: lineColor, weight: multiDay ? 3 : 4, opacity: multiDay ? 0.75 : 0.92, lineJoin: "round", lineCap: "round" };
-              // 没有真实道路几何的段用点状虚线兜底，和实线区分
-              if (!real) line.dashArray = "1 7";
-              L.polyline(points, line).addTo(routeLayer);
+              // 公交的步行接驳与乘车段分别绘制，避免跨段缺口被错误地画成实线。
+              const parts = real && leg.parts?.length ? leg.parts : [{ mode: leg?.mode, points }];
+              for (const part of parts) {
+                L.polyline(part.points, { color: "#ffffff", weight: multiDay ? 6 : 8, opacity: multiDay ? 0.7 : 0.85 }).addTo(routeLayer);
+                const line = { color: lineColor, weight: multiDay ? 3 : 4, opacity: multiDay ? 0.75 : 0.92 };
+                if (!real) line.dashArray = "1 7";
+                else if (leg.mode === "transit" && part.mode === "walking") line.dashArray = "6 5";
+                const path = L.polyline(part.points, line).addTo(routeLayer);
+                const tooltip = document.createElement("span");
+                tooltip.textContent = `${ROUTE_MODE_LABELS[leg?.mode] ?? "交通"} · ${ROUTE_STATUS_LABELS[leg?.status] ?? "路线加载中"}`;
+                path.bindTooltip(tooltip);
+              }
             }
           }
           dayOffset += day.items.length;
@@ -3168,7 +3208,7 @@
             paddingBottomRight: [32, 60],
           });
         }
-        if (keepView !== true) renderMapSide(dayIndex);
+        renderMapSide(dayIndex);
         // 侧边栏点击了被聚合的餐厅：等这一轮标记建好后打开它
         if (pendingFocusId !== null) {
           const marker = markerById.get(pendingFocusId);
@@ -3291,6 +3331,13 @@
         hint.className = "ms-hint";
         hint.textContent = "📷 点小图看大图 · ✏️ 替换/调序 · 点卡片定位标记";
         head.appendChild(hint);
+        if (currentItinerary.coordinateCalibration !== "ready") {
+          const calibration = document.createElement("div");
+          calibration.className = "ms-hint";
+          calibration.textContent = currentItinerary.coordinateCalibration === "pending" ? "坐标待核实，路线请求时会尝试校准" : "部分坐标尚未核实；请核对城市、地点全名或分店信息";
+          head.appendChild(calibration);
+        }
+        appendRouteStatus(head, dayIndex);
         side.appendChild(head);
 
         const days = dayIndex === -1 ? currentItinerary.days : [currentItinerary.days[dayIndex]];
@@ -3567,7 +3614,7 @@
           el.onclick = () => {
             renderDay(tab.index);
             if (tab.index >= 0 && currentPlanTitle !== null) {
-              void ensureRouteDay(currentPlanTitle, tab.index + 1, routeGeneration);
+              prioritizeRouteDay(tab.index + 1);
             }
           };
           container.appendChild(el);
@@ -3578,44 +3625,87 @@
        * 路线按天独立加载：当前日点击立即优先请求，背后再顺序补齐全行程。
        * generation 隔离快速切换行程时的旧响应，避免 A 的路线覆盖 B。
        */
-      async function ensureRouteDay(title, dayNo, generation) {
-        if (
-          dayNo < 1 ||
-          generation !== routeGeneration ||
-          currentPlanTitle !== title ||
-          loadedRouteDays.has(dayNo)
-        ) return false;
+      async function ensureRouteDay(title, dayNo, generation, retry = false) {
+        if (dayNo < 1 || generation !== routeGeneration || currentPlanTitle !== title || (!retry && loadedRouteDays.has(dayNo))) return false;
         const key = `${generation}:${dayNo}`;
         const existing = routeRequests.get(key);
-        if (existing !== undefined) return existing;
+        if (existing !== undefined && !routeControllers.get(key)?.signal.aborted) return existing;
+        const controller = new AbortController();
+        routeControllers.set(key, controller);
+        routeStates.set(dayNo, "loading");
+        renderMapSide(currentDay);
+        const previousDay = currentRoutes.days[dayNo - 1];
+        const retrySuffix = retry && previousDay ? `&retry_legs=${previousDay.legs.flatMap((leg, i) => ["ready", "same_point"].includes(leg.status) ? [] : [i]).join(",")}` : "";
         const task = (async () => {
           try {
             const res = await apiFetch(
-              `${API_BASE}/api/plans/${encodeURIComponent(title)}/routes?day=${dayNo}`,
+              `${API_BASE}/api/plans/${encodeURIComponent(title)}/routes?day=${dayNo}&version=${encodeURIComponent(currentItinerary.routeVersion)}${retrySuffix}`,
+              { signal: controller.signal },
             );
-            if (!res.ok) return false;
+            if (res.status === 409) {
+              if (generation === routeGeneration && !controller.signal.aborted) await loadItinerary(title);
+              return false;
+            }
+            if (!res.ok) throw new Error("路线加载失败");
             const data = await res.json();
-            if (
-              generation !== routeGeneration ||
-              currentPlanTitle !== title ||
-              data.available !== true ||
-              !Array.isArray(data.days)
-            ) return false;
+            if (controller.signal.aborted || generation !== routeGeneration || currentPlanTitle !== title) return false;
+            if (data.available !== true || data.version !== currentItinerary.routeVersion || !Array.isArray(data.days) ||
+                data.days.length !== 1 || data.days[0].day !== dayNo || !routeDayMatches(data.days[0], dayNo)) throw new Error("路线与行程版本或端点不一致");
             for (const day of data.days) {
-              if (!Number.isInteger(day.day) || day.day < 1) continue;
+              // 重试时保留已成功的路段；后端只查询 retry_legs 指定的失败路段。
+              const previous = currentRoutes.days[day.day - 1];
+              if (retry && previous) day.legs = day.legs.map((leg, i) => previous.legs[i]?.status === "ready" || previous.legs[i]?.status === "same_point" ? previous.legs[i] : leg);
               currentRoutes.days[day.day - 1] = day;
               loadedRouteDays.add(day.day);
             }
+            currentItinerary.coordinateCalibration = data.coordinateCalibration ?? currentItinerary.coordinateCalibration;
+            routeStates.delete(dayNo);
             if (currentDay === -1 || currentDay === dayNo - 1) renderDay(currentDay, true);
             return true;
           } catch {
+            if (!controller.signal.aborted && generation === routeGeneration) {
+              routeStates.set(dayNo, "error");
+              renderMapSide(currentDay);
+            }
             return false;
           } finally {
-            routeRequests.delete(key);
+            if (routeControllers.get(key) === controller) {
+              routeControllers.delete(key);
+              routeRequests.delete(key);
+              if (controller.signal.aborted && routeStates.get(dayNo) === "loading") routeStates.delete(dayNo);
+            }
           }
         })();
         routeRequests.set(key, task);
         return task;
+      }
+
+      function appendRouteStatus(head, dayIndex) {
+        const numbers = dayIndex === -1 ? currentItinerary.days.map((_, i) => i + 1) : [dayIndex + 1];
+        for (const dayNo of numbers) {
+          const legs = currentRoutes.days[dayNo - 1]?.legs;
+          const state = routeStates.get(dayNo);
+          const box = document.createElement("div");
+          box.className = "ms-hint";
+          const statuses = legs?.map((leg, i) => {
+            let text = `${i + 1}. ${ROUTE_MODE_LABELS[leg.mode] ?? leg.mode}${leg.inferredMode ? "（默认方式，待确认）" : ""}：${ROUTE_STATUS_LABELS[leg.status] ?? leg.status}`;
+            if (leg.plannedDurationSec !== undefined) text += ` · 规划耗时 ${Math.ceil(leg.plannedDurationSec / 60)} 分钟`;
+            else if (leg.durationSec !== undefined) text += ` · 查询耗时 ${Math.ceil(leg.durationSec / 60)} 分钟`;
+            else if (leg.status === "ready" && !leg.metricsFresh) text += " · 耗时缓存已过期";
+            if (leg.observedAt) text += `（采集 ${new Date(leg.observedAt).toLocaleString("zh-CN")}）`;
+            return text;
+          }) ?? [];
+          box.style.whiteSpace = "pre-line";
+          box.textContent = `第 ${dayNo} 天：${state ? ROUTE_STATUS_LABELS[state] : legs ? "" : "路线待加载"}` + (statuses.length ? `\n${statuses.join("\n")}` : "");
+          const failed = state === "error" || legs?.some((leg) => !["ready", "same_point"].includes(leg.status));
+          if ((failed || !legs) && state !== "loading") {
+            const retry = document.createElement("button");
+            retry.textContent = legs ? "重试失败路段" : "加载路线";
+            retry.onclick = () => void ensureRouteDay(currentPlanTitle, dayNo, routeGeneration, true);
+            box.appendChild(retry);
+          }
+          head.appendChild(box);
+        }
       }
 
       const QUALITY_LABELS = { ok: "通过", needs_confirmation: "待确认", needs_revision: "需修订", invalid: "不可用" };
@@ -3653,57 +3743,63 @@
 
       async function loadItinerary(title) {
         closeItemEditor();
-        const res = await apiFetch(`${API_BASE}/api/plans/${encodeURIComponent(title)}`);
-        if (!res.ok) { currentItinerary = null; return; }
-        currentItinerary = useDisplayCoordinates(await res.json());
+        cancelRouteRequests();
+        const generation = ++routeGeneration;
+        const controller = new AbortController();
+        planController = controller;
         currentPlanTitle = title;
-        renderPlanMeta(title);
-        routeGeneration += 1;
-        routeRequests.clear();
         loadedRouteDays.clear();
+        routeStates.clear();
         currentRoutes = { available: true, days: [] };
-        currentDay = -1;
-        renderDayTabs();
-        renderDay(-1); // 先出标记与虚线兜底
-        // Day 1 优先；首日回来后刷新一次后台校准坐标，再顺序补齐其余日期。
-        // 每次拿到一天就重绘，不再等待全部路段完成后才显示真实路线。
-        const generation = routeGeneration;
-        void (async () => {
-          await ensureRouteDay(title, 1, generation);
-          if (
-            generation === routeGeneration &&
-            currentPlanTitle === title &&
-            currentItinerary?.coordinateCalibration === "pending"
-          ) {
-            const refreshedRes = await apiFetch(
-              `${API_BASE}/api/plans/${encodeURIComponent(title)}`,
-            ).catch(() => null);
-            if (
-              refreshedRes?.ok &&
-              generation === routeGeneration &&
-              currentPlanTitle === title
-            ) {
-              const refreshed = await refreshedRes.json();
-              if (refreshed.coordinateCalibration !== "pending") {
-                currentItinerary = useDisplayCoordinates(refreshed);
-                renderDay(currentDay);
-              }
+        try {
+          const res = await apiFetch(`${API_BASE}/api/plans/${encodeURIComponent(title)}`, { signal: controller.signal });
+          if (!res.ok) throw new Error("行程加载失败");
+          const data = await res.json();
+          if (controller.signal.aborted || generation !== routeGeneration) return;
+          currentItinerary = useDisplayCoordinates(data);
+          renderPlanMeta(title);
+          currentDay = -1;
+          renderDayTabs();
+          renderDay(-1);
+          // 一次只预取一天；用户切换日期会取消预取，下一段从当前日继续。
+          void (async () => {
+            await ensureRouteDay(title, 1, generation);
+            const totalDays = currentItinerary?.days?.length ?? 0;
+            for (let dayNo = 2; dayNo <= totalDays; dayNo++) {
+              if (generation !== routeGeneration || controller.signal.aborted) return;
+              if (currentDay >= 0) return;
+              await ensureRouteDay(title, dayNo, generation);
             }
+          })();
+        } catch {
+          if (!controller.signal.aborted && generation === routeGeneration) {
+            currentItinerary = null;
+            markerLayer?.clearLayers(); routeLayer?.clearLayers();
+            renderMapSide(-1);
+            mapToast("行程加载失败，请重新选择行程");
           }
-          const totalDays = currentItinerary?.days?.length ?? 0;
-          for (let dayNo = 2; dayNo <= totalDays; dayNo += 1) {
-            if (generation !== routeGeneration || currentPlanTitle !== title) return;
-            await ensureRouteDay(title, dayNo, generation);
-          }
-        })();
+        }
       }
 
       async function loadPlanList() {
-        const res = await apiFetch(`${API_BASE}/api/plans`);
-        const data = await res.json();
+        mapListController?.abort();
+        const controller = new AbortController();
+        mapListController = controller;
+        let data;
+        try {
+          const res = await apiFetch(`${API_BASE}/api/plans`, { signal: controller.signal });
+          if (!res.ok) throw new Error("行程列表加载失败");
+          data = await res.json();
+          if (controller.signal.aborted) return;
+        } catch {
+          if (!controller.signal.aborted) mapToast("行程列表加载失败");
+          return;
+        }
         const select = $("map-itinerary");
         select.textContent = "";
         if (data.plans.length === 0) {
+          cancelRouteRequests();
+          routeStates.clear();
           const option = document.createElement("option");
           option.textContent = "还没有已保存的行程";
           option.disabled = true;
@@ -3871,6 +3967,8 @@
         $("ie-meta").textContent = "正在保存…";
         let res;
         try {
+          cancelRouteRequests();
+          routeGeneration++;
           res = await apiFetch(`${API_BASE}/api/plans/edit`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -3960,11 +4058,17 @@
       }
 
       function closeMap() {
+        routeGeneration++;
+        mapListController?.abort();
+        cancelRouteRequests();
         closeItemEditor();
         $("map-overlay").classList.remove("open");
       }
 
       function resetMapForAccountChange() {
+        mapListController?.abort();
+        cancelRouteRequests();
+        routeStates.clear();
         closeItemEditor();
         closeLightbox();
         map?.remove();

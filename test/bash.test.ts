@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { bashApprovalKey, createBashTool, isReadOnlyCommand, matchesBashApprovalKey } from "../src/tools/bash.ts";
+import { CommandOutputBuffer } from "../src/tools/command-output.ts";
 
 test("bashApprovalKey: 生成精准的命令记忆键", () => {
   assert.equal(bashApprovalKey("npm test"), "npm test");
@@ -83,4 +84,38 @@ test("bash: 超时终止并提示", async () => {
 
   assert.match(output, /超时/);
   assert.ok(Date.now() - started < 5000, "应在超时后快速终止");
+});
+
+test("命令缓冲持续有界，跨 chunk 的 UTF-8 和首尾顺序正确", () => {
+  const text = "开头😀" + "中文😀x".repeat(10000) + "结尾😀";
+  const bytes = Buffer.from(text);
+  const buffer = new CommandOutputBuffer(151);
+  for (let offset = 0; offset < bytes.length; offset += 37) {
+    buffer.append(bytes.subarray(offset, offset + 37));
+    assert.ok(buffer.retainedChars <= 151);
+  }
+  const result = buffer.finish();
+  assert.match(result, /^开头😀/); assert.match(result, /结尾😀$/);
+  assert.match(result, /中间省略/); assert.doesNotMatch(result, /�/);
+  const small = new CommandOutputBuffer(9);
+  for (const chunk of ["abc", "😀", "def"]) small.append(Buffer.from(chunk));
+  assert.equal(small.finish(), "abc😀def");
+});
+
+test("bash: 大量双流日志保留 stderr 和末尾，丢弃中间但命令正常完成", async (t) => {
+  const workspace = await mkdtemp(join(tmpdir(), "minicode-bash-output-"));
+  t.after(() => rm(workspace, { recursive: true, force: true }));
+  await writeFile(join(workspace, "noisy.mjs"), `
+    import { writeFileSync } from 'node:fs';
+    console.log('STDOUT-HEAD'); console.error('STDERR-HEAD');
+    for (let i = 0; i < 2000; i++) { process.stdout.write('中'.repeat(1000)); process.stderr.write('文'.repeat(1000)); }
+    console.log('STDOUT-TAIL'); console.error('STDERR-TAIL');
+    writeFileSync('finished.txt', 'finished');
+    process.exitCode = 7;
+  `);
+  const result = await createBashTool(workspace).execute({ command: "node noisy.mjs" });
+  assert.match(result, /退出码 7/); assert.match(result, /STDOUT-HEAD/); assert.match(result, /STDOUT-TAIL/);
+  assert.match(result, /\[stderr\]/); assert.match(result, /STDERR-HEAD/); assert.match(result, /STDERR-TAIL/);
+  assert.match(result, /输出已截断/); assert.ok(result.length < 30500); assert.doesNotMatch(result, /�/);
+  assert.equal(await readFile(join(workspace, "finished.txt"), "utf8"), "finished");
 });

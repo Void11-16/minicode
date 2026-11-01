@@ -38,6 +38,10 @@ export class DeepSeekProvider implements ChatProvider {
     this.name = `deepseek:${model}`;
   }
 
+  get systemPrompt(): string | undefined { return this.inner.systemPrompt; }
+
+  chatWithUsage(history: readonly PromptMessage[], signal?: AbortSignal): Promise<LLMResult> { return this.inner.chatWithUsage(history, signal); }
+
   chat(history: Parameters<ChatProvider["chat"]>[0]): Promise<string> {
     return this.inner.chat(history);
   }

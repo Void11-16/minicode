@@ -147,6 +147,6 @@ test("加载真实产出样本：跳过 quality 报告，坏文件留给评测�
   const samples = await loadPlanSamples(dir);
   assert.deepEqual(samples.map((item) => item.evalCase.id), ["broken", "plan-b"]);
   assert.equal(samples[1].evalCase.title, "北京四日游");
-  assert.equal(samples[1].evalCase.days, 2);
+  assert.equal(samples[1].evalCase.days, 4, "离线复验沿用标题/约束的要求天数，不将实际半成品天数当目标");
   assert.equal(samples[0].evalCase.days, 0);
 });

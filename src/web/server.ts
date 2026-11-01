@@ -1,3 +1,7 @@
+import { validateItinerary, qualitySourceSignature } from "../tools/itinerary-validator.ts";
+import { QUALITY_SCORING_VERSION } from "../tools/itinerary-assessment.ts";
+import { createExecutionBudget, executionInputLimit } from "../core/execution-budget.ts";
+import { summarizeContext } from "../context/summarize.ts";
 import { createServer, request as httpRequest, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { readFile, readdir, stat, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -12,7 +16,7 @@ import {
 } from "../auth/auth-store.ts";
 import { updateSavedItinerary } from "../tools/itinerary.ts";
 import { parseItinerary } from "../tools/itinerary-schema.ts";
-import { convertPoint, type GeoPoint, type CoordinateSystem } from "../tools/coordinates.ts";
+import { convertPoint } from "../tools/coordinates.ts";
 import type { ItinerarySnapshot } from "../tools/tool.ts";
 import { updateTravelStateFromSnapshot } from "../core/travel-state.ts";
 import { Session } from "../core/session.ts";
@@ -31,9 +35,10 @@ import type { AgentRuntimeOptions } from "../runtime/runtime.ts";
 import { getAmapClient, setAmapKey } from "../tools/amap-access.ts";
 import { createPermissionMemory, decidePermission, permissionModeOf } from "../service/permission-policy.ts";
 import type { ApprovalMode, PermissionMemory } from "../service/permission-policy.ts";
-import type { AmapClient, RouteGeometry } from "../tools/amap.ts";
-import { haversineKm } from "../tools/geo.ts";
-import { resolvePlanCoordinates, unresolvedCoordinateCount, type PlanJson } from "./plan-coords.ts";
+import type { AmapClient } from "../tools/amap.ts";
+import { TravelEvidenceStore } from "../tools/travel-evidence.ts";
+import { PlanRouteService, planRouteVersion, mapLegCount, type MapPlan } from "./plan-routes.ts";
+import { resolvePlanCoordinates, selectCalibrationPoi, unresolvedCoordinateCount, type PlanJson } from "./plan-coords.ts";
 import { applyPlanEdit, suggestPlanOptions } from "./plan-edit.ts";
 import { deleteProfile, listProfiles, parseProfileDocument, profileSummary, saveProfile } from "../tools/profiles.ts";
 import type { ProfileFieldId } from "../tools/profiles.ts";
@@ -45,7 +50,6 @@ import type { ChatProvider } from "../llm/provider.ts";
 import type { Message } from "../core/message.ts";
 import { STEERED_NOTE } from "../runtime/runtime.ts";
 import type { ToolBudgetAssessment } from "../runtime/tool-budget.ts";
-import { renderHistoryForSummary } from "../context/epoch.ts";
 
 /** 工具轮次兜底预算：需求单还没落盘（首轮）时使用，落盘后按行程天数动态调整 */
 const FALLBACK_TOOL_ROUNDS = 30;
@@ -131,6 +135,7 @@ async function startSingleUserWebServer(options: WebServerOptions): Promise<Runn
   }
 
   function registerSessionAgent(session: Session): void {
+    session.setTravelMode(travelMode);
     runtime.registerAgent(session.id, new ChatAgent(session, sessionProvider(session), registry, rootDir));
     registeredSessions.add(session.id);
   }
@@ -145,10 +150,12 @@ async function startSingleUserWebServer(options: WebServerOptions): Promise<Runn
   const routeCache = new RouteCache(join(rootDir, ".minicode", "route-cache.json"));
   await photoCache.load();
   await routeCache.load();
-  const coordinateCalibrations = new Map<string, Promise<void>>();
+  const planRoutes = new PlanRouteService(routeCache);
+  const qualityCache = new Map<string, { signature: string; quality: { status: string; score: number } }>();
+  const coordinateCalibrations = new Map<string, { promise: Promise<void>; controller: AbortController; consumers: number }>();
   const coordinateCalibrationResults = new Map<
     string,
-    { raw: string; status: "ready" | "unavailable" }
+    { raw: string; status: "ready" | "unavailable"; at: number }
   >();
   const backgroundTasks = new Set<Promise<void>>();
 
@@ -187,17 +194,40 @@ async function startSingleUserWebServer(options: WebServerOptions): Promise<Runn
     return task;
   }
 
+  async function consumeCalibration(file: string, entry: { promise: Promise<void>; controller: AbortController; consumers: number }, signal: AbortSignal): Promise<void> {
+    entry.consumers++;
+    let abort: () => void = () => {};
+    try {
+      await Promise.race([entry.promise, new Promise<never>((_, reject) => {
+        abort = () => reject(signal.reason);
+        signal.addEventListener("abort", abort, { once: true });
+        if (signal.aborted) abort();
+      })]);
+      signal.throwIfAborted();
+    } finally {
+      signal.removeEventListener("abort", abort);
+      if (--entry.consumers === 0) {
+        if (coordinateCalibrations.get(file) === entry) coordinateCalibrations.delete(file);
+        entry.controller.abort();
+      }
+    }
+  }
+
   /**
-   * 坐标校准放到后台：首屏先返回文件里的坐标和虚线路线，
-   * 校准完成后再写回并让前端刷新标记，避免几十次高德 POI 请求阻塞地图打开。
+   * 首屏直接显示已有坐标；校准随路线请求执行，支持断开取消。
+   * 校准改变行程版本时让前端重新加载，避免旧标记与新路线混用。
    */
   function calibratePlanCoordinates(
     file: string,
     raw: string,
     amap: AmapClient,
+    signal: AbortSignal,
   ): Promise<void> {
+    signal.throwIfAborted();
     const existing = coordinateCalibrations.get(file);
-    if (existing !== undefined) return existing;
+    if (existing !== undefined) return consumeCalibration(file, existing, signal);
+    const controller = new AbortController();
+    amap = amap.withSignal(controller.signal);
     const task = (async () => {
       let status: "ready" | "unavailable" = "unavailable";
       try {
@@ -206,17 +236,16 @@ async function startSingleUserWebServer(options: WebServerOptions): Promise<Runn
           status = "ready";
           return;
         }
-        const corrected = await resolvePlanCoordinates(plan, async (query, near) => {
-          const pois = await amap.poiSearch(query, near, 50_000);
-          const first = pois[0];
-          if (first === undefined) return null;
-          const [longitude, latitude] = first.location.split(",").map(Number);
-          if (Number.isNaN(latitude) || Number.isNaN(longitude)) return null;
-          return { latitude, longitude };
-        });
+        const corrected = await resolvePlanCoordinates(plan, async (query, near, context) => {
+          if (!context.city && !context.poiId) return null;
+          const pois = context.city ? await amap.poiSearchInCity(query, context.city, 25) : await amap.poiSearch(query, near, 50_000);
+          return selectCalibrationPoi(pois, query, near, context);
+        }, { signal: controller.signal });
+        controller.signal.throwIfAborted();
         if (corrected.resolved === 0) return;
         // 后台任务期间行程可能被编辑：只有文件仍是本次读取的内容时才写回。
         const snapshot = await updateSavedItinerary(rootDir, String(plan.title), async (current) => {
+          controller.signal.throwIfAborted();
           if (JSON.stringify(current) !== JSON.stringify(parseItinerary(plan))) throw new Error("校准期间行程已更新");
           Object.assign(current, corrected.plan);
         });
@@ -226,36 +255,26 @@ async function startSingleUserWebServer(options: WebServerOptions): Promise<Runn
         // 高德配额/网络失败时保留原坐标，地图仍可正常使用
       } finally {
         // 失败也是一次明确结果；否则接口会永久返回 pending，前端无法结束等待。
-        coordinateCalibrationResults.set(file, { raw, status });
+        if (!controller.signal.aborted) coordinateCalibrationResults.set(file, { raw, status, at: Date.now() });
       }
     })();
-    coordinateCalibrations.set(file, task);
+    const entry = { promise: task, controller, consumers: 0 };
+    coordinateCalibrations.set(file, entry);
     backgroundTasks.add(task);
     void task.then(
       () => {
-        coordinateCalibrations.delete(file);
+        if (coordinateCalibrations.get(file) === entry) coordinateCalibrations.delete(file);
         backgroundTasks.delete(task);
       },
       () => {
-        coordinateCalibrations.delete(file);
+        if (coordinateCalibrations.get(file) === entry) coordinateCalibrations.delete(file);
         backgroundTasks.delete(task);
       },
     );
-    return task;
+    return consumeCalibration(file, entry, signal);
   }
   // 摘要走被压缩会话自己的 Provider：后台会话触发压缩时不能借当前选中会话的模型
-  const summarize = (session: Session, messages: readonly Message[]): Promise<string> => {
-    const transcript = renderHistoryForSummary(messages, session.travelState);
-    return sessionProvider(session).chat([
-      {
-        role: "user",
-        content:
-          "请把以下对话历史压缩成可继续执行任务的摘要。保留用户约束、日期、预算、已访问地点及类型、" +
-          "已保存行程、质量问题和 artifact 路径；删除寒暄、重复工具过程和不影响后续决策的原文。" +
-          `直接输出摘要本身：\n\n${transcript}`,
-      },
-    ]);
-  };
+  const summarize = (session: Session, messages: readonly Message[]) => summarizeContext(sessionProvider(session), session, messages, undefined, executionInputLimit(config));
   const sessionService = new SessionService(store);
 
   // 启动时恢复最近更新的已落盘会话：否则每次重启当前位都是全新空白会话，
@@ -307,6 +326,9 @@ async function startSingleUserWebServer(options: WebServerOptions): Promise<Runn
     };
     return {
       summarize,
+      maxPromptTokens: executionInputLimit(config),
+      createBudget: (session) => createExecutionBudget(session, config, resolvePricing(config, profiles.find((p) => p.id === (session.modelProfile ?? defaultProfileId)))),
+      onRequestContext: (sessionId, metrics) => write(sessionId, { type: "context", ...metrics }),
       archive: (session, epoch) => store.archive(session, epoch),
       // 工具轮次按行程需求动态给：7 天游的搜索+口碑+餐饮+逐日保存+校验远超默认 30 轮；
       // 需求单还没落盘的首轮按会话文本里的天数估算
@@ -365,6 +387,7 @@ async function startSingleUserWebServer(options: WebServerOptions): Promise<Runn
     provider = options.providerOverride ?? createProvider({ config, systemPrompt: buildSystemPrompt(currentSession) });
     runtime = new AgentRuntime(buildRuntimeOptions());
     for (const session of sessions) {
+      session.setTravelMode(travelMode);
       runtime.registerAgent(session.id, new ChatAgent(session, sessionProvider(session), registry, rootDir));
     }
     if (sessions.length === 0) registerSessionAgent(currentSession);
@@ -749,14 +772,29 @@ async function startSingleUserWebServer(options: WebServerOptions): Promise<Runn
             }
             let quality: { status: string; score: number } | null = null;
             try {
-              const raw = JSON.parse(
-                await readFile(join(rootDir, "plans", name.replace(/\.json$/, ".quality.json")), "utf8"),
-              ) as { status?: string; score?: number };
-              if (typeof raw.status === "string" && typeof raw.score === "number") {
-                quality = { status: raw.status, score: raw.score };
+              const parsed = parseItinerary(data);
+              const signature = qualitySourceSignature(parsed);
+              const memory = qualityCache.get(name);
+              quality = memory?.signature === signature ? memory.quality : null;
+              if (quality === null) try {
+                const raw = JSON.parse(
+                  await readFile(join(rootDir, "plans", name.replace(/\.json$/, ".quality.json")), "utf8"),
+                ) as { status?: string; score?: number; score_version?: string; source_signature?: string };
+                if (raw.score_version === QUALITY_SCORING_VERSION && raw.source_signature === signature && typeof raw.status === "string" && typeof raw.score === "number") {
+                  quality = { status: raw.status, score: raw.score };
+                }
+              } catch {
+                quality = null;
+              }
+              if (quality === null) {
+                try { const fresh = validateItinerary(parsed); quality = { status: fresh.status, score: fresh.score }; } catch { /* 损坏的旧行程保留无报告状态。 */ }
+              }
+              if (quality !== null) {
+                qualityCache.set(name, { signature, quality });
+                if (qualityCache.size > 200) qualityCache.delete(qualityCache.keys().next().value!);
               }
             } catch {
-              quality = null;
+              // 结构不兼容的旧行程仍显示在列表中，供用户查看或删除。
             }
             plans.push({ title: data.title ?? name, days: data.days?.length ?? 0, file: name, updatedAt, quality });
           } catch {
@@ -801,77 +839,72 @@ async function startSingleUserWebServer(options: WebServerOptions): Promise<Runn
       }
       return;
     }
-    // 行程路线几何：逐段调高德路径规划（<1.5km 步行、其余驾车）。
-    // 支持 ?day=N 按天加载，避免多日行程必须等所有路段完成后才显示首日路线。
+    // 路线与行程快照绑定；断开连接会取消上游排队、网络请求和坐标校准。
     if (req.method === "GET" && url.pathname.startsWith("/api/plans/") && url.pathname.endsWith("/routes")) {
       const title = decodeURIComponent(url.pathname.slice("/api/plans/".length, -"/routes".length));
       const safe = title.replace(/[^\p{Script=Han}a-zA-Z0-9-_ ]/gu, "").trim().replace(/\s+/g, "-");
       const file = join(rootDir, "plans", `${safe}.json`);
-      const amap = getAmapClient();
-      if (amap === undefined) {
-        stateJson(res, { available: false, days: [] });
-        return;
-      }
       const rawDay = url.searchParams.get("day");
       const requestedDay = rawDay === null ? null : Number(rawDay);
       if (requestedDay !== null && (!Number.isInteger(requestedDay) || requestedDay < 1)) {
-        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
-        res.end(JSON.stringify({ error: "day 必须是正整数" }));
-        return;
+        res.writeHead(400); res.end(JSON.stringify({ error: "day 必须是正整数" })); return;
       }
+      const controller = new AbortController();
+      const disconnect = () => { if (!res.writableEnded) controller.abort(); };
+      res.once("close", disconnect);
       try {
-        // 前端先渲染本地坐标，再请求路线；这里等后台校准结束，保证路径与最终标记一致。
-        await coordinateCalibrations.get(file);
-        const plan = JSON.parse(await readFile(file, "utf8")) as {
-          days?: Array<{ items?: Array<{ type?: string; location?: { latitude?: number; longitude?: number; crs?: CoordinateSystem; source?: string } }> }>;
-        };
-        const allDays = plan.days ?? [];
-        if (requestedDay !== null && requestedDay > allDays.length) {
-          res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
-          res.end(JSON.stringify({ error: `行程「${title}」没有第 ${requestedDay} 天` }));
-          return;
+        const amap = getAmapClient();
+        let raw = await readFile(file, "utf8");
+        const expected = url.searchParams.get("version");
+        if (expected !== null && expected !== planRouteVersion(raw)) {
+          res.writeHead(409); res.end(JSON.stringify({ error: "行程已更新，请重新加载" })); return;
         }
-        const selectedDays = requestedDay === null
-          ? allDays.map((day, index) => ({ day, number: index + 1 }))
-          : [{ day: allDays[requestedDay - 1], number: requestedDay }];
-        const days: Array<{ day: number; legs: Array<Record<string, unknown>> }> = [];
-        for (const { day, number } of selectedDays) {
-          // 路线 = 当天实际停留点：景点 + 住宿/休息（住处是每天的起点终点），按条目顺序连接；
-          // 餐厅是"沿途候选"（每餐多个），塞进路线会多绕路，只做标记
-          const located = (day.items ?? []).filter(
-            (item) =>
-              (item.type === "visit" || item.type === "accommodation" || item.type === "rest") &&
-              item.location?.latitude !== undefined &&
-              item.location?.longitude !== undefined,
-          );
-          const legs: Array<Record<string, unknown>> = [];
-          for (let i = 1; i < located.length; i++) {
-            const fromLocation = located[i - 1].location!;
-            const from = convertPoint({ latitude: fromLocation.latitude!, longitude: fromLocation.longitude!, crs: fromLocation.crs ?? (fromLocation.source === "osm" ? "wgs84" : "gcj02") }, "gcj02");
-            const toLocation = located[i].location!;
-            const to = convertPoint({ latitude: toLocation.latitude!, longitude: toLocation.longitude!, crs: toLocation.crs ?? (toLocation.source === "osm" ? "wgs84" : "gcj02") }, "gcj02");
-            const straightM = haversineKm(from.latitude, from.longitude, to.latitude, to.longitude) * 1000;
-            // 同一点位的相邻条目（如多个"回酒店"休息块）：不请求路径规划，直连占位保持段数对齐
-            if (straightM < 25) {
-              legs.push({ mode: "walking", straight: true });
-              continue;
-            }
-            const mode = straightM <= 1500 ? "walking" : "driving";
-            const geometry = await cachedLegRoute(amap, routeCache, mode, from, to);
-            legs.push(
-              geometry === null
-                ? { mode, straight: true }
-                : { mode, distanceM: geometry.distanceM, durationSec: geometry.durationSec, points: geometry.points },
-            );
+        const initialPlan = JSON.parse(raw) as PlanJson;
+        const previous = coordinateCalibrationResults.get(file);
+        if (amap && unresolvedCoordinateCount(initialPlan) > 0 && (previous?.raw !== raw || Date.now() - previous.at >= 10 * 60_000)) {
+          await calibratePlanCoordinates(file, raw, amap, controller.signal);
+          raw = await readFile(file, "utf8");
+        }
+        controller.signal.throwIfAborted();
+        const version = planRouteVersion(raw);
+        if (expected !== null && expected !== version) {
+          res.writeHead(409); res.end(JSON.stringify({ error: "行程已更新，请重新加载", version })); return;
+        }
+        const plan = JSON.parse(raw) as MapPlan;
+        if (!Array.isArray(plan.days)) throw new Error("行程 days 无效");
+        if (requestedDay !== null && requestedDay > plan.days.length) {
+          res.writeHead(404); res.end(JSON.stringify({ error: `行程「${title}」没有第 ${requestedDay} 天` })); return;
+        }
+        const evidence = new TravelEvidenceStore(rootDir);
+        await evidence.load();
+        const retryRaw = url.searchParams.get("retry_legs");
+        let onlyLegs: Set<number> | undefined;
+        if (retryRaw !== null) {
+          const indices = retryRaw === "" ? [] : retryRaw.split(",").map(Number);
+          if (requestedDay === null || indices.some((i) => !Number.isInteger(i) || i < 0 || i >= mapLegCount(plan, requestedDay))) {
+            res.writeHead(400); res.end(JSON.stringify({ error: "retry_legs 必须是指定日期的路段下标" })); return;
           }
-          days.push({ day: number, legs });
+          onlyLegs = new Set(indices);
         }
+        const numbers = requestedDay === null ? plan.days.map((_, i) => i + 1) : [requestedDay];
+        const days = [];
+        for (const number of numbers) days.push(await planRoutes.day(plan, number, amap, evidence, controller.signal, onlyLegs));
+        controller.signal.throwIfAborted();
         await routeCache.persist();
-        stateJson(res, { available: true, days });
-      } catch {
-        res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
-        res.end(JSON.stringify({ error: `未找到行程「${title}」` }));
-      }
+        controller.signal.throwIfAborted();
+        if (planRouteVersion(await readFile(file, "utf8")) !== version) {
+          res.writeHead(409); res.end(JSON.stringify({ error: "路线计算期间行程已更新，请重新加载" })); return;
+        }
+        stateJson(res, { available: true, version, days,
+          coordinateCalibration: unresolvedCoordinateCount(plan as PlanJson) === 0 ? "ready" : "unavailable",
+        });
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          const missing = (error as NodeJS.ErrnoException).code === "ENOENT";
+          res.writeHead(missing ? 404 : 500, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ error: missing ? `未找到行程「${title}」` : "行程路线读取失败，请检查行程文件或稍后重试" }));
+        }
+      } finally { res.removeListener("close", disconnect); }
       return;
     }
     // 行程条目编辑：附近推荐（高德 POI；服务端缓存 10 分钟，编辑面板反复打开不重复消耗配额）
@@ -941,16 +974,10 @@ async function startSingleUserWebServer(options: WebServerOptions): Promise<Runn
         const amap = getAmapClient();
         const unresolved = unresolvedCoordinateCount(plan);
         const previous = coordinateCalibrationResults.get(file);
-        const knownStatus = previous?.raw === raw ? previous.status : null;
-        if (
-          amap !== undefined &&
-          unresolved > 0 &&
-          knownStatus === null
-        ) {
-          void calibratePlanCoordinates(file, raw, amap);
-        }
+        const knownStatus = previous?.raw === raw && Date.now() - previous.at < 10 * 60_000 ? previous.status : null;
         stateJson(res, {
           ...plan,
+          routeVersion: planRouteVersion(raw),
           days: plan.days?.map((day) => ({ ...day, items: day.items?.map((item) => {
             const location = item.location;
             if (location?.latitude === undefined || location.longitude === undefined) return item;
@@ -1572,50 +1599,4 @@ async function listSubdirs(target: string): Promise<Array<{ name: string; path: 
   return dirs
     .filter((dir): dir is { name: string; path: string; hidden: boolean } => dir !== null)
     .sort((a, b) => Number(a.hidden) - Number(b.hidden) || a.name.localeCompare(b.name, "zh"));
-}
-
-/** 多个按天请求可能同时碰到同一路段：合并为一次上游调用 */
-const legRouteInflight = new Map<string, Promise<RouteGeometry | null>>();
-
-async function cachedLegRoute(
-  amap: AmapClient,
-  cache: RouteCache,
-  mode: "walking" | "driving",
-  from: GeoPoint,
-  to: GeoPoint,
-): Promise<RouteGeometry | null> {
-  const key =
-    `${mode}|${from.latitude.toFixed(5)},${from.longitude.toFixed(5)}` +
-    `|${to.latitude.toFixed(5)},${to.longitude.toFixed(5)}`;
-  const hit = cache.get(key);
-  if (hit !== undefined) return hit;
-  const existing = legRouteInflight.get(key);
-  if (existing !== undefined) return existing;
-
-  const task = requestLegRoute(amap, mode, from, to);
-  legRouteInflight.set(key, task);
-  void task.then(
-    (value) => {
-      if (value !== null) cache.set(key, value);
-      legRouteInflight.delete(key);
-    },
-    () => legRouteInflight.delete(key),
-  );
-  return task;
-}
-
-/** AmapClient 内部有全局 250ms 闸门；这里只在失败时退避重试一次 */
-async function requestLegRoute(
-  amap: AmapClient,
-  mode: "walking" | "driving",
-  from: GeoPoint,
-  to: GeoPoint,
-  attempt = 0,
-): Promise<RouteGeometry | null> {
-  const result = await amap.directionRoute(mode, from, to).catch(() => null);
-  if (result === null && attempt === 0) {
-    await new Promise((resolve) => setTimeout(resolve, 400));
-    return requestLegRoute(amap, mode, from, to, 1);
-  }
-  return result;
 }

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -49,6 +49,50 @@ test("read_file: 单次字符预算有界，并返回可直接续读的 offset",
 
   const next = await tool.execute({ path: "long.txt", offset: nextOffset }, { workspace });
   assert.match(next, new RegExp(`^long\\.txt[^\\n]*\\n${nextOffset}\\tline-${nextOffset}-`));
+});
+
+test("read_file: 超长单行返回字节续读位置，中文、BOM 与 emoji 跨页无遗漏", async (t) => {
+  const workspace = await tempWorkspace();
+  t.after(() => rm(workspace, { recursive: true, force: true }));
+  const body = "\uFEFF" + "中文😀x".repeat(650) + "末尾";
+  await writeFile(join(workspace, "single.json"), body);
+  const tool = createReadFileTool(workspace);
+  const first = await tool.execute({ path: "single.json" });
+  const firstText = first.split("\n")[1]!.replace(/^1\t/, "").replace(/…$/, "");
+  let next = Number(/byte_offset=(\d+)/.exec(first)?.[1]);
+  assert.ok(next > 0); assert.equal(Buffer.byteLength(firstText), next);
+  let reconstructed = firstText;
+  while (next < Buffer.byteLength(body)) {
+    const page = await tool.execute({ path: "single.json", byte_offset: next, byte_limit: 97 });
+    reconstructed += page.slice(page.indexOf("\n") + 1, page.lastIndexOf("\n"));
+    const cursor = /【续读】byte_offset=(\d+)/.exec(page);
+    if (!cursor) break;
+    assert.ok(Number(cursor[1]) > next); next = Number(cursor[1]);
+  }
+  assert.equal(reconstructed, body);
+  const bomPage = await tool.execute({ path: "single.json", byte_offset: 0, byte_limit: 4 });
+  assert.equal(bomPage.split("\n")[1], "\uFEFF");
+  assert.match(bomPage, /byte_offset=3/);
+});
+
+test("read_file: 字节分页校验参数、字符边界、EOF 和取消信号", async (t) => {
+  const workspace = await tempWorkspace();
+  t.after(() => rm(workspace, { recursive: true, force: true }));
+  await writeFile(join(workspace, "unicode.txt"), "中😀文");
+  const tool = createReadFileTool(workspace);
+  for (const byte_offset of [-1, 0.5, NaN, Infinity, 11]) {
+    await assert.rejects(tool.execute({ path: "unicode.txt", byte_offset }), /byte_offset/);
+  }
+  for (const byte_limit of [0, 3, 2001, NaN, Infinity]) {
+    await assert.rejects(tool.execute({ path: "unicode.txt", byte_offset: 0, byte_limit }), /byte_limit/);
+  }
+  await assert.rejects(tool.execute({ path: "unicode.txt", byte_offset: 0, offset: 1 }), /混用/);
+  await assert.rejects(tool.execute({ path: "unicode.txt", byte_offset: 1 }), /字符边界/);
+  assert.match(await tool.execute({ path: "unicode.txt", byte_offset: 10 }), /文件结束/);
+  const controller = new AbortController(); controller.abort();
+  await assert.rejects(tool.execute({ path: "unicode.txt", byte_offset: 0 }, { workspace, signal: controller.signal }), /abort/i);
+  await writeFile(join(workspace, "broken.txt"), Buffer.from([0xff]));
+  await assert.rejects(tool.execute({ path: "broken.txt", byte_offset: 0 }), /UTF-8/);
 });
 
 test("read_file: 越界/不存在/目录/超 2MB 的场景", async () => {

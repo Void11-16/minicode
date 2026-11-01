@@ -1,3 +1,4 @@
+import type { RequestContextRecord } from "../core/usage.ts";
 import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { requireSafeCaseId, type EvalCase, type EvalSuite } from "./cases.ts";
@@ -53,6 +54,7 @@ export interface EvalBudgetExtension {
 }
 
 export interface EvalAttemptTelemetry {
+  readonly request_contexts?: readonly RequestContextRecord[];
   readonly duration_ms: number;
   readonly tool_rounds: number;
   readonly tool_calls: number;

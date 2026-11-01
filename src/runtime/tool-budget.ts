@@ -1,10 +1,12 @@
+import { opportunityScore } from "../tools/itinerary-assessment.ts";
 import { evidenceId } from "../tools/travel-evidence.ts";
 import { readFile } from "node:fs/promises";
 import { relative, resolve, sep } from "node:path";
 import type { Session } from "../core/session.ts";
-import { parseItinerary } from "../tools/itinerary-schema.ts";
+import { parseItinerary, type Itinerary } from "../tools/itinerary-schema.ts";
 import {
   validateItinerary,
+  expectedDaysFromTitle,
   type ItineraryQualityReport,
   type QualityIssue,
   type QualityIssueLevel,
@@ -42,7 +44,7 @@ export interface ToolBudgetAssessment {
     /** strict 验收只拦截 P0/P1；P2 提示会拉低完整度分，但不阻断交付 */
     readonly strict_pass?: boolean;
     readonly meal_note_count: number;
-    /** 假设可修复项全部清零、只保留外部不确定项时的理论上限 */
+    /** 按同一评分口径移除当前可修复问题后的估算分；未补齐日期仍保留完整度折减 */
     readonly potential_score?: number;
     readonly unavailable_reason?: string;
   };
@@ -114,9 +116,10 @@ export async function assessToolBudget(options: BudgetAssessmentOptions): Promis
   }
 
   let report: ItineraryQualityReport;
+  let itinerary: Itinerary;
   let fingerprint: string;
   try {
-    const itinerary = parseItinerary(JSON.parse(await readFile(saved.path, "utf8")));
+    itinerary = parseItinerary(JSON.parse(await readFile(saved.path, "utf8")));
     const { revision: _revision, ...content } = itinerary;
     fingerprint = evidenceId(content);
     report = validateItinerary(
@@ -151,13 +154,7 @@ export async function assessToolBudget(options: BudgetAssessmentOptions): Promis
   const uncertain = report.issues.filter((item) => adviceFor(item).category === "uncertain");
   const fixable = items.filter((item) => item.category !== "uncertain");
   const strictPass = report.issue_count.P0 === 0 && report.issue_count.P1 === 0;
-  const potentialScore = Math.max(
-    0,
-    100 -
-      uncertain.filter((item) => item.level === "P0").length * 20 -
-      uncertain.filter((item) => item.level === "P1").length * 7 -
-      uncertain.filter((item) => item.level === "P2").length * 2,
-  );
+  const potentialScore = opportunityScore(itinerary, uncertain, itinerary.constraints?.expected_days ?? expectedDaysFromTitle(itinerary.title)).score;
   const unchanged = options.previousFingerprint !== undefined && fingerprint === options.previousFingerprint;
   const canImprove = !strictPass && !unchanged && fixable.length > 0;
   const summary = unchanged ? "上次追加后已保存内容没有变化，停止自动续期；请先处理未完成的质量项。" : repairSummary(report, fixable.length, uncertain.length, canImprove, potentialScore);

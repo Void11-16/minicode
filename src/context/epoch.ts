@@ -177,9 +177,10 @@ export class ContextEpochManager {
     this.archive = options.archive;
   }
 
-  async maybeCompact(session: Session): Promise<CompactInfo | null> {
+  async maybeCompact(session: Session, requestTokens?: number): Promise<CompactInfo | null> {
     // 使用会话自身的校准系数（由真实 usage 持续修正）
-    const tokensBefore = session.estimateHistoryTokens();
+    const historyTokens = session.estimateHistoryTokens();
+    const tokensBefore = requestTokens ?? historyTokens;
     if (tokensBefore <= this.maxPromptTokens) {
       return null;
     }
@@ -222,7 +223,7 @@ export class ContextEpochManager {
       epoch: nextEpoch,
       removedMessages: oldMessages.length,
       tokensBefore,
-      tokensAfter: session.estimateHistoryTokens(),
+      tokensAfter: session.estimateHistoryTokens() + Math.max(0, tokensBefore - historyTokens),
     };
   }
 }

@@ -175,7 +175,7 @@ test("模型直接调用未加载工具时自动激活并执行", async () => {
   assert.equal(seenTools[1].some((tool) => tool.name === "get_weather"), true);
 });
 
-test("交付闭环工具常驻，不需要先激活", async () => {
+test("旅行模式中交付闭环工具常驻，不需要先激活", async () => {
   const seenTools: ToolDefinition[][] = [];
   const provider: ChatProvider = {
     name: "always-active-read-file",
@@ -197,7 +197,9 @@ test("交付闭环工具常驻，不需要先激活", async () => {
     .register(createLoadItineraryTool())
     .register(createValidateItineraryTool())
     .register(makeTool("search_attractions", "discovery", ["景点"]));
-  const agent = new ChatAgent(new Session("always-active-read-file"), provider, registry);
+  const session = new Session("always-active-read-file");
+  session.setTravelMode(true);
+  const agent = new ChatAgent(session, provider, registry);
 
   assert.equal(await agent.run("读取归档"), "已读取");
   assert.deepEqual(

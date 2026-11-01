@@ -363,6 +363,71 @@ test("Agent 工具循环: 工具出错时错误回传给模型", async () => {
   assert.equal(events[1].type, "tool_error");
 });
 
+test("Agent: onEvent 抛错不影响工具执行", async () => {
+  // 第一次让模型调用工具，第二次给最终回答
+  const provider = new ScriptedProvider([
+    {
+      type: "tool_calls",
+      toolCalls: [
+        {
+          id: "call_1",
+          name: "test_tool",
+          arguments: "{}"
+        }
+      ]
+    },
+    {
+      type: "text",
+      content: "工具已执行成功"
+    }
+  ]);
+
+  const registry = new ToolRegistry();
+
+  let toolExecuted = false;
+
+  registry.register({
+    name: "test_tool",
+    description: "测试工具",
+    parameters: {
+      type: "object",
+      properties: {}
+    },
+    execute: async () => {
+      toolExecuted = true;
+      return "西湖、灵隐寺";
+    }
+  });
+
+  const agent = new ChatAgent(
+    new Session(),
+    provider,
+    registry
+  );
+
+  // 故意让事件回调失败
+  const onEvent = () => {
+    throw new Error("日志系统故障");
+  };
+
+  const reply = await agent.run("测试", {
+    onEvent
+  });
+
+  // 验证工具确实执行
+  assert.equal(toolExecuted, true);
+
+  // 验证工具结果没有被日志错误覆盖
+  assert.match(
+    agent.history[2].content,
+    /西湖、灵隐寺/
+  );
+
+  // 验证 Agent 仍能完成任务
+  assert.equal(reply, "工具已执行成功");
+});
+
+
 test("Agent 工具循环: 历史压缩占位符被拒绝，不会触发真实工具", async () => {
   const provider = new ScriptedProvider([
     {

@@ -1,3 +1,4 @@
+import { expectedDaysFromTitle } from "../tools/itinerary-validator.ts";
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { EvalCase } from "./cases.ts";
@@ -26,11 +27,11 @@ export async function loadPlanSamples(dir: string): Promise<PlanSample[]> {
 /** 只读标题和天数做展示；行程正文由 evaluateFile 解析，解析失败会记进报告 */
 async function readPlanMeta(id: string, path: string): Promise<EvalCase> {
   try {
-    const raw = JSON.parse(await readFile(path, "utf8")) as { title?: unknown; days?: unknown };
+    const raw = JSON.parse(await readFile(path, "utf8")) as { title?: unknown; days?: unknown; constraints?: { expected_days?: unknown } };
     return {
       id,
       title: typeof raw.title === "string" && raw.title !== "" ? raw.title : id,
-      days: Array.isArray(raw.days) ? raw.days.length : 0,
+      days: typeof raw.constraints?.expected_days === "number" && Number.isInteger(raw.constraints.expected_days) && raw.constraints.expected_days > 0 ? raw.constraints.expected_days : (typeof raw.title === "string" ? expectedDaysFromTitle(raw.title) : undefined) ?? (Array.isArray(raw.days) ? raw.days.length : 0),
       // 真实产出不参与生成，request 只在 --live 使用
       request: "",
     };

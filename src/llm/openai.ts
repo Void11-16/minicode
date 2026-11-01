@@ -114,6 +114,12 @@ export class OpenAICompatProvider implements ChatProvider {
     this.name = `openai:${this.model}`;
   }
 
+  async chatWithUsage(history: readonly PromptMessage[], signal?: AbortSignal): Promise<LLMResult> {
+    const result = await this.requestCore(history, { signal });
+    if (result.content === "" || result.toolCalls.length > 0) throw new Error("无工具请求未返回有效文本");
+    return { type: "text", content: result.content, ...(result.usage === undefined ? {} : { usage: result.usage }) };
+  }
+
   async chat(history: readonly PromptMessage[]): Promise<string> {
     const result = await this.requestCore(history, {});
     if (result.content === "") {

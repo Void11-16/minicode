@@ -1,6 +1,6 @@
-import { hasRecommendationEvidence } from "../tools/recommendation-policy.ts";
-import { timeToMinutes } from "../tools/itinerary-schema.ts";
-import type { Itinerary, ItineraryItem, MealSubtype } from "../tools/itinerary-schema.ts";
+import { timelineGaps } from "../tools/itinerary-timeline.ts";
+import { recommendationCoverage, recommendationPolicy } from "../tools/recommendation-policy.ts";
+import type { Itinerary, ItineraryItem } from "../tools/itinerary-schema.ts";
 import { totalCostPerPerson, validateItinerary } from "../tools/itinerary-validator.ts";
 import type { ItineraryQualityStatus } from "../tools/itinerary-validator.ts";
 
@@ -19,6 +19,7 @@ export interface ItineraryEvalMetrics {
   // 硬校验（来自 validate_itinerary）
   readonly status: ItineraryQualityStatus;
   readonly score: number;
+  readonly scoreVersion?: string;
   readonly issueCounts: { readonly P0: number; readonly P1: number; readonly P2: number };
   readonly issueCodes: readonly string[];
   // 结构
@@ -55,22 +56,21 @@ const ROUTE_ISSUE_CODES = new Set([
   "long-transport",
   "remote-day-overpacked",
 ]);
-/** 午餐/晚餐候选数达标线（与校验器 few-meal-options 的口径一致） */
-const MEAL_SLOT_TARGET = 4;
 
 export function computeItineraryMetrics(
   itinerary: Itinerary,
   expectations: EvalExpectations,
 ): ItineraryEvalMetrics {
-  const validated = { ...itinerary, constraints: { ...itinerary.constraints, expected_days: expectations.expectedDays, recommendations: true } };
+  const validated = { ...itinerary, constraints: { ...itinerary.constraints, expected_days: expectations.expectedDays } };
   const report = validateItinerary(validated, expectations.budgetPerPersonYuan === undefined ? {} : { budget_per_person_yuan: expectations.budgetPerPersonYuan });
   const expectedDayMismatch = itinerary.days.length !== expectations.expectedDays;
   const issueCounts = report.issue_count;
   const score = report.score;
 
-  const slots = collectMealSlots(itinerary);
-  const meals = itinerary.days.flatMap((day) => day.items.filter((item) => item.type === "meal"));
-  const evidenceCount = meals.filter(hasRecommendationEvidence).length;
+  const coverage = recommendationCoverage(itinerary);
+  const slots = coverage.slots;
+  const meals = coverage.meals;
+  const target = recommendationPolicy(itinerary).minCandidates;
   const visitCount = itinerary.days.reduce(
     (sum, day) => sum + day.items.filter((item) => item.type === "visit").length,
     0,
@@ -78,16 +78,13 @@ export function computeItineraryMetrics(
   const cost = totalCostPerPerson(itinerary);
 
   return {
-    status:
-      issueCounts.P0 > 0 ? "invalid"
-      : issueCounts.P1 > 0 ? "needs_revision"
-      : issueCounts.P2 > 0 ? "needs_confirmation"
-      : "ok",
+    status: report.status,
     score,
+    scoreVersion: report.score_version,
     issueCounts,
     issueCodes: [
       ...new Set([
-        ...report.issues.map((issue) => issue.code),
+        ...report.issues.flatMap((issue) => [issue.code, ...(issue.related_codes ?? [])]),
         ...(expectedDayMismatch ? ["expected-day-count-mismatch"] : []),
       ]),
     ],
@@ -95,17 +92,17 @@ export function computeItineraryMetrics(
     expectedDays: expectations.expectedDays,
     visitsPerDay: itinerary.days.length === 0 ? 0 : visitCount / itinerary.days.length,
     mealCandidates: meals.length,
-    mealEvidenceRate: meals.length === 0 ? 0 : evidenceCount / meals.length,
-    mealSlotsTotal: itinerary.days.length * 2,
-    mealSlotsOk: slots.filter((slot) => slot.items.length >= MEAL_SLOT_TARGET).length,
-    mealSlotsUnderStocked: slots.filter((slot) => slot.items.length > 0 && slot.items.length < MEAL_SLOT_TARGET).length,
-    mealSlotsMissing: Math.max(0, itinerary.days.length * 2 - slots.length),
+    mealEvidenceRate: coverage.evidenceRate,
+    mealSlotsTotal: slots.length,
+    mealSlotsOk: slots.filter((slot) => slot.items.length >= target).length,
+    mealSlotsUnderStocked: slots.filter((slot) => slot.items.length > 0 && slot.items.length < target).length,
+    mealSlotsMissing: slots.filter((slot) => slot.items.length === 0).length,
     cuisineDiversityAvg: average(slots.map((slot) => distinctCuisines(slot.items))),
     priceTierAvg: average(slots.map((slot) => distinctPriceTiers(slot.items))),
     localSpecialtySlots: slots.filter((slot) =>
       slot.items.some((item) => LOCAL_SPECIALTY.test(`${item.cuisine ?? ""} ${item.note ?? ""}`)),
     ).length,
-    maxGapMinutes: maxTimelineGapMinutes(itinerary),
+    maxGapMinutes: Math.max(0, ...itinerary.days.flatMap(timelineGaps).map((gap) => gap.minutes)),
     routeIssueCount: report.issues.filter((issue) => ROUTE_ISSUE_CODES.has(issue.code)).length,
     costPerPerson: cost,
     budgetPerPersonYuan: expectations.budgetPerPersonYuan,
@@ -114,23 +111,6 @@ export function computeItineraryMetrics(
         ? undefined
         : cost / expectations.budgetPerPersonYuan,
   };
-}
-
-interface MealSlot {
-  readonly subtype: MealSubtype;
-  readonly items: ItineraryItem[];
-}
-
-/** 只统计午餐/晚餐时段（早餐/小吃是补充，不作为候充足度口径） */
-function collectMealSlots(itinerary: Itinerary): MealSlot[] {
-  const slots: MealSlot[] = [];
-  for (const day of itinerary.days) {
-    for (const subtype of ["lunch", "dinner"] as const) {
-      const items = day.items.filter((item) => item.type === "meal" && item.subtype === subtype);
-      if (items.length > 0) slots.push({ subtype, items });
-    }
-  }
-  return slots;
 }
 
 /** 价位档：经济 ≤50 / 中档 ≤120 / 高档 >120，返回该时段覆盖的档数 */
@@ -149,29 +129,6 @@ function distinctCuisines(items: readonly ItineraryItem[]): number {
     if (item.cuisine !== undefined && item.cuisine !== "") cuisines.add(item.cuisine);
   }
   return cuisines.size;
-}
-
-/** 相邻定时条目之间的最大空档（分钟）；重叠（负值）不计入 */
-function maxTimelineGapMinutes(itinerary: Itinerary): number {
-  let maxGap = 0;
-  for (const day of itinerary.days) {
-    const timed = day.items
-      .filter((item): item is ItineraryItem & { time: string } => item.time !== undefined)
-      .sort((a, b) => timeToMinutes(a.time) - timeToMinutes(b.time));
-    for (let index = 1; index < timed.length; index++) {
-      const previousEnd = endMinutes(timed[index - 1]);
-      if (previousEnd === undefined) continue;
-      const gap = timeToMinutes(timed[index].time) - previousEnd;
-      if (gap > maxGap) maxGap = gap;
-    }
-  }
-  return maxGap;
-}
-
-function endMinutes(item: ItineraryItem & { time: string }): number | undefined {
-  if (item.end_time !== undefined) return timeToMinutes(item.end_time);
-  if (item.planned_duration_min !== undefined) return timeToMinutes(item.time) + item.planned_duration_min;
-  return undefined;
 }
 
 function average(values: readonly number[]): number {
