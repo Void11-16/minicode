@@ -1,3 +1,6 @@
+/** 实际进入工具实现不等于 HTTP 请求数：实现内部可能缓存或查询多个数据源。 */
+export interface ToolQueryStats { executed: number; cacheHits: number; blocked: number }
+
 /** 单次 API 请求的 token 用量（来自 LLM 响应的 usage 字段） */
 export interface TokenUsage {
   readonly promptTokens: number;

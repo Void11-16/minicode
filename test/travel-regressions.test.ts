@@ -211,8 +211,8 @@ test("路线耗时/方式/端点绑定；41 分钟不能排成 30 分钟", async
   assert.equal(bound.route_verified, true);
   const itinerary = parseItinerary({ title: "路线回归", constraints: { require_routes: true }, days: [{ items: [bound] }] });
   assert.ok(validateItinerary(itinerary).issues.some((issue) => issue.code === "route-duration-too-short"));
-  assert.equal(store.bind({ ...item, to: "别处", route_evidence_id: route.id }, "北京").route_verified, undefined);
-  assert.equal(store.bind({ ...item, transport_mode: "walking" }, "北京").route_verified, undefined);
+  assert.equal(store.bind({ ...item, to: "别处", route_evidence_id: route.id }, "北京").route_verified, false);
+  assert.equal(store.bind({ ...item, transport_mode: "walking" }, "北京").route_verified, false);
   await store.observeRoutes([{ city: "北京", from: "天坛", to: "前门", mode: "walking", duration_min: 45, distance_km: 3, estimated: true }]);
   assert.equal(store.bind({ ...item, transport_mode: "walking" }, "北京").route_verified, false);
 });
@@ -243,9 +243,9 @@ test("手填全年开放不能代替工具闭馆证据，只有明确提及本�
   await registry.execute("save_itinerary", JSON.stringify(raw));
   const read = async () => parseItinerary(JSON.parse(await readFile(join(root, "plans/闭馆证据回归.json"), "utf8")));
   assert.ok(validateItinerary(await read()).issues.some((issue) => issue.code === "unverified-closure"));
-  await registry.evidence.observeClosure("北京", "回归博物馆", "其他博物馆每周一闭馆");
+  await registry.evidence.observeClosure("北京", "回归博物馆", [{ title: "其他博物馆", snippet: "其他博物馆每周一闭馆" }]);
   assert.equal(registry.evidence.bind({ id: "p", name: "回归博物馆", type: "visit" }, "北京").closure_verified, false);
-  await registry.evidence.observeClosure("北京", "回归博物馆", "回归博物馆每周一闭馆，出行前请复核官方公告");
+  await registry.evidence.observeClosure("北京", "回归博物馆", [{ title: "回归博物馆", snippet: "回归博物馆每周一闭馆，出行前请复核官方公告" }]);
   await registry.execute("save_itinerary", JSON.stringify(raw));
   assert.deepEqual((await read()).days[0].items[0].closed_on, ["Monday"]);
   assert.equal(validateItinerary(await read()).issues.some((issue) => issue.code === "unverified-closure"), false);
@@ -254,7 +254,7 @@ test("手填全年开放不能代替工具闭馆证据，只有明确提及本�
 test("先查闭馆规则再查地点，闭馆依据仍能跨重启及重复搜索复用", async () => {
   const root = await temp();
   const store = new TravelEvidenceStore(root);
-  await store.observeClosure("北京", "先查规则博物馆", "先查规则博物馆每周天闭馆");
+  await store.observeClosure("北京", "先查规则博物馆", [{ title: "先查规则博物馆", snippet: "先查规则博物馆每周天闭馆" }]);
   const restored = new TravelEvidenceStore(root);
   await restored.load();
   await restored.observePlaces("search_attractions", "北京", "高德数据\n1. 先查规则博物馆 | 坐标 39.9000,116.4000");

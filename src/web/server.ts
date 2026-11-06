@@ -1,5 +1,6 @@
 import { validateItinerary, qualitySourceSignature } from "../tools/itinerary-validator.ts";
 import { QUALITY_SCORING_VERSION } from "../tools/itinerary-assessment.ts";
+import { ToolValidationError, toolErrorPayload } from "../core/tool-error.ts";
 import { createExecutionBudget, executionInputLimit } from "../core/execution-budget.ts";
 import { summarizeContext } from "../context/summarize.ts";
 import { createServer, request as httpRequest, type IncomingMessage, type Server, type ServerResponse } from "node:http";
@@ -14,7 +15,7 @@ import {
   parseCookie,
   type AuthUser,
 } from "../auth/auth-store.ts";
-import { updateSavedItinerary } from "../tools/itinerary.ts";
+import { updateSavedItinerary, itineraryWithBriefRequirements } from "../tools/itinerary.ts";
 import { parseItinerary } from "../tools/itinerary-schema.ts";
 import { convertPoint } from "../tools/coordinates.ts";
 import type { ItinerarySnapshot } from "../tools/tool.ts";
@@ -527,9 +528,9 @@ async function startSingleUserWebServer(options: WebServerOptions): Promise<Runn
       await route(req, res);
     } catch (error) {
       if (!res.headersSent) {
-        res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+        res.writeHead(error instanceof ToolValidationError ? 400 : 500, { "Content-Type": "application/json; charset=utf-8" });
       }
-      res.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
+      res.end(JSON.stringify(toolErrorPayload(error)));
     }
   });
 
@@ -772,7 +773,7 @@ async function startSingleUserWebServer(options: WebServerOptions): Promise<Runn
             }
             let quality: { status: string; score: number } | null = null;
             try {
-              const parsed = parseItinerary(data);
+              const parsed = await itineraryWithBriefRequirements(rootDir, parseItinerary(data));
               const signature = qualitySourceSignature(parsed);
               const memory = qualityCache.get(name);
               quality = memory?.signature === signature ? memory.quality : null;
@@ -935,7 +936,7 @@ async function startSingleUserWebServer(options: WebServerOptions): Promise<Runn
         stateJson(res, { ok: true, ...result });
       } catch (error) {
         res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
-        res.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
+        res.end(JSON.stringify(toolErrorPayload(error)));
       }
       return;
     }

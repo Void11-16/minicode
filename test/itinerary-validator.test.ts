@@ -319,7 +319,7 @@ test("validate_itinerary: 发现时间冲突、餐段、交通与预算问题", 
   assert.match(renderQualityReport(report), /餐饮参考/);
 });
 
-test("validate_itinerary: 远郊日叠加市区景点触发结构性 P1", () => {
+test("validate_itinerary: 远郊日叠加市区景点保留节奏建议，不按距离直接阻断", () => {
   const itinerary = parseItinerary({
     title: "北京远郊一日",
     days: [{
@@ -405,10 +405,10 @@ test("validate_itinerary: 远郊日叠加市区景点触发结构性 P1", () => 
   assert.equal(report.issue_count.P0, 0);
   const overpacked = report.issues.find((item) => item.code === "remote-day-overpacked");
   assert.ok(overpacked !== undefined, "远郊主景点后回市区再游览应触发远郊日模板");
-  assert.equal(overpacked.level, "P1");
+  assert.equal(overpacked.level, "P2");
   assert.match(overpacked.message, /只保留 1 个主景点/);
   assert.match(overpacked.message, /最远相距约 58 公里/);
-  assert.equal(report.issue_count.P1, 1);
+  assert.equal(report.issue_count.P1, 0);
 });
 
 test("validate_itinerary: 远郊日只保留主景点可正常通过", () => {

@@ -17,7 +17,9 @@ test("评测套件: representative 固定三个代表案例并可按标签筛选
   const suite = await loadSuite(join(import.meta.dirname, "..", "eval", "suites", "representative.json"));
 
   assert.equal(suite.id, "representative");
-  assert.equal(suite.version, "2026.10");
+  assert.equal(suite.version, "2026.11");
+  assert.deepEqual(suite.cases[0]!.must_visit, ["故宫", "国家博物馆"]);
+  assert.deepEqual(suite.cases[1]!.must_visit, ["故宫", "国家博物馆", "天坛", "颐和园", "长城"]);
   assert.deepEqual(
     suite.cases.map((item) => item.id),
     ["beijing-3d-museum", "beijing-5d-first-trip", "chifeng-7d-remote"],

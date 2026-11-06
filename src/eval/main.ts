@@ -254,6 +254,7 @@ async function evaluateFile(evalCase: EvalCase, path: string, run: RunMeta | nul
     const itinerary = parseItinerary(JSON.parse(await readFile(path, "utf8")));
     const metrics = computeItineraryMetrics(itinerary, {
       expectedDays: evalCase.days,
+      mustVisit: evalCase.must_visit,
       ...(evalCase.budget_per_person_yuan === undefined
         ? {}
         : { budgetPerPersonYuan: evalCase.budget_per_person_yuan }),

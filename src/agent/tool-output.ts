@@ -72,6 +72,12 @@ async function compactToolResult(
     };
   }
 
+  // 分页结果再次归档会形成“读取归档的归档”循环。未完整交付的页由Agent撤销已读状态。
+  if (result.toolName === "read_file") return {
+    callId: result.callId, truncated: true,
+    text: `${header} truncated=true\n本次读取页未完整交付，未计为已读。请对原path减小byte_limit或limit重试；不要读取read_file结果的归档。`.slice(0, maxChars),
+  };
+
   const absoluteArtifact = artifactFile(options.workspace, options.sessionId, result, kind);
   let artifactPath: string | undefined;
   try {
@@ -88,7 +94,7 @@ async function compactToolResult(
       ? `${header} truncated=true artifact=unavailable\n` +
         "原文落盘失败；以下仅保留按重要字段裁剪的预览，请不要假设存在完整归档：\n"
       : `${header} truncated=true artifact=${artifactPath}\n` +
-        "原文已落盘；完整数据用 read_file(path=artifact, byte_offset=0) 分页读取，按返回游标续读。以下仅为预览：\n";
+        (result.toolName === "load_itinerary" ? "原文已落盘；局部修改优先load_itinerary(day,item_ids)只取所需条目。确需归档时先看已读游标索引再续读。以下仅为预览：\n" : "原文已落盘；确需完整数据时先看已读索引，按返回游标续读；未读归档才用byte_offset=0。以下仅为预览：\n");
   const text = prefix.length >= maxChars
     ? prefix.slice(0, Math.max(0, maxChars))
     : `${prefix}${structuredToolPreview(kind, result.output, maxChars - prefix.length) ?? preview(result.output, maxChars - prefix.length)}`;

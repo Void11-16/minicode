@@ -2959,8 +2959,8 @@
         const data = await response.json();
         if (!response.ok) throw new Error(data.error ?? `HTTP ${response.status}`);
         authEnabled = data.authEnabled !== false;
-        if (authEnabled && data.authenticated === true && data.user !== null) {
-          currentUser = data.user;
+        if (!authEnabled || (data.authenticated === true && data.user !== null)) {
+          currentUser = authEnabled ? data.user : null;
           await initializeApp();
           return;
         }
@@ -3327,6 +3327,12 @@
         sub.className = "ms-sub";
         sub.textContent = summary.join(" · ");
         head.appendChild(sub);
+        if (currentItinerary.outline?.length) {
+          const outline = document.createElement("div");
+          outline.className = "ms-hint";
+          outline.textContent = "粗排预留（未完善的安排不计完成）：" + currentItinerary.outline.map((day) => `${day.date} ${(day.visits ?? []).map((visit) => visit.name).join("、") || "待重新分配"}`).join("；");
+          head.appendChild(outline);
+        }
         const hint = document.createElement("div");
         hint.className = "ms-hint";
         hint.textContent = "📷 点小图看大图 · ✏️ 替换/调序 · 点卡片定位标记";
@@ -3395,6 +3401,7 @@
 
             const duration = durationLabel(item);
             const chips = [
+              item.activity ?? "",
               item.time === undefined ? "时间待定" : `${item.time}${item.end_time !== undefined ? `–${item.end_time}` : ""}`,
               duration,
               typeof item.cost_per_person === "number" ? `人均 ¥${item.cost_per_person}` : "",
@@ -3410,6 +3417,32 @@
               chipRow.appendChild(chip);
             }
             body.appendChild(chipRow);
+            if (item.opening_hours || item.opening_sessions?.length || item.closed_dates?.length) {
+              const opening = document.createElement("div");
+              opening.className = "tl-note";
+              const parts = [];
+              if (item.opening_hours) {
+                const hours = item.opening_hours;
+                parts.push(`场地开放：${(hours.intervals ?? [hours]).map(r => r.opens === "00:00" && r.closes === "24:00" ? "全天" : `${r.opens}—${r.closes}`).join("、")}`);
+                if (hours.last_admission) parts.push(`最后入场：${hours.last_admission}`);
+              }
+              if (item.opening_sessions?.length) parts.push(`表演场次：${item.opening_sessions.map(s => s.ends ? `${s.starts}—${s.ends}` : s.starts).join("、")}`);
+              if (item.closed_dates?.length) parts.push(`公告闭馆：${item.closed_dates.join("、")}`);
+              opening.textContent = parts.join("；");
+              body.appendChild(opening);
+            }
+            if (item.parent_visit?.name) {
+              const parent = document.createElement("div");
+              parent.className = "tl-note";
+              parent.textContent = `所属主景区：${item.parent_visit.name}`;
+              body.appendChild(parent);
+            }
+            if (item.recommended_spots?.length) {
+              const spots = document.createElement("div");
+              spots.className = "tl-note";
+              spots.textContent = `内部推荐：${item.recommended_spots.join("、")}`;
+              body.appendChild(spots);
+            }
             if (item.note !== undefined && item.note !== "") {
               const note = document.createElement("div");
               note.className = "tl-note";

@@ -1,5 +1,6 @@
+import type { ToolDiagnostics } from "./tool-diagnostics.ts";
 import type { Session } from "./session.ts";
-import { estimateCostYuan } from "./usage.ts";
+import { estimateCostYuan, type ToolQueryStats } from "./usage.ts";
 import type { AppConfig } from "../config/config.ts";
 import { resolvePricing, type ModelPricing } from "../config/pricing.ts";
 
@@ -8,7 +9,20 @@ export interface CumulativeToolBudget {
   calls: number;
   tokens: number;
   stagnantRounds?: number;
+  deliveryStagnantRounds?: number;
+  deliveryProgress?: { days: number; P0: number; P1: number; passed: number };
+  observedEvidence?: Set<string>;
+  allowAdvisoryReviews?: boolean;
+  redundantCalls?: number;
+  redundantRounds?: number;
+  readVersions?: Map<string, string>;
+  queryAttempts?: Map<string, number>;
+  queryStats?: ToolQueryStats;
+  diagnostics?: ToolDiagnostics;
   blockedReason?: string;
+  blockedKind?: "dependency" | "no_progress";
+  /** 每个未完成阶段最多一次定向恢复，所有硬预算及已读/查询记录继续累计。 */
+  coverageRecoveries?: Set<string>;
   readonly maxRounds: number;
   readonly maxCalls: number;
   readonly maxTokens?: number;

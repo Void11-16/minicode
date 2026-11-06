@@ -8,6 +8,7 @@ import { updateSavedItinerary } from "../tools/itinerary.ts";
 import { planFileFor } from "../tools/plan-files.ts";
 import { TravelEvidenceStore } from "../tools/travel-evidence.ts";
 import type { ToolContext } from "../tools/tool.ts";
+import { groupScenicAttractions } from "../tools/scenic-area.ts";
 
 /**
  * 行程条目编辑（地图界面的"改行程"）：
@@ -28,6 +29,7 @@ interface PlanItem {
   end_time?: string;
   planned_duration_min?: number;
   opening_hours?: unknown;
+  parent_visit?: { name: string; evidence_id?: string };
   closed_on?: unknown;
   location?: { crs?: "gcj02" | "wgs84"; name?: string; address?: string; latitude?: number; longitude?: number; source?: string };
   [key: string]: unknown;
@@ -47,6 +49,7 @@ interface PlanFile {
 }
 
 export interface SuggestOption {
+  readonly recommended_spots?: readonly string[];
   readonly name: string;
   readonly address?: string;
   readonly latitude: number;
@@ -117,10 +120,13 @@ export async function suggestPlanOptions(
   for (const other of plan.days ?? []) {
     for (const entry of other.items ?? []) {
       if (entry.type === item.type && entry.name !== undefined) existingNames.push(entry.name);
+      if (entry.type === "visit" && entry.id !== item.id && entry.parent_visit) existingNames.push(entry.parent_visit.name);
     }
   }
 
-  const pois = kind === "visit" ? await searchVisitPois(center) : await amap.poiSearch("美食", center, 2000, "050000");
+  const scenicGroups = kind === "visit" ? groupScenicAttractions((await searchVisitPois(center)).map((poi) => ({ poi }))) : [];
+  const pois = kind === "visit" ? scenicGroups.map((group) => group.main.poi) : await amap.poiSearch("美食", center, 2000, "050000");
+  const recommendations = new Map(scenicGroups.map((group) => [group.main.poi.name, group.spots]));
   const options = rankPoisByRating(pois, center)
     .filter((entry) => !existingNames.some((existing) => namesOverlap(existing, entry.poi.name)))
     .flatMap((entry) => {
@@ -134,6 +140,7 @@ export async function suggestPlanOptions(
           latitude: located.latitude,
           longitude: located.longitude,
           rating: entry.rating,
+          ...(recommendations.get(entry.poi.name)?.length ? { recommended_spots: recommendations.get(entry.poi.name)!.slice(0, 10) } : {}),
           cost: kind === "meal" ? poiCost(entry.poi) : undefined,
           cuisine: kind === "meal" ? poiCuisine(entry.poi) : undefined,
           distanceKm: entry.distanceKm,
@@ -145,7 +152,7 @@ export async function suggestPlanOptions(
   const destination = String((plan.constraints as Record<string, unknown> | undefined)?.destination ?? "");
   const evidence = new TravelEvidenceStore(rootDir);
   await evidence.observePlaces(kind === "meal" ? "search_restaurants" : "search_attractions", destination,
-    options.map((o) => `${o.name} | 坐标 ${o.latitude.toFixed(6)},${o.longitude.toFixed(6)}${o.rating === undefined ? "" : ` | 评分 ${o.rating}`}${o.cost === undefined ? "" : ` | 人均 ¥${o.cost}`}`).join("\n"), "amap");
+    options.map((o) => `${o.name} | 坐标 ${o.latitude.toFixed(6)},${o.longitude.toFixed(6)}${o.rating === undefined ? "" : ` | 评分 ${o.rating}`}${o.cost === undefined ? "" : ` | 人均 ¥${o.cost}`}${o.recommended_spots?.length ? ` | 内部推荐 ${JSON.stringify(o.recommended_spots)}` : ""}`).join("\n"), "amap", scenicGroups.map((group) => ({ parent: group.main.poi.name, children: group.spots })));
   const value: SuggestResult = { available: true, options };
   suggestCache.set(cacheKey, { value, expiresAt: Date.now() + SUGGEST_TTL_MS });
   return value;
@@ -223,7 +230,7 @@ async function replaceItem(item: PlanItem, replacement: Record<string, unknown>,
   }
 
   // 地点身份变化后，旧证据、评分、价格和预约信息全部失效。
-  for (const field of ["evidence_id", "evidence_verified", "evidence_observed_at", "closure_verified", "rating", "cost_per_person", "ticket_price_per_person", "room_price_per_night", "opening_hours", "closed_on", "reservation_required", "cuisine"]) delete item[field];
+  for (const field of ["recommended_spots", "closure_policy_version", "evidence_id", "evidence_verified", "evidence_observed_at", "closure_verified", "rating", "cost_per_person", "ticket_price_per_person", "room_price_per_night", "opening_hours", "closed_on", "reservation_required", "cuisine"]) delete item[field];
   item.name = name;
   item.location = {
     name,

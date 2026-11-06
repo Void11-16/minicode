@@ -8,6 +8,7 @@ import { loadProfile, mergeProfiles } from "./profiles.ts";
 export const DEFAULT_TRAVELERS = 2;
 
 export interface TravelBrief {
+  readonly durationDays?: number;
   readonly title: string;
   readonly destination: string;
   readonly startDate?: string;
@@ -17,6 +18,7 @@ export interface TravelBrief {
   readonly budgetTotalYuan?: number;
   readonly budgetPerMealYuan?: number;
   readonly accommodation?: string;
+  readonly allowHotelChanges?: boolean;
   readonly pace?: string;
   readonly mustVisit?: readonly string[];
   readonly avoid?: readonly string[];
@@ -60,6 +62,7 @@ export function createSaveTravelBriefTool(rootDir: string = process.cwd()): Tool
     parameters: {
       type: "object",
       properties: {
+        durationDays: { type: "integer", minimum: 1, maximum: 90, description: "用户要求的旅行天数；日期未定也填写，不能凭局部粗排缩短总天数" },
         title: { type: "string", description: "行程标题，例如：杭州两日游" },
         destination: { type: "string", description: "目的地城市/区域，例如：杭州" },
         startDate: { type: "string", description: "开始日期 YYYY-MM-DD，可选" },
@@ -68,6 +71,7 @@ export function createSaveTravelBriefTool(rootDir: string = process.cwd()): Tool
         travelers: { type: "number", description: "出行人数，可选" },
         budgetTotalYuan: { type: "number", description: "总预算（元），可选" },
         budgetPerMealYuan: { type: "number", description: "单餐人均预算（元），可选" },
+        allowHotelChanges: { type: "boolean", description: "默认false全程同一家酒店；仅用户明确允许或需要转场时为true。不能为缩短单段交通擅自换酒店。" },
         accommodation: { type: "string", description: "住宿偏好描述，可选" },
         pace: { type: "string", description: "行程节奏：慢 / 适中 / 紧凑，可选" },
         mustVisit: { type: "array", items: { type: "string" }, description: "必去地点列表，可选" },
@@ -135,6 +139,7 @@ export function createLoadTravelBriefTool(rootDir: string = process.cwd()): Tool
 }
 
 function parseBrief(args: Record<string, unknown>): TravelBrief {
+  if (args.durationDays !== undefined && (!Number.isInteger(args.durationDays) || Number(args.durationDays) < 1 || Number(args.durationDays) > 90)) throw new Error("durationDays需要1—90整数");
   const title = requireString(args, "title");
   const destination = requireString(args, "destination");
 
@@ -144,6 +149,11 @@ function parseBrief(args: Record<string, unknown>): TravelBrief {
       throw new Error(`${key} 需要 YYYY-MM-DD 格式`);
     }
   }
+  if (args.durationDays !== undefined && args.startDate !== undefined && args.endDate !== undefined) {
+    const span = (Date.parse(String(args.endDate)) - Date.parse(String(args.startDate))) / 86400000 + 1;
+    if (!Number.isFinite(span) || span !== args.durationDays) throw new Error("durationDays与起止日期跨度不一致，请先统一用户要求的天数和日期");
+  }
+  if (args.allowHotelChanges !== undefined && typeof args.allowHotelChanges !== "boolean") throw new Error("allowHotelChanges 必须为布尔值");
   for (const key of ["travelers", "roomCount"]) {
     if (args[key] !== undefined && !Number.isSafeInteger(args[key])) throw new Error(`${key} 需要正整数`);
   }
@@ -167,6 +177,7 @@ function parseBrief(args: Record<string, unknown>): TravelBrief {
   }
 
   return {
+    ...(args.durationDays === undefined ? {} : { durationDays: Number(args.durationDays) }),
     title,
     destination,
     ...(typeof args.startDate === "string" ? { startDate: args.startDate } : {}),
@@ -175,6 +186,7 @@ function parseBrief(args: Record<string, unknown>): TravelBrief {
     ...(typeof args.travelers === "number" ? { travelers: args.travelers } : {}),
     ...(typeof args.budgetTotalYuan === "number" ? { budgetTotalYuan: args.budgetTotalYuan } : {}),
     ...(typeof args.budgetPerMealYuan === "number" ? { budgetPerMealYuan: args.budgetPerMealYuan } : {}),
+    ...(typeof args.allowHotelChanges === "boolean" ? { allowHotelChanges: args.allowHotelChanges } : {}),
     ...(typeof args.accommodation === "string" ? { accommodation: args.accommodation } : {}),
     ...(typeof args.pace === "string" ? { pace: args.pace } : {}),
     ...(Array.isArray(args.mustVisit) ? { mustVisit: args.mustVisit as string[] } : {}),
@@ -188,8 +200,10 @@ function parseBrief(args: Record<string, unknown>): TravelBrief {
 function summarizeBrief(brief: TravelBrief): string {
   const rows: Array<[string, string]> = [
     ["目的地", brief.destination],
+    ["天数", brief.durationDays === undefined ? "按日期/标题确定" : `${brief.durationDays}天`],
     ["日期", brief.startDate === undefined ? "未定（按当天推算）" : `${brief.startDate} 至 ${brief.endDate ?? brief.startDate}`],
     ["人数", brief.travelers === undefined ? "未填（按 2 人）" : `${brief.travelers} 人`],
+    ["酒店策略", brief.allowHotelChanges === true ? "用户允许换酒店" : "默认全程同一家酒店"],
     ["房数", brief.roomCount === undefined ? `未填（按每间 2 人，${Math.ceil((brief.travelers ?? DEFAULT_TRAVELERS) / 2)} 间）` : `${brief.roomCount} 间`],
     ["总预算", brief.budgetTotalYuan === undefined ? "未填" : `¥${brief.budgetTotalYuan}`],
     ["单餐人均", brief.budgetPerMealYuan === undefined ? "未填（不限制）" : `¥${brief.budgetPerMealYuan}`],

@@ -1,3 +1,5 @@
+import { parseItinerary } from "../tools/itinerary-schema.ts";
+import { summarizeToolDiagnostics, type ToolDiagnosticsSummary } from "./tool-diagnostics.ts";
 import { createExecutionBudget, executionInputLimit } from "../core/execution-budget.ts";
 import { createHash } from "node:crypto";
 import { copyFile, readFile, writeFile } from "node:fs/promises";
@@ -15,6 +17,7 @@ import { ModelProfileStore, type ModelProfile } from "../config/models.ts";
 import { resolvePricing } from "../config/pricing.ts";
 import { Session } from "../core/session.ts";
 import { estimateCostYuan } from "../core/usage.ts";
+import type { ToolQueryStats } from "../core/usage.ts";
 import { createProvider, createProviderFromProfile } from "../llm/factory.ts";
 import type { ChatProvider } from "../llm/provider.ts";
 import { assessToolBudget, budgetGuidance } from "../runtime/tool-budget.ts";
@@ -469,8 +472,10 @@ async function runAttempt(input: {
         }
         if (event.type === "tool_error") input.onProgress?.(`  ✗ ${event.name}: ${event.error ?? ""}`);
       },
-      onCheckpoint: () =>
+      onCheckpoint: async () => { await Promise.all([
         writeFile(join(input.directory, "session.json"), `${JSON.stringify(session.toData(), null, 2)}\n`, "utf8"),
+        writeFile(join(input.directory, "tool-diagnostics.json"), `${JSON.stringify(cumulativeBudget.diagnostics?.snapshot() ?? null, null, 2)}\n`, "utf8"),
+      ]); },
     });
 
   let itineraryPath: string | null = null;
@@ -536,6 +541,13 @@ async function runAttempt(input: {
     }
   }
 
+  let diagnosticItinerary = null;
+  if (itineraryPath !== null) {
+    try { diagnosticItinerary = parseItinerary(JSON.parse(await readFile(itineraryPath, "utf8"))); } catch { /* 读取失败不能虚报证据未采用，引用率保留未知。 */ }
+  }
+  const diagnosticSummary = cumulativeBudget.diagnostics === undefined ? undefined : summarizeToolDiagnostics(cumulativeBudget.diagnostics, diagnosticItinerary);
+  try { await writeFile(join(input.directory, "tool-diagnostics.json"), `${JSON.stringify(cumulativeBudget.diagnostics?.snapshot() ?? null, null, 2)}\n`, "utf8"); }
+  catch { input.onProgress?.("  诊断明细落盘失败；保留内存摘要，不改变行程验收结果。"); }
   const durationMs = Date.now() - input.started;
   const telemetry = attemptTelemetry(
     session,
@@ -548,6 +560,8 @@ async function runAttempt(input: {
     currentRounds,
     extensions,
     cumulativeBudget.maxRounds,
+    cumulativeBudget.queryStats,
+    diagnosticSummary,
   );
   const failure = caught ?? failureFor(input.evalCase, itineraryPath, metrics);
   const status = statusForFailure(failure);
@@ -604,6 +618,7 @@ async function loadAttemptItinerary(
     JSON.parse(await readFile(path, "utf8")) as Parameters<typeof computeItineraryMetrics>[0],
     {
       expectedDays: evalCase.days,
+      mustVisit: evalCase.must_visit,
       ...(evalCase.budget_per_person_yuan === undefined
         ? {}
         : { budgetPerPersonYuan: evalCase.budget_per_person_yuan }),
@@ -698,8 +713,12 @@ function attemptTelemetry(
   currentRounds: number,
   extensions: readonly EvalBudgetExtension[],
   ceilingRounds: number,
+  queryStats?: ToolQueryStats,
+  diagnosticSummary?: ToolDiagnosticsSummary,
 ): EvalAttemptTelemetry {
   return {
+    ...(diagnosticSummary === undefined ? {} : { tool_diagnostics: diagnosticSummary }),
+    ...(queryStats === undefined ? {} : { query_stats: { executed: queryStats.executed, cache_hits: queryStats.cacheHits, blocked: queryStats.blocked } }),
     duration_ms: durationMs,
     request_contexts: session.requestContexts,
     tool_rounds: toolRounds,

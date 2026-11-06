@@ -55,8 +55,8 @@ test("plan_day_routes: 公交/地铁逐段规划并标记过长路段", async ()
 
   assert.match(output, /灵隐寺 → 西湖: 公交\/地铁约 45 分钟/);
   assert.match(output, /步行660米 → 地铁3号线 → 7路，步行共 660 米/);
-  assert.match(output, /西湖 → 河坊街: 公交\/地铁约 80 分钟 ⚠️过长/);
-  assert.match(output, /约 2 小时 5 分钟，其中 1 段过长/);
+  assert.match(output, /西湖 → 河坊街: 公交\/地铁约 80 分钟 ⚠️长通勤/);
+  assert.match(output, /约 2 小时 5 分钟，其中 1 段长通勤/);
 
   setAmapKey(undefined);
 });
@@ -129,8 +129,8 @@ test("plan_day_routes: 检测到远郊移动时返回专用规划模板", async 
   });
 
   assert.match(output, /远郊日模板已触发/);
-  assert.match(output, /只安排 1 个远郊主景点/);
-  assert.match(output, /返回市区后不再增加景点/);
+  assert.match(output, /建议以 1 个远郊主景点为主/);
+  assert.match(output, /返回市区后是否加点以真实交通/);
 
   setAmapKey(undefined);
 });

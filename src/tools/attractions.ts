@@ -1,3 +1,6 @@
+import { groupScenicAttractions, scenicParentName } from "./scenic-area.ts";
+import { requiredVisitMatches } from "./required-visits.ts";
+import { attractionMinRating } from "./travel-query.ts";
 import { cancellableFetch } from "./travel-request.ts";
 import { convertPoint } from "./coordinates.ts";
 import type { Tool } from "./tool.ts";
@@ -23,10 +26,12 @@ export function createAttractionsTool(fetchFn: FetchLike = fetch): Tool {
   return {
     name: "search_attractions",
     recordsPlaceEvidence: true,
+    usesDiscoveryPool: true,
     description:
       "搜索某个地点周边的旅游景点和博物馆/纪念馆，返回名称、类型、距离、真实评分（高德数据）与坐标（纬度,经度，可直接写入行程 location）。" +
-      "结果按评分降序排列，同一景区的子景点最多保留 2 个避免淹没列表。" +
-      "先用它获取候选景点列表，再用 get_place_reviews 查口碑做筛选。",
+      "结果按评分排序，主子点归并为一个主景区，内部推荐不计独立景点；只有子点时需核验主景区。" +
+      "优先复用已查候选；30分钟内同中心缩小半径、改limit/评分会在原始候选池本地重筛，不新增联网。只有范围外的新区域或缺少明确实体才补查，不能靠微调参数获取新候选。" +
+      "只有入选点缺关键资料时才补 get_place_reviews，不逐个查全部候选。",
     parameters: {
       type: "object",
       properties: {
@@ -34,6 +39,7 @@ export function createAttractionsTool(fetchFn: FetchLike = fetch): Tool {
         location: { type: "string", description: "中心城市或地点名，例如：杭州" },
         radius_km: { type: "number", description: "搜索半径（公里），默认 10，最大 50" },
         limit: { type: "number", description: "返回数量上限，默认 10" },
+        min_rating: { type: "number", minimum: 0, maximum: 5, description: "高德评分筛选，旅游模式默认4.3，0放宽；指定地点和必去不受限制，OSM无评分不筛。" },
       },
       required: ["location", "city"],
     },
@@ -48,16 +54,23 @@ export function createAttractionsTool(fetchFn: FetchLike = fetch): Tool {
         1, 50,
       );
       const limit = Math.floor(clamp(typeof args.limit === "number" ? args.limit : 10, 1, 30));
+      const minRating = attractionMinRating(args.min_rating);
 
-      const geo: GeoResult | null = await geocodeLocation(location, request, city, ctx?.signal);
+      await ctx?.evidence?.load();
+      let pool = args.refresh === true ? undefined : ctx?.evidence?.discoveryPools.find("search_attractions", city, location, "", radiusKm);
+      const geo: GeoResult | null = pool?.geo ?? await geocodeLocation(location, request, city, ctx?.signal);
       if (geo === null) {
+        ctx?.beforeDiscoveryFetch?.();
         return `未找到地点: ${location}`;
       }
 
       // 高德主源（配置了 Key 时）：国内 POI 全 + 真实评分
       const amap = getAmapClient(ctx?.signal);
       let amapError: string | undefined;
-      if (amap !== undefined && geo.country === "中国") {
+      if (!pool && args.refresh !== true) pool = ctx?.evidence?.discoveryPools.find("search_attractions", city, location, "", radiusKm, geo);
+      if ((amap !== undefined || pool !== undefined) && geo.country === "中国") {
+        if (pool) ctx?.onDiscoveryReuse?.(pool.observed_at);
+        else ctx?.beforeDiscoveryFetch?.(geo);
         try {
           // 实测: 高德 POI 的 distance 字段经常为空，用坐标自算
           // 双路搜索：①"旅游景点"+风景名胜类（110000）；②"博物馆|纪念馆"不限类型。
@@ -65,37 +78,39 @@ export function createAttractionsTool(fetchFn: FetchLike = fetch): Tool {
           // 曾导致杜立特行动纪念馆等 4.2 分场馆被 3.4 分的景区子景点淹没
           const center = { ...convertPoint(geo, "gcj02") };
           // 博物馆搜索失败要可见（配额/网络），否则博物馆不可见会静默回归
-          let museumError: string | undefined;
-          const [scenicPois, museumPois] = await Promise.all([
-            amap.poiSearch("旅游景点", center, radiusKm * 1000, "110000", 2),
-            amap.poiSearch("博物馆|纪念馆", center, radiusKm * 1000).catch((error: unknown) => {
-              museumError = error instanceof Error ? error.message : String(error);
-              return [];
-            }),
-          ]);
-          const seenIds = new Set<string>();
-          const pois = [...scenicPois, ...museumPois].filter((poi) => {
-            const key = poi.id ?? poi.name;
-            if (seenIds.has(key)) return false;
-            seenIds.add(key);
-            return true;
-          });
+          let warning = pool?.warning ?? "";
+          let pois = pool?.pois;
+          const observedAt = pool?.observed_at ?? Date.now();
+          if (!pois) {
+            const [scenicPois, museumPois] = await Promise.all([
+              amap!.poiSearch("旅游景点", center, radiusKm * 1000, "110000", 2),
+              amap!.poiSearch("博物馆|纪念馆", center, radiusKm * 1000).catch((error: unknown) => {
+                warning = `⚠️ 博物馆/纪念馆搜索失败（${error instanceof Error ? error.message : String(error)}），以上仅为风景名胜结果`;
+                return [];
+              }),
+            ]);
+            const seenIds = new Set<string>();
+            pois = [...scenicPois, ...museumPois].filter((poi) => {
+              const key = poi.id ?? poi.name;
+              if (seenIds.has(key)) return false;
+              seenIds.add(key);
+              return true;
+            });
+            if (pois.length) await ctx?.evidence?.observeDiscoveryPool({ tool: "search_attractions", city, center: location, geo, keyword: "", radius_km: radiusKm, pois, warning, observed_at: observedAt });
+          }
           if (pois.length > 0) {
             // 评分降序（无评分沉底），同分按距离：避免 API 原始顺序把高分景点挤出前列
             const enriched = rankPoisByRating(pois, center).filter((entry) => entry.distanceKm <= radiusKm && poiCityVerdict(entry.poi, city) === "match");
 
-            // 同景区子景点折叠：一个景区（如"衢州古城文化旅游区"）的子 POI 最多保留 2 个高分项
-            const perArea = new Map<string, number>();
-            const selected = enriched.filter((entry) => {
-              const area = areaKeyOf(entry.poi.name);
-              if (area === "") return true;
-              const count = perArea.get(area) ?? 0;
-              if (count >= 2) return false;
-              perArea.set(area, count + 1);
-              return true;
-            });
-
-            const lines = selected.slice(0, limit).map((entry, index) => {
+            const ranked = groupScenicAttractions(enriched).sort((a, b) => (b.main.rating ?? -1) - (a.main.rating ?? -1) || a.main.distanceKm - b.main.distanceKm);
+            const requested = [location, ...(ctx?.brief?.mustVisit ?? [])];
+            const matchesRequest = (name: string) => requested.some((target) => requiredVisitMatches(target, name, city));
+            const isRequested = ({ main, spots }: typeof ranked[number]) => matchesRequest(main.poi.name) || spots.some(matchesRequest);
+            const filtered = minRating === undefined || minRating === 0 ? ranked : ranked.filter((entry) => isRequested(entry) || (entry.main.rating ?? -1) >= minRating);
+            const fallback = ranked.length > 0 && filtered.length === 0;
+            const selected = (fallback ? ranked.slice(0, 3) : filtered).slice().sort((a, b) =>
+              minRating ? Number(isRequested(b)) - Number(isRequested(a)) : 0).slice(0, limit);
+            const lines = selected.map(({ main: entry, spots }, index) => {
               const parts = [`${index + 1}. ${entry.poi.name}`, entry.poi.type ?? ""];
               parts.push(`距中心 ${entry.distanceKm.toFixed(1)} 公里`);
               if (entry.rating !== undefined) parts.push(`评分 ${entry.rating.toFixed(1)}`);
@@ -104,20 +119,27 @@ export function createAttractionsTool(fetchFn: FetchLike = fetch): Tool {
               const coords = formatPoiCoordinates(entry.poi.location);
               if (coords !== null) parts.push(`坐标 ${coords}`);
               if (entry.poi.address !== undefined && entry.poi.address !== "") parts.push(entry.poi.address);
+              if (spots.length > 0) {
+                const recommended = minRating ? [...spots].sort((a, b) => Number(matchesRequest(b)) - Number(matchesRequest(a))) : spots;
+                parts.push(`内部推荐 ${JSON.stringify(recommended.slice(0, 5))}`);
+              }
+              const parent = scenicParentName(entry.poi.name);
+              if (parent !== undefined) parts.push(`所属主景区 ${parent}（主 POI 未返回，选用前需核验，不独立凑景点数）`);
               return parts.filter(Boolean).join(" | ");
             });
-            const collapsedNote = enriched.length - selected.length > 0
-              ? `，已合并 ${enriched.length - selected.length} 个同景区子景点`
+            const collapsedNote = enriched.length - ranked.length > 0
+              ? `，已合并 ${enriched.length - ranked.length} 个同景区子景点`
               : "";
-            const warning = museumError === undefined
-              ? ""
-              : `\n⚠️ 博物馆/纪念馆搜索失败（${museumError}），以上仅为风景名胜结果`;
+            const filterNote = minRating
+              ? fallback ? `，没有 ${minRating} 分及以上候选，展示少量备选` : `，指定地点优先，其余至少 ${minRating} 分`
+              : "";
             const output = (
-              `${geo.name} 周边景点（按评分排序，前 ${Math.min(limit, selected.length)} / 共 ${enriched.length} 个，高德数据${collapsedNote}）：\n` +
+              `${geo.name} 周边景点（返回 ${selected.length} / 共 ${ranked.length} 个主候选，高德数据${collapsedNote}${filterNote}）：\n` +
               lines.join("\n") +
-              warning
+              (warning ? `\n${warning}` : "") +
+              `\n候选池：${pool ? "复用已采集样本，本次未重查POI" : "已保存原始采集样本"}，覆盖半径 ${pool?.radius_km ?? radiusKm} 公里、${pois.length} 条（非区域全量）；改limit/评分或缩小半径只在池内重筛。`
             );
-            return await ctx?.evidence?.observePlaces("search_attractions", city, output, "amap") ?? output;
+            return await ctx?.evidence?.observePlaces("search_attractions", city, output, "amap", selected.map(({ main, spots }) => ({ parent: main.poi.name, children: spots })), observedAt) ?? output;
           }
         } catch (error) {
           ctx?.signal?.throwIfAborted();
@@ -126,6 +148,7 @@ export function createAttractionsTool(fetchFn: FetchLike = fetch): Tool {
         }
       }
 
+      ctx?.beforeDiscoveryFetch?.(geo);
       const osmGeo = { ...geo, ...convertPoint(geo, "wgs84") };
       const query =
         `[out:json][timeout:25];` +
@@ -212,13 +235,4 @@ function toAttraction(element: OsmElement, center: GeoResult): AttractionInfo | 
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
-}
-
-/** 提取景区父级前缀：如「衢州古城文化旅游区天王塔」→「衢州古城文化旅游区」 */
-function areaKeyOf(name: string): string {
-  const match = name.match(/^(.{2,14}?(?:旅游区|景区|文化街区|历史文化街区|文化园|风景名胜区|博物院|博物馆))/);
-  if (match !== null) return match[1];
-  const dot = name.indexOf("·");
-  if (dot > 1) return name.slice(0, dot);
-  return "";
 }

@@ -1,4 +1,6 @@
 import type { ItinerarySnapshot } from "../tools/tool.ts";
+import { visitAssignments, materializedDay, type VisitAssignment } from "../tools/itinerary-planning.ts";
+import type { ItineraryOutlineDay, ExcludedVisit } from "../tools/itinerary-schema.ts";
 /**
  * 跨请求保留的旅行事实。
  *
@@ -6,6 +8,7 @@ import type { ItinerarySnapshot } from "../tools/tool.ts";
  * 否则跨天规划时模型会重复选点或遗忘已经落盘的版本。
  */
 export interface TravelBriefState {
+  readonly durationDays?: number;
   readonly title: string;
   readonly destination: string;
   readonly startDate?: string;
@@ -15,6 +18,7 @@ export interface TravelBriefState {
   readonly budgetTotalYuan?: number;
   readonly budgetPerMealYuan?: number;
   readonly accommodation?: string;
+  readonly allowHotelChanges?: boolean;
   readonly pace?: string;
   readonly mustVisit: readonly string[];
   readonly avoid: readonly string[];
@@ -30,11 +34,18 @@ export interface TravelIssueState {
 }
 
 export interface TravelItineraryState {
+  readonly repeatVisitPermissions?: readonly import("../tools/itinerary-schema.ts").RepeatVisitPermission[];
+  readonly expectedDays?: number;
+  readonly materializedDays?: number;
+  readonly outline?: readonly ItineraryOutlineDay[];
+  readonly assignments?: readonly VisitAssignment[];
+  readonly excludedVisits?: readonly ExcludedVisit[];
+  readonly recommendationMode?: "off" | "advisory" | "strict";
   readonly title: string;
   readonly revision?: number;
   readonly timeline?: string;
   readonly itineraryId?: string;
-  readonly daySummaries?: readonly { date?: string; day: number; itemCount: number; strictPass?: boolean }[];
+  readonly daySummaries?: readonly { date?: string; day: number; itemCount: number; strictPass?: boolean; materialized?: boolean }[];
   readonly repairDays?: readonly number[];
   readonly dayCount: number;
   readonly itemCount: number;
@@ -80,6 +91,7 @@ export function updateTravelStateFromBrief(
   if (title === undefined || destination === undefined) return state;
 
   const brief: TravelBriefState = {
+    ...optional("durationDays", positiveNumber(args.durationDays)),
     title,
     destination,
     ...optional("startDate", stringValue(args.startDate)),
@@ -89,6 +101,7 @@ export function updateTravelStateFromBrief(
     ...optional("budgetTotalYuan", positiveNumber(args.budgetTotalYuan)),
     ...optional("budgetPerMealYuan", positiveNumber(args.budgetPerMealYuan)),
     ...optional("accommodation", stringValue(args.accommodation)),
+    ...(typeof args.allowHotelChanges === "boolean" ? { allowHotelChanges: args.allowHotelChanges } : {}),
     ...optional("pace", stringValue(args.pace)),
     mustVisit: stringArray(args.mustVisit),
     avoid: stringArray(args.avoid),
@@ -172,6 +185,7 @@ export function updateTravelStateFromItinerary(
           ...optional("score", state.itinerary.score),
           ...optional("issueCount", state.itinerary.issueCount),
           ...optional("strictPass", state.itinerary.strictPass),
+          ...optional("recommendationMode", state.itinerary.recommendationMode),
           ...optional("complete", state.itinerary.complete),
         }
       : {}),
@@ -201,15 +215,19 @@ export function updateTravelStateFromItineraryJson(
 
 /** The committed file and its structured validation report are the canonical state. */
 export function updateTravelStateFromSnapshot(current: TravelState | undefined, snapshot: ItinerarySnapshot): TravelState {
-  const state = updateTravelStateFromItinerary(current, snapshot.itinerary as unknown as Record<string, unknown>);
+  const plan = snapshot.itinerary;
+  const state = plan.days.length ? updateTravelStateFromItinerary(current, plan as unknown as Record<string, unknown>) : { ...(current ?? emptyTravelState()), places: [], itinerary: { title: plan.title, dayCount: 0, itemCount: 0, daySummaries: [], issues: [] } };
   const report = snapshot.report;
   return { ...state, itinerary: { ...state.itinerary!, revision: snapshot.itinerary.revision, itineraryId: snapshot.itinerary.itinerary_id,
+    expectedDays: plan.constraints?.expected_days ?? plan.outline?.length,
+    materializedDays: plan.days.filter(materializedDay).length, outline: plan.outline, assignments: visitAssignments(plan), excludedVisits: plan.excluded_visits, repeatVisitPermissions: plan.constraints?.repeat_visit_permissions,
     repairDays: report.repair_days,
-    daySummaries: state.itinerary?.daySummaries?.map((day) => ({ ...day, strictPass: report.daily?.find((item) => item.day === day.day)?.strict_pass })),
-    timeline: snapshot.itinerary.days.map((day, index) => `D${index + 1} ${day.date ?? ""}: ` + day.items.map((item) => `[${item.id}]${item.time ?? ""}${item.end_time === undefined ? "" : `-${item.end_time}`} ${item.type}${item.subtype === undefined ? "" : `/${item.subtype}`} ${item.name}${item.planned_duration_min === undefined ? "" : ` ${item.planned_duration_min}分钟`}`).join("；")).join("\n"),
+    daySummaries: state.itinerary?.daySummaries?.map((day) => ({ ...day, materialized: materializedDay(plan.days[day.day - 1]!), strictPass: report.daily?.find((item) => item.day === day.day)?.strict_pass })),
+    timeline: snapshot.itinerary.days.map((day, index) => `D${index + 1} ${day.date ?? ""}: ` + day.items.map((item) => `[${item.id}]${item.time ?? ""}${item.end_time === undefined ? "" : `-${item.end_time}`} ${item.type}${item.subtype === undefined ? "" : `/${item.subtype}`} ${item.name}${item.recommended_spots?.length ? `（内部推荐：${item.recommended_spots.join("、")}）` : ""}${item.planned_duration_min === undefined ? "" : ` ${item.planned_duration_min}分钟`}`).join("；")).join("\n"),
     score: report.score, issueCount: report.issue_count,
     strictPass: report.issue_count.P0 === 0 && report.issue_count.P1 === 0,
-    complete: (report.scoring?.completeness ?? 1) === 1 && !report.issues.some((issue) => ["title-day-mismatch", "missing-requested-date", "unexpected-itinerary-date"].includes(issue.code)),
+    recommendationMode: report.recommendation_policy?.mode,
+    complete: (report.scoring?.completeness ?? 1) === 1 && !report.issues.some((issue) => ["title-day-mismatch", "missing-requested-date", "unexpected-itinerary-date", "unmaterialized-outline-day"].includes(issue.code)),
     issues: report.issues.map((issue) => ({ level: issue.level, message: issue.message, code: issue.code, day: issue.day })),
   } };
 }
@@ -261,6 +279,7 @@ export function renderTravelState(state: TravelState | undefined, maxChars = 160
   if (state.brief !== undefined) {
     const brief = state.brief;
     lines.push(
+      `酒店策略：${brief.allowHotelChanges ? "用户允许转场换酒店" : "全程固定一家，优先复用已选酒店"}。`,
       `需求单「${brief.title}」：${brief.destination}；日期 ${brief.startDate ?? "未定"} 至 ${brief.endDate ?? "未定"}；` +
         `节奏 ${brief.pace ?? "未指定"}；人数 ${brief.travelers ?? "未指定"}；` +
         `总预算 ${brief.budgetTotalYuan === undefined ? "未指定" : `¥${brief.budgetTotalYuan}`}；` +
@@ -288,6 +307,11 @@ export function renderTravelState(state: TravelState | undefined, maxChars = 160
         `${itinerary.complete === false ? "（完整性未确认）" : ""}${quality}。`,
     );
   }
+
+  if (state.itinerary?.outline?.length) lines.push("全局粗排（预留不计完成；按日期逐日完善）：" + state.itinerary.outline.map((day) => `${day.date}=${day.visits.map((v) => v.name).join("、") || "待重新分配"}`).join("；"));
+  if (state.itinerary?.assignments?.length) lines.push("共享景点占用（主子点共享名额；其他日期默认不重复）：" + state.itinerary.assignments.map((v) => `${v.name}${v.parent_visit ? `〔属于${v.parent_visit.name}〕` : ""}@${v.date}[${v.status === "saved" ? `已保存id=${v.item_id}` : "预留"}]`).join("；"));
+  if (state.itinerary?.repeatVisitPermissions?.length) lines.push("真实用户已授权重游：" + state.itinerary.repeatVisitPermissions.map((p) => p.name).join("、"));
+  if (state.itinerary?.excludedVisits?.length) lines.push("本次明确排除：" + state.itinerary.excludedVisits.map((v) => `${v.name}（${v.reason}）`).join("；"));
 
   if (state.itinerary?.timeline !== undefined) lines.push(`已落盘条目索引（按 id 修改；无需反复 load）：\n${state.itinerary.timeline}`);
   const grouped = new Map<string, TravelPlaceState[]>();
@@ -360,6 +384,7 @@ function normalizeBrief(raw: Record<string, unknown>): TravelBriefState | undefi
   const destination = stringValue(raw.destination);
   if (title === undefined || destination === undefined) return undefined;
   return {
+    ...optional("durationDays", positiveNumber(raw.durationDays)),
     title,
     destination,
     ...optional("startDate", stringValue(raw.startDate)),
@@ -369,6 +394,7 @@ function normalizeBrief(raw: Record<string, unknown>): TravelBriefState | undefi
     ...optional("budgetTotalYuan", positiveNumber(raw.budgetTotalYuan)),
     ...optional("budgetPerMealYuan", positiveNumber(raw.budgetPerMealYuan)),
     ...optional("accommodation", stringValue(raw.accommodation)),
+    ...(typeof raw.allowHotelChanges === "boolean" ? { allowHotelChanges: raw.allowHotelChanges } : {}),
     ...optional("pace", stringValue(raw.pace)),
     mustVisit: stringArray(raw.mustVisit),
     avoid: stringArray(raw.avoid),
@@ -379,8 +405,8 @@ function normalizeBrief(raw: Record<string, unknown>): TravelBriefState | undefi
 
 function normalizeItinerary(raw: Record<string, unknown>): TravelItineraryState | undefined {
   const title = stringValue(raw.title);
-  const dayCount = positiveNumber(raw.dayCount);
-  const itemCount = positiveNumber(raw.itemCount);
+  const dayCount = nonNegativeNumber(raw.dayCount);
+  const itemCount = nonNegativeNumber(raw.itemCount);
   if (title === undefined || dayCount === undefined || itemCount === undefined) return undefined;
   const counts = objectValue(raw.issueCount);
   const issueCount = counts === null
@@ -397,9 +423,20 @@ function normalizeItinerary(raw: Record<string, unknown>): TravelItineraryState 
     title,
     dayCount,
     itemCount,
+    ...optional("expectedDays", positiveNumber(raw.expectedDays)),
+    ...optional("materializedDays", nonNegativeNumber(raw.materializedDays)),
+    ...(Array.isArray(raw.outline) ? { outline: raw.outline.slice(0, 90).flatMap((entry) => {
+      const day = objectValue(entry); if (!day || !stringValue(day.date) || !Array.isArray(day.visits)) return [];
+      const visits = day.visits.slice(0, 20).flatMap((v) => { const visit = objectValue(v), name = stringValue(visit?.name); return name ? [{ name, ...optional("evidence_id", stringValue(visit?.evidence_id)), ...optional("parent_visit", parseParentVisit(visit?.parent_visit)), ...optional("repeat_reason", stringValue(visit?.repeat_reason)) }] : []; });
+      return [{ date: String(day.date), ...optional("theme", stringValue(day.theme)), visits }];
+    }) } : {}),
+    ...(Array.isArray(raw.assignments) ? { assignments: raw.assignments.slice(0, 1800).flatMap((entry) => { const v = objectValue(entry), name = stringValue(v?.name), date = stringValue(v?.date); return name && date && ["reserved", "saved"].includes(String(v?.status)) ? [{ name, date, status: v!.status as VisitAssignment["status"], ...optional("item_id", stringValue(v?.item_id)), ...optional("evidence_id", stringValue(v?.evidence_id)), ...optional("parent_visit", parseParentVisit(v?.parent_visit)), ...optional("repeat_reason", stringValue(v?.repeat_reason)) }] : []; }) } : {}),
+    ...(Array.isArray(raw.repeatVisitPermissions) ? { repeatVisitPermissions: raw.repeatVisitPermissions.slice(0, 100).flatMap((entry) => { const v = objectValue(entry), name = stringValue(v?.name), user_message_id = stringValue(v?.user_message_id), user_quote = stringValue(v?.user_quote); return name && user_message_id && user_quote ? [{ name, user_message_id, user_quote }] : []; }) } : {}),
+    ...(Array.isArray(raw.excludedVisits) ? { excludedVisits: raw.excludedVisits.slice(0, 100).flatMap((entry) => { const v = objectValue(entry), name = stringValue(v?.name), reason = stringValue(v?.reason); return name && reason ? [{ name, reason, ...optional("evidence_id", stringValue(v?.evidence_id)) }] : []; }) } : {}),
     ...optional("score", nonNegativeNumber(raw.score)),
     ...optional("issueCount", issueCount),
     ...optional("strictPass", typeof raw.strictPass === "boolean" ? raw.strictPass : undefined),
+    ...optional("recommendationMode", raw.recommendationMode === "off" || raw.recommendationMode === "advisory" || raw.recommendationMode === "strict" ? raw.recommendationMode as TravelItineraryState["recommendationMode"] : undefined),
     ...optional("complete", typeof raw.complete === "boolean" ? raw.complete : undefined),
     ...optional("revision", positiveNumber(raw.revision)),
     ...optional("timeline", stringValue(raw.timeline)),
@@ -407,7 +444,7 @@ function normalizeItinerary(raw: Record<string, unknown>): TravelItineraryState 
     ...(Array.isArray(raw.repairDays) ? { repairDays: raw.repairDays.filter((day): day is number => typeof day === "number" && Number.isInteger(day) && day >= 1 && day <= dayCount) } : {}),
     ...(Array.isArray(raw.daySummaries) ? { daySummaries: raw.daySummaries.flatMap((value) => {
       const day = objectValue(value);
-      return day !== null && positiveNumber(day.day) !== undefined && nonNegativeNumber(day.itemCount) !== undefined ? [{ date: stringValue(day.date), day: day.day as number, itemCount: day.itemCount as number, ...(typeof day.strictPass === "boolean" ? { strictPass: day.strictPass } : {}) }] : [];
+      return day !== null && positiveNumber(day.day) !== undefined && nonNegativeNumber(day.itemCount) !== undefined ? [{ date: stringValue(day.date), day: day.day as number, itemCount: day.itemCount as number, ...(typeof day.strictPass === "boolean" ? { strictPass: day.strictPass } : {}), ...(typeof day.materialized === "boolean" ? { materialized: day.materialized } : {}) }] : [];
     }) } : {}),
     issues,
   };
@@ -454,6 +491,11 @@ function uniquePlaces(places: readonly TravelPlaceState[]): TravelPlaceState[] {
 
 function normalizeName(value: string): string {
   return value.toLowerCase().replace(/[\s·•()（）\-—_]/g, "");
+}
+
+function parseParentVisit(raw: unknown): import("../tools/itinerary-schema.ts").ScenicParent | undefined {
+  const value = objectValue(raw), name = stringValue(value?.name);
+  return name ? { name, ...optional("evidence_id", stringValue(value?.evidence_id)) } : undefined;
 }
 
 function objectValue(value: unknown): Record<string, unknown> | null {

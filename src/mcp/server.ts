@@ -1,5 +1,6 @@
 import { createInterface } from "node:readline";
 import type { ToolRegistry } from "../tools/tool.ts";
+import { toolErrorOutput } from "../core/tool-error.ts";
 
 /** 已知协议版本：客户端请求未知版本时回退到最新已知版（tools 接口在各版本间稳定） */
 const KNOWN_PROTOCOL_VERSIONS = new Set(["2024-11-05", "2025-03-26", "2025-06-18"]);
@@ -107,8 +108,7 @@ async function callTool(
     const text = await registry.execute(params.name, JSON.stringify(objectOf(params.arguments)));
     return { content: [{ type: "text", text }], isError: false };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return { content: [{ type: "text", text: `工具执行失败: ${message}` }], isError: true };
+    return { content: [{ type: "text", text: toolErrorOutput(error) }], isError: true };
   }
 }
 

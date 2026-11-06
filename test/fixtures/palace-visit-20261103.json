@@ -1,0 +1,6 @@
+{
+  "url": "https://www.dpm.org.cn/Visit.html",
+  "captured_at": "2026-11-03",
+  "original_sha256": "035cb2b212f5243bf88ece9a540c2fcacab0471101e25d0b91ac2add170600c7",
+  "excerpt": "保留原始body至开放时间区块结束的DOM；去掉后续地图、票价、交通等区块，不改导航、公告、时刻表。"
+}

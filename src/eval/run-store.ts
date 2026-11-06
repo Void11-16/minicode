@@ -1,3 +1,4 @@
+import { renderToolDiagnostics, type ToolDiagnosticsSummary } from "./tool-diagnostics.ts";
 import type { RequestContextRecord } from "../core/usage.ts";
 import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -54,6 +55,8 @@ export interface EvalBudgetExtension {
 }
 
 export interface EvalAttemptTelemetry {
+  readonly tool_diagnostics?: ToolDiagnosticsSummary;
+  readonly query_stats?: { readonly executed: number; readonly cache_hits: number; readonly blocked: number };
   readonly request_contexts?: readonly RequestContextRecord[];
   readonly duration_ms: number;
   readonly tool_rounds: number;
@@ -402,6 +405,7 @@ function renderReport(manifest: EvalRunManifest, summary: EvalRunSummary): strin
         `${attempt.telemetry.tokens.total} tokens · ¥${attempt.telemetry.estimated_cost_yuan.toFixed(4)}` +
         (attempt.failure === undefined ? "" : ` · ${attempt.failure.reason}`),
       );
+      if (attempt.telemetry.tool_diagnostics) lines.push("", renderToolDiagnostics(attempt.telemetry.tool_diagnostics), "");
     }
     lines.push("");
   }

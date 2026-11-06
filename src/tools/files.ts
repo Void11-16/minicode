@@ -2,6 +2,7 @@ import { mkdir, open, readFile, readdir, stat, writeFile } from "node:fs/promise
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { Tool, ToolContext } from "./tool.ts";
 import { requireString } from "./tool.ts";
+import { trackRead, fileReadHint } from "./read-progress.ts";
 
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
 const DEFAULT_READ_LINES = 500;
@@ -60,7 +61,7 @@ async function friendlyStat(absolute: string, label: string) {
 }
 
 /** 字节页只读固定大小的缓冲；UTF-8 末尾不完整字符留到下一页，不丢字节。 */
-async function readBytePage(absolute: string, label: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<string> {
+async function readBytePage(absolute: string, label: string, args: Record<string, unknown>, signal?: AbortSignal, ctx?: ToolContext): Promise<string> {
   const offset = args.byte_offset ?? 0;
   const limit = args.byte_limit ?? MAX_READ_BYTES;
   if (typeof offset !== "number" || !Number.isSafeInteger(offset) || offset < 0) throw new Error("byte_offset 必须是非负安全整数");
@@ -69,7 +70,9 @@ async function readBytePage(absolute: string, label: string, args: Record<string
   signal?.throwIfAborted();
   const handle = await open(absolute, "r");
   try {
-    const size = (await handle.stat()).size;
+    const info = await handle.stat();
+    const size = info.size;
+    const signature = `${info.ino}:${info.size}:${info.mtimeMs}:${info.ctimeMs}`;
     if (offset > size) throw new Error(`byte_offset 超过文件大小 ${size}`);
     const buffer = Buffer.alloc(limit);
     const wanted = Math.min(limit, size - offset);
@@ -86,11 +89,12 @@ async function readBytePage(absolute: string, label: string, args: Record<string
       const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
       text = decoder.decode(buffer.subarray(0, bytesRead), { stream: offset + bytesRead < size });
     } catch {
-      throw new Error("文件不是有效 UTF-8，或 byte_offset 不在字符边界；请使用上一页返回的 byte_offset");
+      throw new Error(`文件不是有效 UTF-8，或 byte_offset 不在字符边界；请使用上一页返回的游标。${fileReadHint(ctx, absolute, label, signature, size, limit)}`);
     }
     const next = offset + Buffer.byteLength(text, "utf8");
-    return `${label}（UTF-8 字节页 ${offset}—${next}，共 ${size} 字节）:\n${text}\n` +
-      (next < size ? `【续读】byte_offset=${next}，byte_limit=${limit}` : "【文件结束】");
+    const tail = next < size ? `【续读】byte_offset=${next}，byte_limit=${limit}` : "【文件结束】";
+    if (trackRead(ctx, { resource: absolute, version: signature, label, path: label, kind: "file", total: size }, [[offset, next]], args.reread === true)) return `${label} 该版本字节页已读，正文未变化，请沿用已有内容。\n${fileReadHint(ctx, absolute, label, signature, size, limit)}`;
+    return `${label}（UTF-8 字节页 ${offset}—${next}，共 ${size} 字节）:\n${text}\n${tail}`;
   } finally {
     await handle.close();
   }
@@ -102,7 +106,7 @@ export function createReadFileTool(defaultWorkspace: string = process.cwd()): To
     name: "read_file",
     description:
       "读取工作区内的文本文件，输出带行号（格式 `行号\\t内容`），支持 offset/limit 分段。修改代码前先用它了解现状；" +
-      "行号模式文件上限 2MB，单次约 2,600 字符；更大文件、artifact 或超长单行用 byte_offset=0 开始按 UTF-8 字节分页，按返回游标续读，无整文件大小限制。",
+      "行号模式文件上限2MB，单次约2600字符；artifact或大文件按返回的字节游标续读，先看已读索引，不要每次从0开始。结果已读时只补未读页；上下文确已丢失可对小范围reread=true一次。",
     category: "workspace",
     alwaysActive: true,
     outputKind: "file",
@@ -114,11 +118,13 @@ export function createReadFileTool(defaultWorkspace: string = process.cwd()): To
         limit: { type: "number", description: `读取行数，默认 ${DEFAULT_READ_LINES}，最大 ${MAX_READ_LINES}` },
         byte_offset: { type: "integer", description: "UTF-8 字节分页起点，0 起；与行号 offset/limit 互斥，续读必须用返回的游标" },
         byte_limit: { type: "integer", description: `每页字节数，4—${MAX_READ_BYTES}，默认 ${MAX_READ_BYTES}；与 byte_offset 配合使用` },
+        reread: { type: "boolean", description: "仅当已读正文离开上下文且确需原字段时，对该小范围重读一次；不作为常规翻页参数" },
       },
       required: ["path"],
     },
     async execute(args, ctx) {
       const path = requireString(args, "path");
+      if (args.reread !== undefined && typeof args.reread !== "boolean") throw new Error("reread 必须为布尔值");
       const workspace = workspaceOf(ctx, defaultWorkspace);
       const absolute = resolveInWorkspace(workspace, path);
       const info = await friendlyStat(absolute, "文件");
@@ -126,7 +132,7 @@ export function createReadFileTool(defaultWorkspace: string = process.cwd()): To
         throw new Error(`${path} 是一个目录，请用 list_files 浏览`);
       }
       if (args.byte_offset !== undefined || args.byte_limit !== undefined) {
-        return readBytePage(absolute, relative(workspace, absolute), args, ctx?.signal);
+        return readBytePage(absolute, relative(workspace, absolute), args, ctx?.signal, ctx);
       }
       if (info.size > MAX_FILE_BYTES) {
         throw new Error(
@@ -174,6 +180,10 @@ export function createReadFileTool(defaultWorkspace: string = process.cwd()): To
         ? `\n...（${truncatedByBudget ? "输出达到字符预算，" : ""}还有 ${remaining} 行未显示，` +
           `可用 offset=${nextOffset} 继续读取）`
         : "";
+      const startByte = Buffer.byteLength(lines.slice(0, offset - 1).join("\n") + (offset > 1 ? "\n" : ""), "utf8");
+      const endByte = nextByteOffset ?? Math.min(Buffer.byteLength(raw, "utf8"), Buffer.byteLength(lines.slice(0, nextOffset - 1).join("\n") + (nextOffset > 1 ? "\n" : ""), "utf8"));
+      const signature = `${info.ino}:${info.size}:${info.mtimeMs}:${info.ctimeMs}`;
+      if (trackRead(ctx, { resource: absolute, version: signature, label: relPath, path: relPath, kind: "file", total: info.size }, [[startByte, endByte]], args.reread === true)) return `${relPath} 该版本的行号范围已读，正文未变化；沿用已有内容。\n${fileReadHint(ctx, absolute, relPath, signature, info.size)}`;
       return `${prefix}${numbered.join("\n")}${tail}`;
     },
   };

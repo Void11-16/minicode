@@ -5,7 +5,8 @@ export function itemEndMinutes(item: ItineraryItem): number | undefined {
   if (item.time === undefined) return undefined;
   if (item.end_time !== undefined) return timeToMinutes(item.end_time);
   if (item.time !== undefined && item.planned_duration_min !== undefined) return timeToMinutes(item.time) + item.planned_duration_min;
-  return undefined;
+  // 酒店到达/离开是时间点，不要求虚构一段停留来表示边界。
+  return item.type === "accommodation" ? timeToMinutes(item.time) : undefined;
 }
 
 /** 餐厅只是候选；用餐必须由 rest/free_time 等实际时间块占位。重叠区间先取并集。 */

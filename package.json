@@ -11,7 +11,8 @@
     "eval:plans": "node src/eval/main.ts --plans",
     "test": "node --test \"test/*.test.ts\"",
     "typecheck": "tsc --noEmit",
-    "lint": "oxlint src test"
+    "lint": "oxlint src test",
+    "eval:tools": "node src/eval/tool-audit.ts"
   },
   "bin": {
     "minicode": "bin/minicode.mjs",

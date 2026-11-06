@@ -1,8 +1,9 @@
-export const QUALITY_SCORING_VERSION = "opportunity-v1" as const;
+import { scenicVisitKey } from "./scenic-area.ts";
+export const QUALITY_SCORING_VERSION = "opportunity-v9" as const;
 import type { Itinerary, ItineraryItem } from "./itinerary-schema.ts";
 import type { QualityIssue, ItineraryQualityStatus, QualityIssueLevel } from "./itinerary-validator.ts";
 
-const PENDING_CODES = new Set(["unverified-place-evidence", "unverified-route", "unverified-closure", "missing-location", "missing-coordinates", "unverified-coordinates", "missing-source", "missing-confidence", "missing-opening-hours", "reservation-required"]);
+const PENDING_CODES = new Set(["unverified-place-evidence", "unverified-route", "unverified-closure", "closure-exception-check", "missing-location", "missing-coordinates", "unverified-coordinates", "missing-source", "missing-confidence", "missing-opening-hours", "reservation-required"]);
 const LEG_CODES = new Set(["transfer-too-tight", "missing-route-leg", "route-duration-too-short", "unverified-route", "spatial-gap"]);
 export function classifyIssue(value: QualityIssue): QualityIssue {
   return { ...value, kind: value.kind ?? (PENDING_CODES.has(value.code) ? "pending" : value.level === "P2" ? "advice" : "error") };
@@ -43,14 +44,16 @@ export function aggregateIssues(issues: readonly QualityIssue[], itinerary: Itin
 
 export interface ScoreDimension { readonly weight: number; readonly checked: number; readonly failed: number; readonly score: number }
 export interface OpportunityScore { readonly score: number; readonly completeness: number; readonly dimensions: Readonly<Record<"schedule" | "routing" | "evidence" | "consistency", ScoreDimension>> }
-const COMPLETENESS_CODES = new Set(["title-day-mismatch", "missing-requested-date"]);
+const COMPLETENESS_CODES = new Set(["title-day-mismatch", "missing-requested-date", "unmaterialized-outline-day", "outline-day-count-mismatch"]);
 function dimensionFor(issue: QualityIssue): keyof OpportunityScore["dimensions"] {
-  if (PENDING_CODES.has(issue.code)) return "evidence";
+  if (PENDING_CODES.has(issue.code) && !LEG_CODES.has(issue.code)) return "evidence";
   if (LEG_CODES.has(issue.code) || /route|transport|transfer|spatial|remote-day/.test(issue.code)) return "routing";
-  if (/duplicate|budget|unexpected.*date|day-role/.test(issue.code)) return "consistency";
+  if (/duplicate|budget|required-visit|unexpected.*date|day-role|allocation|outline|unfulfilled-reservation|excluded-visit/.test(issue.code)) return "consistency";
   return "schedule";
 }
-function itemKey(day: number, item: ItineraryItem): string { return `${day}:${item.id}`; }
+function itemKey(day: number, item: ItineraryItem): string {
+  return item.type === "visit" ? `${day}:visit:${scenicVisitKey(item.name, item.parent_visit?.name)}` : item.type === "accommodation" ? `${day}:stay:${item.name}` : `${day}:${item.id}`;
+}
 
 /** 分母只由实际检查对象决定，不随问题条数增加；同一对象按最严重问题计一次损失。 */
 export function opportunityScore(itinerary: Itinerary, issues: readonly QualityIssue[], expectedDays?: number, scopeDay?: number): OpportunityScore {
@@ -59,23 +62,31 @@ export function opportunityScore(itinerary: Itinerary, issues: readonly QualityI
     const number = index + 1;
     if (scopeDay !== undefined && number !== scopeDay) return;
     for (const set of Object.values(opportunities)) set.add(`day:${number}`);
-    const nonMeals = day.items.filter((item) => item.type !== "meal");
-    for (const item of nonMeals) {
+    // 主目的地和住处才是地点/时段检查机会；拆交通、堆休息或自由活动不增加分母。
+    const relevant = day.items.filter((item) => item.type === "visit" || item.type === "accommodation");
+    for (const item of relevant) {
       opportunities.schedule.add(itemKey(number, item));
       opportunities.evidence.add(itemKey(number, item));
       if (item.type === "visit") opportunities.consistency.add(itemKey(number, item));
-
     }
-    const stops = nonMeals.filter((item) => ["visit", "accommodation", "rest"].includes(item.type) && item.time !== undefined && item.location?.latitude !== undefined && item.location.longitude !== undefined);
-    for (const stop of stops.slice(1)) opportunities.routing.add(`leg:${number}:${stop.id}`);
+    const stops = relevant.filter((item) => item.time !== undefined).slice().sort((a, b) => a.time!.localeCompare(b.time!));
+    for (let i = 1; i < stops.length; i++) {
+      if (itemKey(number, stops[i]!) !== itemKey(number, stops[i - 1]!)) opportunities.routing.add(`leg:${itemKey(number, stops[i]!)}`);
+    }
   });
   const penalties = { schedule: new Map<string, number>(), routing: new Map<string, number>(), evidence: new Map<string, number>(), consistency: new Map<string, number>() };
   const severity: Record<QualityIssueLevel, number> = { P0: 1, P1: 0.5, P2: 0.1 };
   for (const issue of issues) {
+    if (issue.level === "P2" && ["incomplete-day-start", "incomplete-day-end", "day-too-long"].includes(issue.code)) continue; // 节奏参考不当作确定缺陷扣分。
+    if (["unverified-closure", "closure-exception-check"].includes(issue.code)) continue; // 资料确认项单列，不从规划分扣减。
     if (COMPLETENESS_CODES.has(issue.code)) continue; // 完整度只乘一次，不再逐个缺失日期重复扣分。
     const dimension = dimensionFor(issue);
-    let key = issue.day === undefined ? "global" : issue.item_id === undefined ? `day:${issue.day}` : `${issue.day}:${issue.item_id}`;
-    if (dimension === "routing" && issue.root_key !== undefined && opportunities.routing.has(issue.root_key)) key = issue.root_key;
+    const item = issue.day === undefined ? undefined : itinerary.days[issue.day - 1]?.items.find((entry) => entry.id === issue.item_id);
+    let key = issue.day === undefined ? "global" : item === undefined ? `day:${issue.day}` : itemKey(issue.day, item);
+    if (dimension === "routing" && issue.root_key !== undefined && issue.day !== undefined) {
+      const target = itinerary.days[issue.day - 1]?.items.find((entry) => issue.root_key === `leg:${issue.day}:${entry.id}`);
+      if (target !== undefined) key = `leg:${itemKey(issue.day, target)}`;
+    }
     if (!opportunities[dimension].has(key)) key = issue.day === undefined ? [...opportunities[dimension]][0] ?? "global" : `day:${issue.day}`;
     if (!opportunities[dimension].has(key)) continue;
     penalties[dimension].set(key, Math.max(penalties[dimension].get(key) ?? 0, severity[issue.level]));

@@ -1,3 +1,5 @@
+import { withSharedAmapGate } from "./amap-rate-gate.ts";
+import { observeProviderError } from "../core/tool-diagnostics.ts";
 import { convertPoint, type GeoPoint } from "./coordinates.ts";
 import { cancellableFetch } from "./travel-request.ts";
 import { setTimeout as abortableDelay } from "node:timers/promises";
@@ -9,7 +11,7 @@ const AMAP_BASE = "https://restapi.amap.com";
 
 /** 并发/QPS 超限：个人 Key 的并发极低（实测并行 4 个 POI 查询全被拒），退避重试后多数能过 */
 const QPS_INFOCODE = "10021";
-/** 全局请求闸门的最小间隔：再密会被 10021 拒，250ms 实测稳 */
+/** 进程内请求基线间隔；真实请求另经同Key跨进程400ms闸门 */
 const REQUEST_GAP_MS = 250;
 /** 撞到 10021 后的退避时长（重试两次：闸门后仍偶发超限，重试比整条链路降级划算） */
 const QPS_RETRY_DELAY_MS = 700;
@@ -52,7 +54,7 @@ export class AmapServiceError extends Error {
   readonly code: string;
   constructor(code: string, reason: string) { super(`高德 API 失败: ${reason} [${code}]`); this.name = "AmapServiceError"; this.code = code; }
 }
-interface AmapCircuit { error?: AmapServiceError; day?: string }
+interface AmapCircuit { error?: AmapServiceError; day?: string; gapMs?: number; throttleUntil?: number }
 function serviceDay(): string { return new Date(Date.now() + 8 * 3600000).toISOString().slice(0, 10); }
 
 /** 高德错误码 → 可读信息（常见子集） */
@@ -67,6 +69,8 @@ const ERROR_MESSAGES: Record<string, string> = {
 export interface AmapConfig {
   readonly apiKey: string;
   readonly fetchFn?: FetchLike;
+  /** 自定义代理fetch可显式开启；默认真实fetch启用，注入测试fetch不访问共享租约。 */
+  readonly sharedRateGate?: boolean;
   readonly signal?: AbortSignal;
 }
 
@@ -83,6 +87,8 @@ interface AmapGeocodeResponse {
 
 export interface AmapPoi {
   readonly id: string;
+  /** 供应商明确返回的父 POI ID；缺失时不按地理距离猜父子关系。 */
+  readonly parent?: string;
   readonly name: string;
   readonly type?: string;
   readonly typecode?: string;
@@ -157,16 +163,18 @@ export class AmapClient {
   private readonly apiKey: string;
   private readonly fetchFn: FetchLike;
   private readonly signal?: AbortSignal;
+  private readonly sharedRateGate: boolean;
   private circuit: AmapCircuit = {};
 
   constructor(config: AmapConfig) {
     this.apiKey = config.apiKey;
     this.fetchFn = config.fetchFn ?? fetch;
     this.signal = config.signal;
+    this.sharedRateGate = config.sharedRateGate ?? (config.fetchFn === undefined || config.fetchFn === fetch);
   }
 
   withSignal(signal: AbortSignal): AmapClient {
-    const scoped = new AmapClient({ apiKey: this.apiKey, fetchFn: this.fetchFn, signal });
+    const scoped = new AmapClient({ apiKey: this.apiKey, fetchFn: this.fetchFn, signal, sharedRateGate: this.sharedRateGate });
     scoped.circuit = this.circuit;
     return scoped;
   }
@@ -183,21 +191,29 @@ export class AmapClient {
    */
   private async getJson<T>(url: URL, retriesLeft = QPS_RETRY_COUNT): Promise<T> {
     this.checkAvailable();
-    const response = await scheduleAmapRequest(() => {
+    const readResponse = async () => {
       this.checkAvailable();
-      return cancellableFetch(this.fetchFn, this.signal)(url, { signal: AbortSignal.timeout(15_000) });
-    }, this.signal);
-    if (!response.ok) {
-      throw new Error(`高德服务 HTTP ${response.status}`);
-    }
-
-    const data = (await response.json()) as { status?: string; infocode?: string; info?: string; errcode?: number; errmsg?: string };
+      const response = await cancellableFetch(this.fetchFn, this.signal)(url, { signal: AbortSignal.timeout(15_000) });
+      if (!response.ok) {
+        await response.body?.cancel();
+        throw new Error(`高德服务 HTTP ${response.status}`);
+      }
+      return await response.json() as { status?: string; infocode?: string; info?: string; errcode?: number; errmsg?: string };
+    };
+    // 闸门覆盖响应体读取，避免响应头已到但JSON未读完时继续并发。
+    const data = await scheduleAmapRequest(() => this.sharedRateGate
+      ? withSharedAmapGate(this.apiKey, readResponse, this.signal, { gapMs: (this.circuit.throttleUntil ?? 0) > Date.now() ? this.circuit.gapMs ?? 400 : 400 }) : readResponse(), this.signal);
     // 高德约定: status "1" + infocode "10000" = 成功
     if (data.status === "1" && data.infocode === "10000") return data as T;
     // v4 骑行接口使用 errcode=0，不能按 v3 的 status/infocode 判断。
     if (url.pathname.startsWith("/v4/") && data.errcode === 0) return data as T;
     const code = data.infocode ?? (data.errcode === undefined ? "UNKNOWN" : String(data.errcode));
 
+    observeProviderError("amap", code);
+    if (code === QPS_INFOCODE) {
+      const previousGap = (this.circuit.throttleUntil ?? 0) > Date.now() ? this.circuit.gapMs ?? 400 : 400;
+      this.circuit.gapMs = Math.min(1600, previousGap * 2); this.circuit.throttleUntil = Date.now() + 30_000;
+    }
     if (code === QPS_INFOCODE && retriesLeft > 0) {
       await abortableDelay(QPS_RETRY_DELAY_MS, undefined, { signal: this.signal });
       return this.getJson<T>(url, retriesLeft - 1);

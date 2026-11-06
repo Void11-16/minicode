@@ -8,6 +8,11 @@ export function travelFocusDay(state: TravelState | undefined, input: string): n
   const explicit = label.includes("十") ? (digits[label.split("十")[0]!] ?? 1) * 10 + (digits[label.split("十")[1]!] ?? 0) : digits[label] ?? Number(label);
   if (Number.isInteger(explicit) && explicit >= 1 && explicit <= 60) return explicit;
   const brief = state?.brief;
+  const outline = state?.itinerary?.outline;
+  if (outline?.length) {
+    const missing = outline.findIndex((slot) => !state?.itinerary?.daySummaries?.some((entry) => entry.date === slot.date && entry.materialized !== false));
+    if (missing >= 0) return missing + 1;
+  }
   const expected = brief?.startDate && brief.endDate
     ? Math.round((Date.parse(brief.endDate) - Date.parse(brief.startDate)) / 86400000) + 1
     : undefined;
@@ -29,10 +34,12 @@ export function renderFocusedTravelState(state: TravelState | undefined, day: nu
     ...(state.itinerary === undefined ? {} : { itinerary: { ...state.itinerary, timeline: undefined, issues: [] } }),
   }, Infinity);
   if (global === undefined) return undefined;
-  const sections = [global, `当前工作日期：Day ${day}。其他日期按需 load_itinerary(day=N)，不要重读整份行程。`];
+  const date = state.itinerary?.outline?.[day - 1]?.date;
+  const actualDay = date === undefined ? day : state.itinerary?.daySummaries?.find((entry) => entry.date === date)?.day;
+  const sections = [global, `当前工作日期：${date ?? `Day ${day}`}。${date ? "按date保存/读取；预留但未保存的日期直接补齐，不要读取不存在的单日。" : "其他日期按需读取，不要重读整份行程。"}`];
   if (state.itinerary?.daySummaries?.length) sections.push("已保存日期：" + state.itinerary.daySummaries.map((d) => `D${d.day} ${d.date ?? "日期未定"} ${d.itemCount}项${d.strictPass === undefined ? "" : d.strictPass ? " 日内通过" : " 日内待修"}`).join("；"));
   if (state.itinerary?.repairDays?.length) sections.push(`建议局部修复日期：${state.itinerary.repairDays.join("、")}；其余已通过日期保持。`);
-  const timeline = state.itinerary?.timeline?.split("\n").filter((line) => line.startsWith(`D${day} `)).join("\n");
+  const timeline = state.itinerary?.timeline?.split("\n").filter((line) => actualDay !== undefined && line.startsWith(`D${actualDay} `)).join("\n");
   const details: string[] = [];
   if (timeline) details.push(`当前日条目索引：\n${timeline}`);
   const issues = [...(state.itinerary?.issues ?? [])].sort((a, b) =>

@@ -1,5 +1,5 @@
 import { opportunityScore } from "../tools/itinerary-assessment.ts";
-import { evidenceId } from "../tools/travel-evidence.ts";
+import { TravelEvidenceStore, evidenceId } from "../tools/travel-evidence.ts";
 import { readFile } from "node:fs/promises";
 import { relative, resolve, sep } from "node:path";
 import type { Session } from "../core/session.ts";
@@ -150,14 +150,26 @@ export async function assessToolBudget(options: BudgetAssessmentOptions): Promis
     };
   }
 
-  const items = report.issues.map(adviseIssue);
-  const uncertain = report.issues.filter((item) => adviceFor(item).category === "uncertain");
+  const evidence = new TravelEvidenceStore(options.rootDir);
+  await evidence.load().catch(() => undefined); // 无法读取时不虚报“已经查过”。
+  const city = itinerary.constraints?.destination ?? options.session.travelState?.brief?.destination;
+  const items = report.issues.map((issue) => {
+    let override: RepairRule | undefined;
+    if (issue.code === "unverified-closure" && issue.day !== undefined && city) {
+      const item = itinerary.days[issue.day - 1]?.items.find((item) => item.id === issue.item_id);
+      if (item && evidence.hasVerifiedClosure(city, item.name)) override = { category: "edit", action: "已有核验闭馆依据，重新保存自动绑定；不要再次搜索" };
+      else if (item && evidence.pendingReviewPlaces([item.name], city).length === 0) override = { category: "uncertain", action: "该闭馆事项已查无可用依据，保持待确认；换词/换参数重搜不能保证解决" };
+    }
+    return adviseIssue(issue, override);
+  });
+  const uncertain = report.issues.filter((_, index) => items[index]!.category === "uncertain");
   const fixable = items.filter((item) => item.category !== "uncertain");
   const strictPass = report.issue_count.P0 === 0 && report.issue_count.P1 === 0;
   const potentialScore = opportunityScore(itinerary, uncertain, itinerary.constraints?.expected_days ?? expectedDaysFromTitle(itinerary.title)).score;
   const unchanged = options.previousFingerprint !== undefined && fingerprint === options.previousFingerprint;
-  const canImprove = !strictPass && !unchanged && fixable.length > 0;
-  const summary = unchanged ? "上次追加后已保存内容没有变化，停止自动续期；请先处理未完成的质量项。" : repairSummary(report, fixable.length, uncertain.length, canImprove, potentialScore);
+  const blockingFixable = fixable.filter((item) => item.level !== "P2");
+  const canImprove = !strictPass && !unchanged && blockingFixable.length > 0;
+  const summary = unchanged ? "上次追加后已保存内容没有变化，停止自动续期；请先处理未完成的质量项。" : repairSummary(report, blockingFixable.length, uncertain.length, canImprove, potentialScore);
 
   return {
     fingerprint,
@@ -294,8 +306,8 @@ function latestSavedItinerary(
   return null;
 }
 
-function adviseIssue(issue: QualityIssue): BudgetIssueAdvice {
-  const advice = adviceFor(issue);
+function adviseIssue(issue: QualityIssue, override?: RepairRule): BudgetIssueAdvice {
+  const advice = override ?? adviceFor(issue);
   return {
     level: issue.level,
     code: issue.code,
@@ -315,6 +327,13 @@ function adviceFor(issue: QualityIssue): RepairRule {
 }
 
 const REPAIR_RULES: Record<string, RepairRule> = {
+  "unmaterialized-outline-day": { category: "edit", action: "按粗排目标日期保存实际行程；预留不计完成，不重读不存在的日期" },
+  "unfulfilled-reservation": { category: "edit", action: "只补缺少的预留景点，或同步调整该日期粗排" },
+  "outline-day-count-mismatch": { category: "edit", action: "先补齐全局日期与主景点分配，再逐日保存实际安排" },
+  "visit-allocation-conflict": { category: "edit", action: "检查共享占用清单，优先替换冲突单条或用move原子移动，不重写其他日期" },
+  "excluded-visit-assigned": { category: "edit", action: "移除已排除景点，或按用户新要求解除排除" },
+  "closure-exception-check": { category: "edit", action: "按已有常规闭馆规则调整到其他日期；若确有法定假日开放依据再确认例外，不重复查同一规则" },
+  "unverified-closure": { category: "tool", action: "仅在尚未查询时补一次关键闭馆依据；已查无依据保持待确认" },
   "missing-location": { category: "tool", action: "用 geocode / search_attractions 补地点与坐标" },
   "missing-coordinates": { category: "tool", action: "从搜索工具返回结果逐字补齐经纬度" },
   "unverified-coordinates": {
@@ -335,7 +354,7 @@ const REPAIR_RULES: Record<string, RepairRule> = {
   "day-too-long": { category: "edit", action: "减少当天活动或拆分到其他天" },
   "remote-day-overpacked": {
     category: "edit",
-    action: "按远郊日模板只保留 1 个主景点，最多增加主景点 20 公里内的 1 个轻量活动；返回市区后不再加景点",
+    action: "远郊点数为节奏建议；按真实交通耗时、开放与可用时间决定是否删减，不单凭回城加点要求重查",
   },
   "time-out-of-order": { category: "edit", action: "按实际时间重排条目" },
   "time-overlap": { category: "edit", action: "顺延或缩短冲突条目" },

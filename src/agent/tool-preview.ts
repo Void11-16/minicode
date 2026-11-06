@@ -1,9 +1,9 @@
 import type { ToolOutputKind } from "../tools/tool.ts";
 
 type Row = Record<string, unknown>;
-const PLACE_KEYS = ["name", "id", "evidence_id", "type", "location", "latitude", "longitude", "lat", "lng", "lon", "crs", "rating", "cost_per_person", "price", "price_unit", "opening_hours", "source", "evidence_verified"];
-const ROUTE_KEYS = ["from", "to", "id", "route_evidence_id", "mode", "transport_mode", "duration_min", "durationSec", "duration_sec", "distance_km", "distanceM", "distance_m", "estimated", "route_verified", "source"];
-const ITEM_KEYS = [...PLACE_KEYS, ...ROUTE_KEYS, "time", "end_time", "subtype", "planned_duration_min", "reservation_required"];
+const PLACE_KEYS = ["recommended_spots", "parent_visit", "name", "id", "evidence_id", "type", "location", "latitude", "longitude", "lat", "lng", "lon", "crs", "rating", "cost_per_person", "price", "price_unit", "opening_hours", "source", "evidence_verified"];
+const ROUTE_KEYS = ["from", "to", "id", "route_evidence_id", "mode", "transport_mode", "duration_min", "durationSec", "duration_sec", "distance_km", "distanceM", "distance_m", "estimated", "route_verified", "route_binding_error", "source"];
+const ITEM_KEYS = ["activity", ...PLACE_KEYS, ...ROUTE_KEYS, "time", "end_time", "time_locked", "subtype", "planned_duration_min", "reservation_required", "opening_evidence_ids", "opening_sessions", "closed_dates"];
 const ISSUE_KEYS = ["level", "kind", "code", "day", "item_id", "related_days", "related_codes", "message"];
 
 function row(value: unknown): Row | undefined {
@@ -15,9 +15,14 @@ function project(value: Row, keys: readonly string[]): Row {
   return Object.fromEntries(keys.flatMap((key): [string, unknown][] => {
     const field = value[key];
     if (field === undefined) return [];
-    if (key === "message" && typeof field === "string" && field.length > 240) return [[key, field.slice(0, 239) + "…"]];
+    if (key === "message" && typeof field === "string") {
+      // 保留可直接执行的局部路线修复参数，仍受单条与整个摘要预算约束。
+      const limit = field.includes("plan_day_routes(") ? 800 : 240;
+      if (field.length > limit) return [[key, field.slice(0, limit - 1) + "…"]];
+    }
     if (key === "location" && row(field)) return [[key, project(row(field)!, ["latitude", "longitude", "lat", "lng", "lon", "crs", "source"])]];
-    if (key === "opening_hours" && row(field)) return [[key, project(row(field)!, ["opens", "closes", "closed_weekdays", "source"])]];
+    if (key === "parent_visit" && row(field)) return [[key, project(row(field)!, ["name", "evidence_id"])]];
+    if (key === "opening_hours" && row(field)) return [[key, project(row(field)!, ["opens", "closes", "intervals", "last_admission", "closed_weekdays", "source"])]];
     if (key === "issue_count" && row(field)) return [[key, project(row(field)!, ["P0", "P1", "P2"])]];
     if (typeof field === "string" || typeof field === "number" || typeof field === "boolean" || field === null || Array.isArray(field)) return [[key, field]];
     return [];
@@ -48,8 +53,12 @@ function arrayIn(value: unknown, keys: readonly string[]): unknown[] | undefined
   return undefined;
 }
 
-function jsonPreview(kind: ToolOutputKind, value: unknown, budget: number): string | undefined {
+function jsonPreview(kind: ToolOutputKind | "error", value: unknown, budget: number): string | undefined {
   const root = row(value) ?? {};
+  if (kind === "error" && root.error_type === "validation" && Array.isArray(root.issues)) {
+    return fit(JSON.stringify({ error_type: root.error_type, code: root.code, total_issues: root.issues.length }),
+      root.issues.flatMap((value) => row(value) ? [JSON.stringify(project(row(value)!, ["code", "path", "date", "item_id", "item_name", "expected", "actual", "message", "hint"]))] : []), budget);
+  }
   const meta = JSON.stringify(project(root, ["title", "status", "score", "score_version", "revision", "strict_pass", "issue_count", "source", "crs", "total", "count", "total_duration_min", "total_distance_km"]));
   if (kind === "place-list" || kind === "route") {
     const values = arrayIn(value, kind === "place-list" ? ["places", "pois", "results", "items", "data"] : ["legs", "routes", "results"]);
@@ -92,7 +101,7 @@ function textPreview(kind: ToolOutputKind, text: string, budget: number): string
       if (!m) return [];
       const fields = m[2]!.split("|").map((field) => field.trim());
       const name = m[1]!;
-      const kept = fields.filter((field, index) => (index === 0 && field.length < 120) || /坐标|crs|评分|人均|参考价|开放|闭馆|类型|来源|source|evidence_id/.test(field));
+      const kept = fields.filter((field, index) => (index === 0 && field.length < 120) || /坐标|crs|评分|人均|参考价|开放|闭馆|类型|来源|内部推荐|所属主景区|source|evidence_id/.test(field));
       const matches = ids.get(name) ?? ids.get(name.replace(/ 综合 [\d.]+$/, ""));
       const id = matches?.size === 1 ? [...matches][0] : undefined;
       return [[name, ...kept, ...(id ? [`evidence_id=${id}`] : [])].join(" | ")];
@@ -120,10 +129,11 @@ function textPreview(kind: ToolOutputKind, text: string, budget: number): string
     });
     const total = lines.find((line) => line.startsWith("全天通勤合计"));
     const ambiguity = [...evidence.values()].some((values) => values.size > 1) ? "同端点存在多个路线证据，未自动绑定，请查原文核对。" : undefined;
-    return records.length ? fit([header, total, ambiguity].filter(Boolean).join("\n"), records, budget) : undefined;
+    const saveHint = lines.find((line) => line.startsWith("下一步:"));
+    return records.length ? fit([header, total, ambiguity, saveHint].filter(Boolean).join("\n"), records, budget) : undefined;
   }
   if (kind === "validation" || kind === "itinerary") {
-    const meta = lines.filter((line) => /^(?:已保存|版本:|分日验收:|局部修复日期:|质量:|完整性:|strict:)/.test(line));
+    const meta = lines.filter((line) => /^(?:已保存|版本:|路线修复:|路线下一步:|分日验收:|局部修复日期:|质量:|完整性:|strict:)/.test(line));
     const issues = lines.filter((line) => /^\[P[012]\]/.test(line)).sort();
     return meta.length && issues.length ? fit(meta.join("\n"), issues, budget) : undefined;
   }
@@ -132,7 +142,7 @@ function textPreview(kind: ToolOutputKind, text: string, budget: number): string
 
 /** 优先使用工具类型的确定性字段投影；未知格式交还通用预览，不调用额外模型。 */
 export function structuredToolPreview(kind: ToolOutputKind | "error", text: string, budget: number): string | undefined {
-  if (kind === "error" || kind === "generic" || kind === "file" || kind === "command") return undefined;
+  if (kind === "generic" || kind === "file" || kind === "command") return undefined;
   const first = text[text.search(/\S/)];
   if (text.length <= 2_000_000 && (first === "[" || first === "{")) {
     try {
@@ -140,5 +150,5 @@ export function structuredToolPreview(kind: ToolOutputKind | "error", text: stri
       if (preview !== undefined) return preview;
     } catch { /* 非 JSON 或未知结构继续使用文本预览。 */ }
   }
-  return textPreview(kind, text, budget);
+  return kind === "error" ? undefined : textPreview(kind, text, budget);
 }

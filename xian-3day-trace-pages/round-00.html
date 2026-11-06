@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>西安三日游 · Agent 执行追踪</title>
+<style>
+:root{color-scheme:light;--bg:#eef1f5;--panel:#fff;--ink:#142233;--muted:#4e6175;--line:#dce4eb;--blue:#184eaa;--pale:#e9f1fd;--dark:#121e30;--code:#f3f6f9;--green:#0d664f;--warn:#935516;--red:#a6383d}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.6 system-ui,-apple-system,"PingFang SC",sans-serif}button,input,select{font:inherit}button,select{cursor:pointer}a{color:var(--blue)}button:focus-visible,select:focus-visible,input:focus-visible,summary:focus-visible{outline:3px solid #5394f3;outline-offset:2px}code,pre,.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+.hero{background:var(--dark);color:#f4f7fc;border-bottom:5px solid #2a75e5}.wrap{width:min(1460px,calc(100% - 56px));margin:auto}.hero .wrap{padding:37px 0 32px}.kicker{color:#a5c6ff;font-size:12px;letter-spacing:.17em;font-weight:700}.hero h1{font-size:clamp(30px,5vw,53px);letter-spacing:-.045em;line-height:1.15;margin:8px 0 12px}.hero p{color:#d2ddea;margin:0;max-width:920px}.hero .route a{color:#d2e4ff;margin-right:14px}.hero .route{margin-top:17px;font-size:13px;color:#a5c6ff}.main{padding:22px 0 50px}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:18px}.stat,.panel,.explainer{background:var(--panel);border:1px solid var(--line);border-radius:11px}.stat{padding:13px 15px}.stat small{display:block;color:var(--muted)}.stat strong{font-size:22px;line-height:1.25}.explainer{padding:0 16px;margin:0 0 16px}.explainer summary{font-weight:700;padding:12px 0;cursor:pointer}.explainer p,.explainer ul{margin:0 0 12px}.explainer a{overflow-wrap:anywhere}
+.layout{display:grid;grid-template-columns:222px minmax(0,1fr);gap:16px;align-items:start}.panel{min-width:0}.side{position:sticky;top:12px;padding:12px}.side h2{font-size:13px;margin:2px 5px 9px;color:var(--muted)}.stage{display:flex;justify-content:space-between;width:100%;align-items:center;gap:5px;text-align:left;margin:2px 0;padding:6px 8px;border:1px solid transparent;border-radius:7px;background:transparent;color:var(--ink)}.stage[aria-pressed=true]{background:var(--pale);border-color:#bdd4f5;color:var(--blue);font-weight:700}.count{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+.inspector{padding:15px}.controls{display:flex;flex-wrap:wrap;gap:9px;align-items:end;margin:0 0 10px}.controls label{display:grid;gap:3px;font-size:13px;font-weight:650}.controls label.search{flex:1;min-width:190px}.controls input,.controls select,.pager button,.copy{border:1px solid #c8d3dd;background:white;border-radius:7px;padding:6px 9px;color:var(--ink)}.controls input{width:100%}.blurb{color:var(--muted);font-size:13px;margin:3px 0 10px}.status{font-size:13px;color:var(--muted);margin:4px 0 8px}
+.ev{border:1px solid var(--line);border-radius:8px;margin:6px 0}.ev[open]{border-color:#aac5ee}.ev summary{display:grid;grid-template-columns:59px minmax(89px,auto) 1fr auto;align-items:center;gap:8px;padding:8px 10px;cursor:pointer;list-style:none}.ev summary::-webkit-details-marker{display:none}.ev summary:before{content:"";display:none}.ev summary:hover{background:#f6f9fd}.ev[open] summary{background:#edf4fe}.eventno,.stamp{color:var(--muted);font-size:11px}.badge{width:fit-content;background:var(--pale);color:var(--blue);border-radius:4px;padding:1px 6px;font-size:11px;font-weight:700}.fail{background:#fdeef0;color:var(--red)}.act{font-weight:680;overflow-wrap:anywhere}.row-note{padding:7px 10px;color:var(--muted);font-size:12px}.payload{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px;padding:0 9px 9px}.data{background:var(--code);border:1px solid var(--line);border-radius:6px;min-width:0}.data-head{display:flex;align-items:center;justify-content:space-between;padding:4px 8px;font-size:12px;font-weight:750;border-bottom:1px solid var(--line)}.copy{font-size:11px;padding:1px 6px}pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:460px;overflow:auto;font-size:12px;line-height:1.55;margin:0;padding:8px;tab-size:2}.pager{display:flex;justify-content:space-between;align-items:center;margin-top:10px}.pager button:disabled{opacity:.5;cursor:default}.foot{padding:12px 2px;color:var(--muted);font-size:12px}
+@media(max-width:830px){.wrap{width:calc(100% - 24px)}.layout{grid-template-columns:1fr}.side{position:static;display:flex;flex-wrap:wrap;gap:4px}.side h2{width:100%}.stage{width:auto;padding:4px 7px}.stats{grid-template-columns:1fr 1fr}.payload{grid-template-columns:1fr}.ev summary{grid-template-columns:50px auto 1fr}.stamp{display:none}}
+</style>
+</head>
+<body>
+<header class="hero"><div class="wrap">
+<div class="kicker">MINICODE / 执行追踪</div><h1>西安三日游 · 第 0 轮</h1>
+<p id="request">读取执行记录…</p>
+<div class="route"><a href="../xian-3day-agent-trace.html">← 返回轮次目录</a>  <a href="round-01.html">下一轮</a></div>
+</div></header>
+<main class="wrap main">
+<div class="stats" id="stats" aria-label="运行摘要"></div>
+<details class="explainer"><summary>如何读这份记录 · 采集范围与源码入口</summary>
+<p>使用一个独立会话，通过 <code>AgentRuntime.send()</code> 运行真实模型和注册工具。工具在隔离工作区写行程，预算续期用追踪脚本的评测式判断。正式 Web 会将追加预算请求交给用户。未采集浏览器 HTTP、模型供应商密钥或地图供应商的请求正文。本页只加载当前轮，其他轮可从目录打开。</p>
+<p><strong>同一份内容可能出现多次。</strong> Context 记录传给 Provider 的内部消息和工具定义。Provider 记录 OpenAI 兼容请求体与响应原文。LLM 记录 Provider 解析后交回 Agent 的结果。Tool 是执行器的原始结果，ToolRegistry 的结果可能已经加入地点证据等包装，Session 写回的是准备带入下一轮的内容。</p>
+<p>「请求 1」是第一次带工具模型请求，之后按模型请求编号递增。请求前的用户写入属于请求 0。流式响应原文由旁路异步采集，因此记录写入顺序可能与同次调用的解析结果交错，请用 <code>wire</code> 关联 HTTP 请求，用 <code>callId / toolCallId</code> 关联单次工具调用。上下文摘要请求仍有独立的 <code>wire</code>。</p>
+<p><strong>质量口径。</strong> Validator 记录保存或校验时的质量报告，并在结束后独立复核最终文件。Eval 读取最终文件，按案例约束再测天数、必去项、预算与其他指标。Agent Loop 的「本轮结束」只代表运行结束。校验失败会在异常文本中保留报告，未提交的内部对象没有额外快照。</p>
+<ul>
+<li>用户入口与会话队列 <a href="../src/runtime/runtime.ts">src/runtime/runtime.ts</a> · <a href="../src/runtime/scheduler.ts">src/runtime/scheduler.ts</a></li>
+<li>会话、模型循环和上下文计量 <a href="../src/core/session.ts">src/core/session.ts</a> · <a href="../src/agent/agent.ts">src/agent/agent.ts</a> · <a href="../src/context/request.ts">src/context/request.ts</a></li>
+<li>协议封装与流式解析 <a href="../src/llm/openai.ts">src/llm/openai.ts</a> · 工具查找、缓存与结果整理 <a href="../src/tools/tool.ts">src/tools/tool.ts</a></li>
+<li>行程保存和质量评估 <a href="../src/tools/itinerary.ts">src/tools/itinerary.ts</a> · <a href="../src/tools/itinerary-validator.ts">src/tools/itinerary-validator.ts</a> · <a href="../src/eval/metrics.ts">src/eval/metrics.ts</a></li>
+</ul></details>
+<div class="layout">
+<aside id="stages" class="panel side" aria-label="按所属块筛选"><h2>所属块</h2></aside>
+<section class="panel inspector" aria-label="执行事件">
+<div class="controls">
+<label class="search">查找关键词或调用 ID<input id="search" type="search" placeholder="例如 search_attractions、兵马俑、tool_call"></label>
+<label>模型请求<select id="round"><option value="">所有请求</option></select></label>
+<label>查看方式<select id="view"><option value="">全部事件</option><option value="flow">只看每轮关键事件</option><option value="end">最终文件与评估</option><option value="error">错误与受阻</option></select></label>
+</div>
+<div id="blurb" class="blurb"></div>
+<div id="status" class="status" aria-live="polite"></div><div id="rows"></div>
+<div class="pager"><button id="prev" type="button">上一页</button><span id="page"></span><button id="next" type="button">下一页</button></div>
+</section>
+</div>
+<div class="foot">时间显示为北京时间。展开事件可查看记录的完整字段，原文按文本显示。</div>
+</main>
+<script id="trace" type="application/octet-stream">H4sIAAAAAAACE9WUW08TQRiG/wr5rqdkd3uAzp3ijQkmFb3SGLLsju2G7U7ZmUVIswmnog21ESwqIjEQDiVq1RgO0kp/jJ1ue8VfMN2WSiMxcqXeTSZz+L7neWfSQCaJxRng+2kwdMAyAps6lg5YQjBmUm0cMHiFYv3JUeP0ucjsAAJV4wa1AEPj07xXKPZdixOLjzgWN5KknxFLb63hgEGRlEhAlgNS6K6sYGkAK+H+aES+BwgMK+VwwGlghDGDWjd1wP54VB6IBgeiISkUjkak0bFwRFaCg+TnFmjsVEUp6+X3a8dZsb1/VsmJzEFz/32tuiyqGZEv+zOHtfKL+vwXUcrW8yvibV5srYmVnNjea67Pis2CWC42Tr+eVXKNzZxXXKodP23szjYODs8qudrJidh4XJ8pN7cWvNJLRZIkkZn/PjMHCJJUJ4BhwiEOARcBdXinj5RNJw2d2IBBJyTFCBnH54OAllA5INBURvxGpwzVCgT1QMJgnNrTgIBMpYjGiX5DnWaAgwgeUXucpVStdV3zdcHbLXvrJfFtFVwXtVUpl6nyXfQNU5q6KEpUZsTekthe8J4tdmR+PKp/nruKKON/MNSjpBOt276sc2kIuK1OEvOWb5LbDukCDV4G9E77kB6ai2sis9PnMGL/HqDSA9CmZquMzjaNWpxY/xCtJGFMjbfzmWTxHsvKqAwIOmkdJlacJwDLXXChPwX3pihKWZFpleqt5mrVDfHhlai+8zJ7VwH5Sx0X2zBVxkd6SHNKzesq1xKEAZZc9wECm0w4hLW+vfBge8GQapoM8KCEgDnJpGpPtw5TNe6oZvdNMm4bGo+pjAF+qJqMIEiS1hzz46ZRmwCOhhAYjDlkiDr+z5qGmOSTicmAwwhiCmAl5Lput46/G4If2VVH2QQGAAA=</script>
+<script>
+(async () => {
+'use strict';
+const raw=Uint8Array.from(atob(document.getElementById('trace').textContent.trim()),c=>c.charCodeAt(0));
+const stream=new Blob([raw]).stream().pipeThrough(new DecompressionStream('gzip'));
+const data=await new Response(stream).json();
+document.getElementById('trace').remove();
+const $=id=>document.getElementById(id);
+const make=(tag,cls,text)=>{const n=document.createElement(tag);if(cls)n.className=cls;if(text!==undefined)n.textContent=text;return n};
+const descriptions={
+ '全部':'展开事件查看输入、输出。用所属块、模型请求或关键词定位同一条调用的不同层。',
+ '用户输入':'追踪从 AgentRuntime.send 开始，记录原始用户文本、会话 ID 和投递模式。',
+ 'Agent Loop':'处理队列、执行模型返回的一批工具调用，按预算或模型文字结束本轮。',
+ 'Session':'追加用户、助手和工具消息。工具回写用 toolCallId 对应之前的调用请求。',
+ 'Context':'记录模型输入的计量，以及实际交给 Provider 的消息与工具定义。',
+ 'Provider':'显示 HTTP 请求体、状态和原始响应，凭据头没有采集。',
+ 'LLM':'显示已解析的工具调用批次或最终文字，工具参数在协议中通常是 JSON 字符串。',
+ 'ToolRegistry':'按名称查找已注册工具，执行参数解析、缓存、证据归档等操作并返回结果。',
+ 'Tool':'显示工具执行器实际收到的参数、原始结果或异常。缓存命中时可能没有执行器事件。',
+ 'Validator':'显示行程快照与质量报告，strict 需要 P0、P1 都为 0。',
+ 'Eval':'按案例要求对最终落盘版本复核，并记录质量与工具利用统计。'
+};
+const all=['用户输入','Agent Loop','Session','Context','Provider','LLM','ToolRegistry','Tool','Validator','Eval'];
+const events=data.events;
+const lastEval=data.summary;
+const finalReply=true;
+$('request').textContent=data.request;
+const metrics=lastEval.metrics||{};
+const blocks=[['运行结果',finalReply?'本轮已结束':'本轮未返回'],['带工具请求 / 工具调用',(lastEval.observedRequests??data.requests)+' / '+(lastEval.observedToolCalls??data.toolCalls)],['落盘天数',(lastEval.actualDays??'—')+' / 3'],['整体验收',lastEval.strictPass===true?'通过':lastEval.strictPass===false?'未通过':'未取得报告']];
+for(const [label,value] of blocks){const n=make('div','stat');n.append(make('small','',label),make('strong','',value));$('stats').append(n);}
+if(metrics.issueCounts){const status=$('stats').lastElementChild;status.append(make('small','',`P0 ${metrics.issueCounts.P0} · P1 ${metrics.issueCounts.P1} · P2 ${metrics.issueCounts.P2} · ${metrics.score} 分`));}
+let block='全部',page=0,timer;
+const perPage=45;
+const stages=new Map();
+for(const key of ['全部',...all]){
+ const btn=make('button','stage');btn.type='button';btn.append(make('span','',key),make('span','count',String(key==='全部'?events.length:events.filter(x=>x.block===key).length)));
+ btn.addEventListener('click',()=>{block=key;page=0;render()});$('stages').append(btn);stages.set(key,btn);
+}
+for(const value of [...new Set(events.map(x=>x.round))].sort((a,b)=>a-b)){
+ const option=make('option','',value===0?'请求 0 · 入队和首轮准备':'请求 '+value);option.value=value;$('round').append(option);
+}
+const failure=e=>/失败|异常|返回错误|denied/.test(e.action);
+const asText=value=>typeof value==='string'?value:JSON.stringify(value,null,2)??'—';
+const flow=e=>e.block==='用户输入'||e.block==='LLM'||e.block==='Eval'||e.block==='Validator'||e.action==='度量完整输入'||e.action==='按名称查找 '+e.input?.name||e.action==='写入 tool'||e.action==='本轮结束';
+function payload(title,value){
+ const p=make('div','data'),head=make('div','data-head'),btn=make('button','copy','复制');
+ btn.type='button';btn.addEventListener('click',async()=>{try{await navigator.clipboard.writeText(asText(value));btn.textContent='已复制';}catch{const sel=getSelection(),range=document.createRange();range.selectNodeContents(p.lastElementChild);sel.removeAllRanges();sel.addRange(range);btn.textContent='已选中';}});
+ head.append(make('span','',title),btn);p.append(head,make('pre','',asText(value)));return p;
+}
+const fmt=new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai',hour:'2-digit',minute:'2-digit',second:'2-digit',fractionalSecondDigits:3,hour12:false});
+function row(e){
+ const d=make('details','ev'),s=make('summary');
+ s.append(make('span','eventno mono','#'+String(e.id).padStart(3,'0')+' / R'+e.round),make('span','badge'+(failure(e)?' fail':''),e.block),make('span','act',e.action),make('time','stamp mono',fmt.format(new Date(e.at))));
+ d.append(s);d.addEventListener('toggle',()=>{if(!d.open||d.children.length>1)return;
+  const note=make('div','row-note',descriptions[e.block]||'');
+  const call=e.input?.callId||e.input?.toolCallId||e.output?.callId;
+  if(call){const follow=make('button','copy','查找同次调用');follow.type='button';follow.style.marginLeft='8px';follow.addEventListener('click',()=>{block='全部';page=0;$('round').value='';$('view').value='';$('search').value=call;render();});note.append(follow);}
+  const io=make('div','payload');io.append(payload('输入',e.input),payload('输出',e.output));d.append(note,io);
+ });return d;
+}
+function render(){
+ for(const [key,btn] of stages)btn.setAttribute('aria-pressed',String(key===block));
+ $('blurb').textContent=descriptions[block];
+ const query=$('search').value.trim().toLowerCase(),round=$('round').value,view=$('view').value;
+ const matches=events.filter(e=>(block==='全部'||e.block===block)&&(round===''||e.round===Number(round))
+  &&(view!=='flow'||flow(e))&&(view!=='end'||e.block==='Eval'||e.action==='本轮结束'||e.action==='独立复核最终落盘版本')&&(view!=='error'||failure(e))
+  &&(!query||(e.searchText??=JSON.stringify(e).toLowerCase()).includes(query)));
+ const pages=Math.max(1,Math.ceil(matches.length/perPage));page=Math.min(page,pages-1);
+ const first=page*perPage, subset=matches.slice(first,first+perPage);
+ $('rows').replaceChildren(...subset.map(row));
+ $('status').textContent=matches.length?`共 ${matches.length} 条 · 显示 ${first+1}–${first+subset.length}`:'没有匹配的事件';
+ $('page').textContent=`第 ${page+1} / ${pages} 页`;$('prev').disabled=page===0;$('next').disabled=page>=pages-1;
+}
+$('search').addEventListener('input',()=>{clearTimeout(timer);timer=setTimeout(()=>{page=0;render()},150)});
+for(const id of ['round','view'])$(id).addEventListener('change',()=>{page=0;render()});
+$('prev').addEventListener('click',()=>{page--;render()});$('next').addEventListener('click',()=>{page++;render()});
+render();
+})().catch(error=>{document.getElementById('status').textContent='无法解压本页。请用新版 Chrome、Safari 或 Edge 打开。';console.error(error);});
+</script>
+</body>
+</html>

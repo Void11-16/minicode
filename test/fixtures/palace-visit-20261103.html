@@ -1,0 +1,786 @@
+<!doctype html>
+<!-- Source: https://www.dpm.org.cn/Visit.html; captured 2026-11-03. Unchanged body excerpt through opening-time section. -->
+<html><head><title>导览 - 故宫博物院</title></head>
+<body>
+<!-- 2024-4-10 start-->
+<div class="pop-mod pop-text1">
+
+    <div class="pop-panel" pop-hide>
+        <div class="pop-dialog">
+            <div class="pop-cont">
+                <div class="pop-close xicon xicon-close"></div>
+
+                <div class="cgalert">
+
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+<!-- 2024-4-10 end-->
+<div id="alertBox" class="pop-mod pop-box1">
+    <div class="pop-panel" pop-hide>
+        <div class="pop-dialog" >
+            <div class="pop-cont">
+                <div class="pop-close"></div>
+                <div class="box">
+                    <div class="t"></div>
+                    <div class="qd">
+                        <a>确 定</a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    $(function () {
+        $('#alertBox .pop-cont .box .qd').on('click', function () {
+            $('#alertBox').trigger('hide');
+        });
+    });
+</script>
+
+<div class="pop-mod pop-box1" id="my_alert">
+    <div class="pop-panel" pop-hide>
+        <div class="pop-dialog" style="padding: 0; height: auto;">
+            <div class="pop-cont">
+                <div class="pop-close"></div>
+                <div class="box">
+                    <div class="t"></div>
+                    <div class="qd">
+                        <a href="javascript:;">确 定</a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    var my_alert = function(content, url) {
+        $.utils.unWinScroll();
+        url = url ? url : 'javascript:;';
+
+        $('#my_alert .box .t').html(content);
+        $('#my_alert .qd a').attr('href', url);
+
+        $("#my_alert").trigger("show");
+        if (typeof(url) == 'function') {
+            $('#my_alert .qd a').attr('href', 'javascript:;');
+            $('#my_alert .qd a').click(function(e) {
+                $.utils.enWinScroll();
+                url();
+                $("#my_alert").trigger("hide");
+                return false;
+            });
+        }else{
+            $('#my_alert .qd a').click(function(e) {
+                $.utils.enWinScroll();
+                if(url != 'javascript:;' && url != 'javascript:void(0)' && url != ''){
+                    window.location.href = url;
+                }
+                $("#my_alert").trigger("hide");
+            });
+        }
+    }
+</script>
+<div class="x-layout">
+    <div class="top-mod">
+        <div class="mess_ance">
+            <div class="liuyan">
+                <div class="icon">
+                    <img src="https://img.dpm.org.cn/static/themes/image/icon_mess.png" alt="" class="i">
+                </div>
+                <div class="p">我要留言</div>
+                <a href="/bottom/ask.html" class="aa" title="我要留言"></a>
+            </div>
+            <div class="liuyan">
+                <div class="icon">
+                    <img src="https://img.dpm.org.cn/static/themes/image/icon_mess2.png" alt="" class="i">
+                </div>
+                <div class="p">无障碍<span>浏览</span></div>
+                <a class="aa esdTli" style="cursor: pointer;"  onclick="document.getElementById('toolbarSwitch').click();" role="button" aria-label="无障碍"></a>
+            </div>
+        </div>
+        <div class="topping xfont xicon-up"></div>
+    </div>
+    <div class="x-header ">
+    <div class="p-header">
+        <div class="x-wrap">
+            <div id="tq"></div>
+            <div class="logo-w"><div class="logo">
+    <a href="/">
+        <img src="https://img.dpm.org.cn/Uploads/image/2024/04/30/1714450493JdsBlxksO1.png" alt="故宫博物院" class="red"/>
+        <img src="https://img.dpm.org.cn/Uploads/image/2024/04/30/1714450493mKvocjUTZ1.png" alt="故宫博物院" class="wht"/>
+    </a>
+</div>
+<div class="logo_m">
+    <a href="/">
+        <img src="https://img.dpm.org.cn/Uploads/image/2024/04/30/1714450493oMLPHAkOn1.png" alt="故宫博物院" class="red"/>
+    </a>
+</div></div>            <div class="nav_main">
+    <ul>
+                    <li>
+                <a  href="/Home.html" title="首页">首页</a>
+            </li>
+                    <li>
+                <a  href="/Visit.html" title="导览">导览</a>
+            </li>
+                    <li>
+                <a  href="/shows.html" title="展览">展览</a>
+            </li>
+                    <li>
+                <a  href="/Events.html" title="教育">教育</a>
+            </li>
+                    <li>
+                <a  href="/Explore.html" title="探索">探索</a>
+            </li>
+                    <li>
+                <a  href="/Research.html" title="学术">学术</a>
+            </li>
+                    <li>
+                <a  href="/Creative.html" title="文创">文创</a>
+            </li>
+                    <li>
+                <a  href="/About.html" title="关于">关于</a>
+            </li>
+            </ul>
+</div>
+<div class="nav_child">
+        <ul class="item">
+            </ul>
+        <ul class="item">
+                <li>
+            <a  href="/Visit.html#block3" title="开放时间">开放时间</a>
+        </li>
+                <li>
+            <a  href="https://ticket.dpm.org.cn/" target="_blank" title="在线订票">在线订票</a>
+        </li>
+                <li>
+            <a  href="/Visit.html#block5" title="交通路线">交通路线</a>
+        </li>
+                <li>
+            <a  href="/Visit.html#block6" title="参观须知">参观须知</a>
+        </li>
+                <li>
+            <a  href="https://pano.dpm.org.cn/" target="_blank" title="全景故宫">全景故宫</a>
+        </li>
+            </ul>
+        <ul class="item">
+                <li>
+            <a  href="/shows.html#temporary2" title="近期展览">近期展览</a>
+        </li>
+                <li>
+            <a  href="/shows.html#temporary4" title="专馆">专馆</a>
+        </li>
+                <li>
+            <a  href="/shows.html#temporary_5" title="原状陈列">原状陈列</a>
+        </li>
+                <li>
+            <a  href="/shows.html#temporary_6" title="赴外展览">赴外展览</a>
+        </li>
+            </ul>
+        <ul class="item">
+                <li>
+            <a  href="/Events.html#hd1-2" title="教育新闻">教育新闻</a>
+        </li>
+                <li>
+            <a  href="/gugongforum.html" title="故宫讲坛">故宫讲坛</a>
+        </li>
+                <li>
+            <a  href="/calligraphy_paint/index.html" title="书画考级">书画考级</a>
+        </li>
+                <li>
+            <a  href="/Events.html#hd1-3" title="故宫博物院教育中心">故宫博物院教育中心</a>
+        </li>
+                <li>
+            <a  href="/Events.html#hd1-6" title="国际博协培训中心">国际博协培训中心</a>
+        </li>
+                <li>
+            <a  href="/Events.html#hd1-7" title="故宫志愿者">故宫志愿者</a>
+        </li>
+            </ul>
+        <ul class="item">
+                <li>
+            <a  href="/explore/buildings.html" title="建筑">建筑</a>
+        </li>
+                <li>
+            <a  href="/explore/collections.html" title="藏品">藏品</a>
+        </li>
+                <li>
+            <a  href="/explore/ancients.html" title="古籍">古籍</a>
+        </li>
+                <li>
+            <a  href="/explores/courts.html" title="宫廷历史">宫廷历史</a>
+        </li>
+                <li>
+            <a  href="/explore/protects.html" title="文物医院">文物医院</a>
+        </li>
+                <li>
+            <a  href="/explore/cultures.html" title="文化专题">文化专题</a>
+        </li>
+                <li>
+            <a  href="http://minghuaji.dpm.org.cn" target="_blank" title="名画记">名画记</a>
+        </li>
+                <li>
+            <a  href="/shuziduobaoge.html" target="_blank" title="数字多宝阁">数字多宝阁</a>
+        </li>
+                <li>
+            <a  href="https://digicol.dpm.org.cn/" target="_blank" title="数字文物库">数字文物库</a>
+        </li>
+                <li>
+            <a  href="https://zm-digicol.dpm.org.cn/" target="_blank" title="藏品总目">藏品总目</a>
+        </li>
+            </ul>
+        <ul class="item">
+                <li>
+            <a  href="/learning/dynamic.html" title="学术资讯">学术资讯</a>
+        </li>
+                <li>
+            <a  href="/expert.html" title="专家名录">专家名录</a>
+        </li>
+                <li>
+            <a  href="/achaime/institute.html" title="故宫学研究院">故宫学研究院</a>
+        </li>
+                <li>
+            <a  href="/Research.html#other_institution1" title="其他学术机构">其他学术机构</a>
+        </li>
+                <li>
+            <a  href="/journals.html" title="故宫博物院院刊">故宫博物院院刊</a>
+        </li>
+            </ul>
+        <ul class="item">
+                <li>
+            <a  href="/publishes.html" title="故宫出版">故宫出版</a>
+        </li>
+                <li>
+            <a  href="/Creative.html#protects" title="文创产品">文创产品</a>
+        </li>
+                <li>
+            <a  href="/lights/royal.html" title="故宫壁纸">故宫壁纸</a>
+        </li>
+                <li>
+            <a  href="/Creative.html#app" title="故宫APP">故宫APP</a>
+        </li>
+                <li>
+            <a  href="http://young.dpm.org.cn/damaoxian#gamezone" target="_blank" title="故宫游戏">故宫游戏</a>
+        </li>
+            </ul>
+        <ul class="item">
+                <li>
+            <a  href="/about/about_view.html" title="总说">总说</a>
+        </li>
+                <li>
+            <a  href="/about/leader_list.html" title="领导">领导</a>
+        </li>
+                <li>
+            <a  href="/about/information.html" title="资讯">资讯</a>
+        </li>
+                <li>
+            <a  href="/about/about_chron.html" title="院史编年">院史编年</a>
+        </li>
+                <li>
+            <a  href="/about/patrons+benefactors.html" title="景仁榜">景仁榜</a>
+        </li>
+                <li>
+            <a  href="/about/organization.html" title="机构设置">机构设置</a>
+        </li>
+            </ul>
+    </div>            <div class="tools">
+                <ul>
+                                            <li class="esdTli"  id="toolbarSwitch"  onclick="EsdToolbarInit.openClickFunc();" onkeydown="EsdToolbarInit.openKeydownFunc(event);" >
+                            <div class="icn"  ></div>
+                            <a href="javascript:;" role="button" aria-label="无障碍" >无障碍</a>
+                        </li>
+                                        <li class="meg">
+                        <a class="icn" href="/bottom/ask.html"></a>
+                        <div class="ul">
+                            <a href="/bottom/ask.html" class="a">留言板</a>
+                        </div>
+                    </li>
+                    <li class="login_1">
+                        <a class="icn" href="/passport/login.html"></a>
+                        <div class="ul">
+                            <a href="/passport/login.html" class="a">登录</a>
+                            <a href="/passport/login.html?type=register" class="a">注册</a>
+                        </div>
+                    </li>
+                    <li class="lang">
+                        <div class="icn">
+                            <a href="/">中</a>
+                        </div>
+                        <div class="ul">
+                            <a href="https://young.dpm.org.cn" role="button" aria-label="青少" target="_blank" class="a">青少</a>
+                            <a href="https://intl.dpm.org.cn/index.html?l=tc" role="button" aria-label="繁体中文" target="_blank" class="a">繁体中文</a>
+                            <a href="https://intl.dpm.org.cn/index.html?l=en" role="button" aria-label="英语" target="_blank" class="a">English</a>
+                            <a href="https://intl.dpm.org.cn/index.html?l=es" role="button" aria-label="西班牙语" target="_blank" class="a">Español</a>
+                            <a href="https://intl.dpm.org.cn/index.html?l=ru" role="button" aria-label="俄语" target="_blank" class="a">Русский язык</a>
+                            <a href="https://intl.dpm.org.cn/index.html?l=jp" role="button" aria-label="日本语" target="_blank" class="a">日本語</a>
+                            <a href="https://intl.dpm.org.cn/index.html?l=fr" role="button" aria-label="法语" target="_blank" class="a">Français</a>
+                        </div>
+                    </li>
+                    <li class="sc">
+                        <a class="sc_sear"></a>
+
+                        <div class="search">
+                            <input type="text" class="kw" placeholder="搜索关键词..."/>
+                            <input type="button" class="ok">
+                            <span class="close1"></span>
+                        </div>
+                    </li>
+                </ul>
+                <a class="menu1"></a>
+            </div>
+        </div>
+        <div class="nav_menu"><div class="nav_menu">
+    <a class="close"></a>
+    <div class="ww_b">
+        <div class="box0">
+            <a href="https://young.dpm.org.cn" role="button" aria-label="青少"  target="_blank" class="a">青少</a>
+            <a href="https://intl.dpm.org.cn/index.html?l=tc" role="button" aria-label="繁体中文"  target="_blank" class="a">繁体中文</a>
+            <a href="https://intl.dpm.org.cn/index.html?l=en" role="button" aria-label="英语"  target="_blank" class="a">English</a>
+            <a href="https://intl.dpm.org.cn/index.html?l=es" role="button" aria-label="西班牙语"  target="_blank" class="a">Español</a>
+            <a href="https://intl.dpm.org.cn/index.html?l=ru" role="button" aria-label="俄语"  target="_blank" class="a">Русский язык</a>
+            <a href="https://intl.dpm.org.cn/index.html?l=jp" role="button" aria-label="日本语"  target="_blank" class="a">日本語</a>
+            <a href="https://intl.dpm.org.cn/index.html?l=fr" role="button" aria-label="法语"  target="_blank" class="a">Français</a>
+        </div>
+        <div class="list">
+                                    <div class="item">
+                <h1>
+                                        <a href="/Visit.html">导览</a>
+                                    </h1>
+                <dl>
+                                        <dd>
+                                                <a href="/Visit.html#block3">开放时间</a>
+                                            </dd>
+                                        <dd>
+                                                <a href="https://ticket.dpm.org.cn/" target="_blank">在线订票</a>
+                                            </dd>
+                                        <dd>
+                                                <a href="/Visit.html#block5">交通路线</a>
+                                            </dd>
+                                        <dd>
+                                                <a href="/Visit.html#block6">参观须知</a>
+                                            </dd>
+                                        <dd>
+                                                <a href="https://pano.dpm.org.cn/" target="_blank">全景故宫</a>
+                                            </dd>
+                                    </dl>
+            </div>
+                                    <div class="item">
+                <h1>
+                                        <a href="/shows.html">展览</a>
+                                    </h1>
+                <dl>
+                                        <dd>
+                                                <a href="/shows.html#temporary2">近期展览</a>
+                                            </dd>
+                                        <dd>
+                                                <a href="/shows.html#temporary4">专馆</a>
+                                            </dd>
+                                        <dd>
+                                                <a href="/shows.html#temporary_5">原状陈列</a>
+                                            </dd>
+                                        <dd>
+                                                <a href="/shows.html#temporary_6">赴外展览</a>
+                                            </dd>
+                                    </dl>
+            </div>
+                                    <div class="item">
+                <h1>
+                                        <a href="/Events.html">教育</a>
+                                    </h1>
+                <dl>
+                                        <dd>
+                                                <a href="/Events.html#hd1-2">教育新闻</a>
+                                            </dd>
+                                        <dd>
+                                                <a href="/gugongforum.html">故宫讲坛</a>
+                                            </dd>
+                                        <dd>
+                                                <a href="/calligraphy_paint/index.html">书画考级</a>
+                                            </dd>
+                                        <dd>
+                                                <a href="/Events.html#hd1-3">故宫博物院教育中心</a>
+                                            </dd>
+                                        <dd>
+                                                <a href="/Events.html#hd1-6">国际博协培训中心</a>
+                                            </dd>
+                                        <dd>
+                                                <a href="/Events.html#hd1-7">故宫志愿者</a>
+                                            </dd>
+                                    </dl>
+            </div>
+                                    <div class="item">
+                <h1>
+                                        <a href="/Explore.html">探索</a>
+                                    </h1>
+                <dl>
+                                        <dd>
+                                                <a href="/explore/buildings.html">建筑</a>
+                                            </dd>
+                                        <dd>
+                                                <a href="/explore/collections.html">藏品</a>
+                                            </dd>
+                                        <dd>
+                                                <a href="/explore/ancients.html">古籍</a>
+                                            </dd>
+                                        <dd>
+                                                <a href="/explores/courts.html">宫廷历史</a>
+                                            </dd>
+                                        <dd>
+                                                <a href="/explore/protects.html">文物医院</a>
+                                            </dd>
+                                        <dd>
+                                                <a href="/explore/cultures.html">文化专题</a>
+                                            </dd>
+                                        <dd>
+                                                <a href="http://minghuaji.dpm.org.cn" target="_blank">名画记</a>
+                                            </dd>
+                                        <dd>
+                                                <a href="/shuziduobaoge.html" target="_blank">数字多宝阁</a>
+                                            </dd>
+                                        <dd>
+                                                <a href="https://digicol.dpm.org.cn/" target="_blank">数字文物库</a>
+                                            </dd>
+                                        <dd>
+                                                <a href="https://zm-digicol.dpm.org.cn/" target="_blank">藏品总目</a>
+                                            </dd>
+                                    </dl>
+            </div>
+                                    <div class="item">
+                <h1>
+                                        <a href="/Research.html">学术</a>
+                                    </h1>
+                <dl>
+                                        <dd>
+                                                <a href="/learning/dynamic.html">学术资讯</a>
+                                            </dd>
+                                        <dd>
+                                                <a href="/expert.html">专家名录</a>
+                                            </dd>
+                                        <dd>
+                                                <a href="/achaime/institute.html">故宫学研究院</a>
+                                            </dd>
+                                        <dd>
+                                                <a href="/Research.html#other_institution1">其他学术机构</a>
+                                            </dd>
+                                        <dd>
+                                                <a href="/journals.html">故宫博物院院刊</a>
+                                            </dd>
+                                    </dl>
+            </div>
+                                    <div class="item">
+                <h1>
+                                        <a href="/Creative.html">文创</a>
+                                    </h1>
+                <dl>
+                                        <dd>
+                                                <a href="/publishes.html">故宫出版</a>
+                                            </dd>
+                                        <dd>
+                                                <a href="/Creative.html#protects">文创产品</a>
+                                            </dd>
+                                        <dd>
+                                                <a href="/lights/royal.html">故宫壁纸</a>
+                                            </dd>
+                                        <dd>
+                                                <a href="/Creative.html#app">故宫APP</a>
+                                            </dd>
+                                        <dd>
+                                                <a href="http://young.dpm.org.cn/damaoxian#gamezone" target="_blank">故宫游戏</a>
+                                            </dd>
+                                    </dl>
+            </div>
+                                    <div class="item">
+                <h1>
+                                        <a href="/About.html">关于</a>
+                                    </h1>
+                <dl>
+                                        <dd>
+                                                <a href="/about/about_view.html">总说</a>
+                                            </dd>
+                                        <dd>
+                                                <a href="/about/leader_list.html">领导</a>
+                                            </dd>
+                                        <dd>
+                                                <a href="/about/information.html">资讯</a>
+                                            </dd>
+                                        <dd>
+                                                <a href="/about/about_chron.html">院史编年</a>
+                                            </dd>
+                                        <dd>
+                                                <a href="/about/patrons+benefactors.html">景仁榜</a>
+                                            </dd>
+                                        <dd>
+                                                <a href="/about/organization.html">机构设置</a>
+                                            </dd>
+                                    </dl>
+            </div>
+                                </div>
+    </div>
+    <div class="box2 bdsharebuttonbox bdshare-button-style0-16" data-bd-bind="1629107126014">
+        <a style="padding-left:0; float:none" data-cmd="weixin" class="a a2" href="javascript:void(0)" title="分享到微信"></a>
+        <a style="padding-left:0; float:none" data-cmd="tsina" class="a a3" href="javascript:void(0)" title="分享到新浪微博"></a>
+    </div>
+</div></div>    </div>
+
+</div>
+
+<script>
+    $(function () {
+        $.get("/ajax/get_tq2.html", {r: Math.random()}, function (data) {
+            $('#tq').html(data);
+        });
+
+        $('.search .ok').on('click', function () {
+            let kw = $.trim($('.search .kw').val());
+            if (!kw) {
+                $('#alertBox').find('.pop-cont .box .t').text('请输入关键词').end().trigger('show');
+                return false;
+            }
+            // //判断特殊符号包括中文符号
+            // if (!/^[\u4e00-\u9fa5a-zA-Z0-9]+$/.test(kw)) {
+            //     $('#alertBox').find('.pop-cont .box .t').text('搜索请不要添加符号').end().trigger('show');
+            //     return false;
+            // }
+            // 神策埋点
+            // 故宫中文网站_顶部搜索栏点击
+            shence_sensors('ggzwwz_TopSearchClick',{});
+            let sourceTitle = "导览";
+            window.open('/fully_search?kw=' + encodeURIComponent(kw) + '&source=' + encodeURIComponent(sourceTitle), '', 'noopener');
+        });
+
+        $('.search .kw').on('keyup', function (e) {
+            if (e.keyCode === 13) {
+                $('.search .ok').click();
+            }
+        });
+    });
+
+    if(!page_name){
+        var page_name = "导览";
+    }
+    $('.nav_main a,.nav_child a, .nav_menu .ww_b .list a').click(function(){
+        let nav_level = '一级导航';
+        var navigationName = $(this).text();
+        var secondNavigationName = '';
+        if($(this).parents('.nav_child').length > 0 || $(this).parents('dl').length > 0  ){
+            nav_level = '二级导航';
+            secondNavigationName = $(this).text();
+            if($(this).parents('.nav_menu').length > 0){
+                navigationName = $(this).parents('.item').find('h1 a').text().replace(/[\s\n]+$/, '');
+            }else{
+                navigationName = $('.p-header .x-wrap .nav_main li').eq($(this).parents('.item').index()).find('a').text();
+            }
+
+        }
+
+        // 神策埋点
+        // 故宫中文网站_顶部注册登陆点击
+        shence_sensors('ggzwwz_TopNavigationBarClick',{
+            navigation_name: navigationName,
+            second_navigation_name: secondNavigationName,
+        });
+    })
+    $('.login_1 a').click(function(){
+        var text = $(this).text() != '注册' ? '登录' : '注册';
+        // 神策埋点
+        // 故宫中文网站_点击顶部登陆注册按钮时上报
+        shence_sensors('ggzwwz_TopLoginClick',{
+            button_name:text,
+        });
+    })
+</script>
+
+    <div class="x-container" >
+        <div class="bread-mod p-show" style="display: block;">
+    <div class="s-wrap">
+        <div class="bread-item"><a class="bread-link" href="/">首页</a></div>
+                        <div class="bread-item"><a href="/Visit.html" class="bread-link">导览</a></div>
+                        </div>
+</div>
+<div id="bread" class="m-show">
+    <a class="arrow" href="javascript:history.back(-1);"></a>
+    <div class="tit">
+        开放时间    </div>
+</div>
+<script type="text/javascript">
+    function _initBread(){
+        if ($('.bread-mod a:last').text() !== "导览") {
+            $('.bread-mod a:last').attr('href', 'javascript:;');
+            $('.bread-mod a:last').css({'cursor': 'default'});
+        }
+    }
+    _initBread()
+</script>
+<script>
+    $(".bread-mod a[href^='javascript']").css({'cursor': 'default'});
+</script>
+        <div class="visit1" id="block7">
+    <div class="s-wrap">
+        <div style="min-width:50px"><div class="s-title tac">
+    <span>故宫之旅，即刻起航</span>
+</div></div>
+        <div class="box">
+            <div class="iconlist">
+                <div class="table-cell">
+                    <div class="item" style="min-width:20px"><a
+ href="#block3">
+<div class="pic">
+    <img src="https://img.dpm.org.cn/Uploads/image/2024/05/31/1717137709jaCOxkPLn1.png" class="i"/>
+</div>
+<div class="t">【开放时间】</div>
+<div class="p">让这场旅程更“准时”</div>
+</a>
+
+
+
+
+</div>                    <div class="item" style="min-width:20px"><a
+target="_blank" href="https://ticket.dpm.org.cn/">
+<div class="pic">
+    <img src="https://img.dpm.org.cn/Uploads/image/2024/05/31/1717137746UHeKfXxOA1.png" class="i"/>
+</div>
+<div class="t">【在线订票】</div>
+<div class="p">提前预订故宫门票</div>
+</a>
+
+
+
+
+</div>                    <div class="item" style="min-width:20px"><a
+ href="#block1">
+<div class="pic">
+    <img src="https://img.dpm.org.cn/Uploads/image/2024/05/31/1717137789CPScgnKkf1.png" class="i"/>
+</div>
+<div class="t">【导览地图】</div>
+<div class="p">为您量身推荐适合的游览路线</div>
+</a>
+
+
+
+
+</div>                    <div class="item" style="min-width:20px"><a
+ href="#block5">
+<div class="pic">
+    <img src="https://img.dpm.org.cn/Uploads/image/2024/05/31/1717137850nByNEUlQu1.png" class="i"/>
+</div>
+<div class="t">【交通路线】</div>
+<div class="p">让您行程更便捷</div>
+</a>
+
+
+
+
+</div>                    <div class="item" style="min-width:20px"><a
+target="_blank" href="https://pano.dpm.org.cn">
+<div class="pic">
+    <img src="https://img.dpm.org.cn/Uploads/image/2024/05/31/1717137881YInEvTXOq1.png" class="i"/>
+</div>
+<div class="t">【全景故宫】</div>
+<div class="p">随时随地欣赏实景故宫</div>
+</a>
+
+
+
+
+</div>                    <div class="item" style="min-width:20px"><a
+ href="#block6">
+<div class="pic">
+    <img src="https://img.dpm.org.cn/Uploads/image/2024/05/31/1717137921kXjEgbQdZ1.png" class="i"/>
+</div>
+<div class="t">【参观须知】</div>
+<div class="p">让您的游览更安全更舒心</div>
+</a>
+
+
+
+
+</div>                </div>
+            </div>
+            <div class="textlist">
+                <div class="list">
+                    <div class="s-title w">
+                        <span>开放公告</span>
+                    </div>
+                    <div>
+<div class="item">
+    <div class="t"><a href="/announce_detail/379651.html" target="_blank">关于武英殿停止开放的公告</a></div>
+    <div class="p">根据古建修缮、藏品保养与展陈升级计划，武英殿将于2026年10月19日起停止开放，特此公告。
+&nbsp;
+感谢您对故宫文化遗产保护工作的理解与支持！
+&nbsp;
+故宫博物院 &nbsp;&nbsp;
+2026年10月12日    </div>
+
+     <div class="y">2026年10月12日</div>
+</div>
+<div class="item">
+    <div class="t"><a href="/announce_detail/379634.html" target="_blank">关于“仁风景从——故宫博物院藏捐献文物展”延期的公告</a></div>
+    <div class="p">位于景仁宫的&ldquo;仁风景从&mdash;&mdash;故宫博物院藏捐献文物展&rdquo;原计划展出至2026年10月18日，现延期至2028年10月15日。欢迎各位观众前往参观。
+&nbsp;
+故宫博物院
+2026年10月8日    </div>
+
+     <div class="y">2026年10月08日</div>
+</div>
+<div class="item">
+    <div class="t"><a href="/announce_detail/379516.html" target="_blank">关于延禧宫暂停开放的公告</a></div>
+    <div class="p">根据古建保护工作计划，我院将于2026年9月1日至10月31日对延禧宫进行保护性勘察，11月1日重新开放。给您参观带来不便，敬请谅解！
+&nbsp;
+故宫博物院
+2026年8月27日
+    </div>
+
+     <div class="y">2026年08月27日</div>
+</div>
+</div>
+                    <a class="more_btn" href="/announce.html">更多公告</a>
+                </div>
+
+            </div>
+        </div>
+    </div>
+
+</div>
+<div class="visit2" id="block3">
+    <div class="s-wrap">
+        <div style="min-width:50px"><div class="s-title tac">
+    <span>开放时间</span>
+</div>
+<div class="desc">
+    <p>故宫博物院全年开放，开放时间按照淡、旺季会有所改变，遇到法定假期也会延长或缩短开放时间，请随时注意本网站的公告！如果遇到重大活动或特殊情况，开放时间如有改变，故宫网站将特别发布公告。除法定节假日外，<u>故宫博物院全年实行周一全天闭馆的措施。</u></p></div>
+</div>        <div class="box">
+            <div class="left" style="min-width:50px"><div class="tit"><span class="s1">旺季</span><span class="s2">4.1-10.31</span></div>
+<div class="p">每年4月1日至10月31日采用旺季开放时间</div>
+<div class="list">
+            <div class="li">开放入馆时间：<span>8:30</span></div>
+            <div class="li">停止入馆时间：<span>16:00</span></div>
+            <div class="li">珍宝馆、钟表馆停止入馆时间：<span>16:10</span></div>
+            <div class="li">闭馆时间：<span>17:00</span></div>
+    </div>
+
+
+</div>            <div class="right" style="min-width:50px"><script>
+    $(function(){
+        if("image/2024/06/15/1718433084HYlwlLQhS1.jpg"){
+            $('.visit2 .box').attr('style','background-image:url(/Uploads/image/2024/06/15/1718433084HYlwlLQhS1.jpg)');
+        }
+    })
+</script>
+<div class="tit"><span class="s2">11.1-3.31</span><span class="s1">淡季</span></div>
+<div class="p">每年11月1日至来年3月31日采用淡季开放时间</div>
+<div class="list">
+            <div class="li">开放入馆时间：<span>8:30</span></div>
+            <div class="li">停止入馆时间：<span>15:30</span></div>
+            <div class="li">珍宝馆、钟表馆停止入馆时间：<span>15:40</span></div>
+            <div class="li">闭馆时间：<span>16:30</span></div>
+    </div>
+</div>        </div>
+    </div>
+</div>
+
+</body></html>

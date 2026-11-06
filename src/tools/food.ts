@@ -82,12 +82,13 @@ export function createFoodTool(fetchFn: FetchLike = fetch): Tool {
   return {
     name: "search_restaurants",
     recordsPlaceEvidence: true,
+    usesDiscoveryPool: true,
     description:
       "按多因子综合分搜索地点附近的餐厅（评分40% + 就近30% + 价格契合20% + 本地特色10%），" +
       "返回评分、人均、距离、菜系、本地特色标记、坐标（纬度,经度，可直接写入行程 location）与综合分。规划三餐时：中心传当期景点/住宿名（不是城市名），" +
       "中心是景点名时配合 region 传所在城市（消歧，避免命中外地同名地点）；" +
       "radius_km 建议 2-3；用户预算传 max_cost；当天已吃过的菜系传 avoid_cuisines 避免重复；" +
-      "默认只保留评分≥4.2 的餐厅（高分管不够时自动放宽）。口碑细节（招牌菜/排队）再对具体餐厅调 get_place_reviews。",
+      "默认只保留评分≥4.2 的餐厅（高分管不够时自动放宽）。已查中心30分钟内改limit/预算/评分/排除菜系或缩小半径，本地重筛原始候选，不新增联网；同一批附近餐厅可复用于多个餐段，不要每餐重复搜索。确需新区域、扩圈或新菜系才补查。口碑细节（招牌菜/排队）再对具体餐厅调 get_place_reviews。",
     parameters: {
       type: "object",
       properties: {
@@ -119,26 +120,32 @@ export function createFoodTool(fetchFn: FetchLike = fetch): Tool {
         ? args.avoid_cuisines.split(/[,，、;；]+/).map((term) => term.trim()).filter((term) => term !== "")
         : [];
 
+      const targetCity = region || ctx?.destination || city;
+      await ctx?.evidence?.load();
+      let pool = args.refresh === true ? undefined : ctx?.evidence?.discoveryPools.find("search_restaurants", targetCity, city, cuisine, radiusKm);
       const amap = getAmapClient(ctx?.signal);
-      if (amap === undefined) {
+      if (amap === undefined && !pool) {
         return (
           "美食搜索依赖高德 POI 数据（评分/人均消费/菜系），当前未配置 amap_api_key。\n" +
           "在对话中执行 /config set amap_api_key <Key> 后即可使用（高德开放平台免费申请）。"
         );
       }
 
-      const geo: GeoResult | null = await geocodeLocation(city, request, region === "" ? ctx?.destination : region, ctx?.signal);
+      const geo: GeoResult | null = pool?.geo ?? await geocodeLocation(city, request, region === "" ? ctx?.destination : region, ctx?.signal);
       if (geo === null) {
+        ctx?.beforeDiscoveryFetch?.();
         return `未找到地点: ${city}`;
       }
 
       // 高德 POI: 050000 = 餐饮服务；关键词用菜系（无菜系时用"美食"）
-      const pois = await amap.poiSearch(
-        cuisine === "" ? "美食" : cuisine,
-        { ...convertPoint(geo, "gcj02") },
-        radiusKm * 1000,
-        "050000",
+      if (!pool && args.refresh !== true) pool = ctx?.evidence?.discoveryPools.find("search_restaurants", targetCity, city, cuisine, radiusKm, geo);
+      if (pool) ctx?.onDiscoveryReuse?.(pool.observed_at);
+      else ctx?.beforeDiscoveryFetch?.(geo);
+      const observedAt = pool?.observed_at ?? Date.now();
+      const pois = pool?.pois ?? await amap!.poiSearch(
+        cuisine === "" ? "美食" : cuisine, { ...convertPoint(geo, "gcj02") }, radiusKm * 1000, "050000",
       );
+      if (!pool) await ctx?.evidence?.observeDiscoveryPool({ tool: "search_restaurants", city: targetCity, center: city, geo, keyword: cuisine, radius_km: radiusKm, pois, observed_at: observedAt });
 
       const hints = localHintsFor(geo);
       let foods = pois.filter((poi) => region === "" || poiCityVerdict(poi, region) === "match")
@@ -173,7 +180,7 @@ export function createFoodTool(fetchFn: FetchLike = fetch): Tool {
         const conditionNote = conditions.length > 0 ? `（${conditions.join("、")}）` : "";
         return (
           `在 ${geo.name} 周边 ${radiusKm} 公里内没有符合条件的餐厅${conditionNote}。` +
-          "可尝试放宽筛选、更换菜系关键词或加大搜索半径。"
+          `${pool ? "已复用原始候选池，本次未重查POI。" : ctx?.evidence ? "已保存原始候选池。" : ""}放宽筛选可在原池本地重筛；只有扩圈或新菜系才需要联网。`
         );
       }
 
@@ -216,9 +223,10 @@ export function createFoodTool(fetchFn: FetchLike = fetch): Tool {
         `${geo.name} 餐厅推荐（前 ${varied.length} / 共 ${foods.length} 家，高德真实数据）\n` +
         `排序依据: 评分40% + 就近30% + 价格契合20% + 本地特色10%（${notes.join("；")}）\n` +
         lines.join("\n") +
+        `\n候选池：${pool ? "复用已采集样本，本次未重查POI" : "已保存原始采集样本"}，覆盖半径 ${pool?.radius_km ?? radiusKm} 公里、${pois.length} 条（非区域全量）；改limit/预算/评分/排除菜系或缩小半径只在池内重筛。` +
         "\n提示: 推荐理由请引用综合分/评分/人均/距离/菜系数据；对具体餐厅调用 get_place_reviews 可查招牌菜、排队等口碑细节。"
       );
-      return await ctx?.evidence?.observePlaces("search_restaurants", region || ctx?.destination || city, output, "amap") ?? output;
+      return await ctx?.evidence?.observePlaces("search_restaurants", targetCity, output, "amap", undefined, observedAt) ?? output;
     },
   };
 }

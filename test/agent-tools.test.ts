@@ -164,7 +164,7 @@ test("Agent: 落盘提醒保留检索能力，不再把必要证据请求封锁�
     toolCalls: [{
       id: `search-${round}`,
       name: "search_attractions",
-      arguments: JSON.stringify({ city: "北京", query: `候选-${round}` }),
+      arguments: JSON.stringify({ city: "北京", location: `候选-${round}` }),
     }],
   });
   const provider = new ScriptedProvider([

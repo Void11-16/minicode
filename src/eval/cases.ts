@@ -10,6 +10,7 @@ export interface EvalCase {
   /** 保存行程时的标题（与 plans/<title>.json 对应） */
   readonly title: string;
   readonly days: number;
+  readonly must_visit?: readonly string[];
   readonly budget_per_person_yuan?: number;
   /** 口味偏好（传给旅行提示词；缺省用全局配置） */
   readonly taste?: string;
@@ -90,6 +91,7 @@ function parseCase(raw: unknown, label: string): EvalCase {
   if (record.budget_per_person_yuan !== undefined && typeof record.budget_per_person_yuan !== "number") {
     throw new Error(`${label}: budget_per_person_yuan 需要数字`);
   }
+  if (record.must_visit !== undefined && (!Array.isArray(record.must_visit) || record.must_visit.some((v) => typeof v !== "string" || !v.trim()))) throw new Error(`${label}: must_visit 需要非空名称数组`);
   if (record.taste !== undefined && typeof record.taste !== "string") {
     throw new Error(`${label}: taste 需要字符串`);
   }
@@ -106,6 +108,7 @@ function parseCase(raw: unknown, label: string): EvalCase {
     id: requireSafeCaseId(id, label),
     title,
     days: record.days,
+    ...(record.must_visit === undefined ? {} : { must_visit: [...new Set((record.must_visit as string[]).map((v) => v.trim()))] }),
     ...(record.budget_per_person_yuan === undefined ? {} : { budget_per_person_yuan: record.budget_per_person_yuan }),
     ...(record.taste === undefined ? {} : { taste: record.taste }),
     ...(tags === undefined ? {} : { tags }),

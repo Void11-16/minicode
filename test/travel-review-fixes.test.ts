@@ -214,13 +214,13 @@ test("已核实坐标不被后台校准替换，混合坐标系的同一地点�
   assert.ok(!validateItinerary(itinerary).issues.some((issue) => ["insufficient-transfer-time", "missing-transport"].includes(issue.code)));
 });
 
-test("闭馆否定、历史、例外及冲突均不升级为证据，且撤销旧规则可跨重启", async (t) => {
+test("闭馆否定、历史和冲突均不升级为证据，且撤销旧规则可跨重启", async (t) => {
   const root = await temp(t), store = new TravelEvidenceStore(root);
   const item: ItineraryItem = { id: "museum", name: "回归博物馆", type: "visit" };
-  await store.observeClosure("北京", item.name, `${item.name}每周一闭馆`);
+  await store.observeClosure("北京", item.name, [{ title: item.name, snippet: `${item.name}每周一闭馆` }]);
   assert.deepEqual(store.bind(item, "北京").closed_on, ["Monday"]);
-  for (const text of ["并非每周一闭馆", "此前每周一闭馆，现在开放", "每周一闭馆，法定节假日除外", "全年无休，但每周一闭馆"]) {
-    await store.observeClosure("北京", item.name, `${item.name}${text}`);
+  for (const text of ["并非每周一闭馆", "此前每周一闭馆，现在开放", "全年无休，但每周一闭馆"]) {
+    await store.observeClosure("北京", item.name, [{ title: item.name, snippet: `${item.name}${text}` }]);
     const restored = new TravelEvidenceStore(root);
     await restored.load();
     assert.equal(restored.bind(item, "北京").closure_verified, false, text);
@@ -308,7 +308,7 @@ test("查询缓存 30 分钟过期，但已核实事实和采集时间继续有�
   assert.match(renderMarkdown(parseItinerary({ title: "价格", days: [{ items: [hotel] }] })), /每房每晚 ¥400/);
 });
 
-test("重复保存只增版本号不构成实际进展，修改内容才改变指纹", async (t) => {
+test("重复保存沿用版本不构成实际进展，修改内容才改变指纹", async (t) => {
   const root = await temp(t), title = "进展回归", save = createSaveItineraryTool(root);
   const args = { title, days: [{ items: [{ id: "v", name: "缺时间", type: "visit" }] }] };
   await save.execute(args);

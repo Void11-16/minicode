@@ -177,21 +177,18 @@ test("保存/分日验收/全体验收实际调用链保留草稿，报告和状
   assert.match(await validate.execute({ title: p.title, scope: "all", strict: true }), /状态: 通过/);
 });
 
-test("增量追加重复景点只提示修新增日，原日 JSON 不发生改变，餐饮策略跨保存保留", async (t) => {
+test("增量追加重复景点拒绝整次保存，原日与餐饮策略保留，只修新增日后可继续", async (t) => {
   const root = await workspace(t), save = createSaveItineraryTool(root), p = plan(3);
   await save.execute({ title: p.title, days: p.days.slice(0, 2), recommendation_policy: { mode: "advisory", min_candidates: 3, min_evidence_rate: 0.6 } });
   const file = join(root, `plans/${p.title}.json`), before = JSON.parse(await readFile(file, "utf8"));
   const third = { ...p.days[2], items: p.days[2]!.items.map((i, j) => j === 0 ? { ...i, name: p.days[0]!.items[0]!.name } : i) };
-  const result = await save.execute({ title: p.title, merge: true, days: [third] });
-  assert.match(result, /局部修复日期: 3/);
+  const rawBefore = await readFile(file, "utf8");
+  await assert.rejects(() => save.execute({ title: p.title, merge: true, days: [third] }), /未经用户授权.*cross-day-duplicate/s);
+  assert.equal(await readFile(file, "utf8"), rawBefore);
   const after = JSON.parse(await readFile(file, "utf8"));
-  assert.deepEqual(after.days.slice(0, 2), before.days); assert.equal(after.constraints.meal_candidates_target, 3);
-  const report = JSON.parse(await readFile(join(root, `plans/${p.title}.quality.json`), "utf8"));
-  assert.deepEqual(report.changed_days, [3]); assert.deepEqual(report.repair_days, [3]);
-  const validate = createValidateItineraryTool(root);
-  assert.match(await validate.execute({ title: p.title, scope: "day", day: 1, strict: true }), /跨天关联/);
-  await assert.rejects(validate.execute({ title: p.title, scope: "day", day: 3, strict: true }), /cross-day-duplicate/);
+  assert.deepEqual(after.days, before.days); assert.equal(after.constraints.meal_candidates_target, 3);
   await save.execute({ title: p.title, merge: true, merge_mode: "replace_day", days: [p.days[2]] });
+  const validate = createValidateItineraryTool(root);
   assert.match(await validate.execute({ title: p.title, strict: true }), /状态: 通过/);
   const repaired = JSON.parse(await readFile(file, "utf8"));
   assert.deepEqual(repaired.days.slice(0, 2), before.days);

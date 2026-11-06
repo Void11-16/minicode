@@ -1,3 +1,4 @@
+import { scenicVisitKey } from "../tools/scenic-area.ts";
 import { timelineGaps } from "../tools/itinerary-timeline.ts";
 import { recommendationCoverage, recommendationPolicy } from "../tools/recommendation-policy.ts";
 import type { Itinerary, ItineraryItem } from "../tools/itinerary-schema.ts";
@@ -12,6 +13,7 @@ import type { ItineraryQualityStatus } from "../tools/itinerary-validator.ts";
 
 export interface EvalExpectations {
   readonly expectedDays: number;
+  readonly mustVisit?: readonly string[];
   readonly budgetPerPersonYuan?: number;
 }
 
@@ -61,7 +63,8 @@ export function computeItineraryMetrics(
   itinerary: Itinerary,
   expectations: EvalExpectations,
 ): ItineraryEvalMetrics {
-  const validated = { ...itinerary, constraints: { ...itinerary.constraints, expected_days: expectations.expectedDays } };
+  const validated = { ...itinerary, constraints: { ...itinerary.constraints, expected_days: expectations.expectedDays,
+    must_visit: [...new Set([...(itinerary.constraints?.must_visit ?? []), ...(expectations.mustVisit ?? [])])] } };
   const report = validateItinerary(validated, expectations.budgetPerPersonYuan === undefined ? {} : { budget_per_person_yuan: expectations.budgetPerPersonYuan });
   const expectedDayMismatch = itinerary.days.length !== expectations.expectedDays;
   const issueCounts = report.issue_count;
@@ -72,7 +75,7 @@ export function computeItineraryMetrics(
   const meals = coverage.meals;
   const target = recommendationPolicy(itinerary).minCandidates;
   const visitCount = itinerary.days.reduce(
-    (sum, day) => sum + day.items.filter((item) => item.type === "visit").length,
+    (sum, day) => sum + new Set(day.items.filter((item) => item.type === "visit").map((item) => scenicVisitKey(item.name, item.parent_visit?.name))).size,
     0,
   );
   const cost = totalCostPerPerson(itinerary);

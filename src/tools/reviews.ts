@@ -1,17 +1,37 @@
+import { officialOpeningSource } from "./official-opening.ts";
 import { cancellableFetch } from "./travel-request.ts";
 import type { Tool } from "./tool.ts";
 import { requireString } from "./tool.ts";
+import { normalizeReviewArgs } from "./travel-query.ts";
+import { OPENING_FIELDS, extractOpeningFacts, isHistoricalOpening, mentionsOpeningPlace, requestedOpeningFields, type OpeningSource } from "./opening-facts.ts";
+import { annotateToolCall, observeProviderError } from "../core/tool-diagnostics.ts";
+import { isSearchChallenge, openingArticle, openingPageSnippet, readOpeningPage, openingNavigationLinks } from "./opening-page.ts";
+import { fetchPublicOpeningPage, openingPageUrl } from "./opening-page-fetch.ts";
 
 type FetchLike = typeof fetch;
 
 const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36";
 
-interface SearchResult {
-  readonly title: string;
-  readonly snippet: string;
-  /** 命中的搜索引擎（提取游玩时长时标注来源用） */
-  readonly engine?: string;
+type SearchResult = OpeningSource;
+
+const OPENING_KEYWORDS = {
+  hours: "开放时间", closure: "每周 闭馆", last_admission: "停止入园 最后入场",
+  sessions: "表演 场次", notices: "开放调整 临时公告",
+};
+const CAPTCHA_COOLDOWN_MS = 2 * 60_000;
+
+function is360Redirect(url: URL): boolean {
+  return url.hostname === "www.so.com" && url.pathname === "/link";
+}
+
+function isSearchPage(url: URL): boolean {
+  return /^(?:(?:www\.)?(?:baidu|bing|so)\.com|(?:baike|wenku)\.baidu\.com|html\.duckduckgo\.com|(?:ai|map|wenda)\.so\.com|map\.360\.cn)$/.test(url.hostname);
+}
+/** 新搜索API适配到统一来源格式；正文片段也走相同实体/字段校验，不直接采用生成答案。 */
+export interface ReviewSearchProvider {
+  readonly name: string;
+  search(query: string, options: { readonly maxResults: number; readonly signal?: AbortSignal }): Promise<readonly OpeningSource[]>;
 }
 
 /**
@@ -19,97 +39,254 @@ interface SearchResult {
  * 数据来源是搜索引擎结果摘要（标题+片段），不是平台原始评分 ——
  * 返回内容明确标注这一点，让 LLM 据此做"口碑筛选"而不是编造分数。
  */
-export function createReviewsTool(fetchFn: FetchLike = fetch): Tool {
+export function createReviewsTool(fetchFn: FetchLike = fetch, provider?: ReviewSearchProvider): Tool {
+  // queryAttempts 与一次旅游任务同寿命，其他会话可以独立尝试。
+  const challenges = new WeakMap<Map<string, number>, Map<string, { hits: number; at: number }>>();
   return {
     name: "get_place_reviews",
     description:
-      "抓取某个景点/地点的网络评价摘要（来自搜索引擎）。用于筛选口碑好的地点：" +
-      "先用 search_attractions 拿到候选列表，再对候选逐个查询口碑，" +
+      "抓取地点的网络评价和开放信息，摘要不完整时读取少量相关来源正文，清楚的地图、文旅、票务等资料均可回填。" +
+      "仅补已选地点缺失的开放/闭馆/时长等关键事实或用户明确要求的口碑，不对候选逐个调用；" +
       "根据摘要中提到的评价关键词（好评/差评/人多/坑/值得等）给出筛选建议。" +
       "同时解析评价数量与第三方评分（口碑热度）——终选时评分相近优先评价数多的，" +
       "评价数过少（<50）的高分不可信。摘要不代表官方评分，不要编造具体分数。" +
       "输出中可能包含『游玩时长参考』（从摘要提取的建议游玩时长，如\"一般游玩 2-4 小时\"）——" +
       "给景点安排时长时优先采用，可用 aspect=游玩时长 专门查询。" +
       "结果已做相关性过滤（剔除百科/词典等无关词条）；返回「没有搜到相关评价内容」时说明该地点网上口碑数据不足，" +
-      "不要据此推断好坏，改用高德评分/人均等结构化数据决策。",
+      "不要据此推断好坏，改用高德评分/人均等结构化数据决策。place 只填实体名，不拼接开放时间或周一闭馆等检索词；同一事项已无依据时不要反复查询。",
     parameters: {
       type: "object",
       properties: {
         place: { type: "string", description: "景点名，例如：灵隐寺" },
         city: { type: "string", description: "所在城市，提高搜索准确性，例如：杭州" },
         aspect: { type: "string", description: "关注侧面：口碑(默认)/人均价格/招牌菜/排队/游玩时长/开放时间/闭馆时间" },
+        fields: { type: "array", items: { type: "string", enum: [...OPENING_FIELDS] }, description: "开放信息可只补缺失字段：hours开放时段、closure闭馆日、last_admission最后入场、sessions场次、notices临时公告。默认按地点类型选择，一次提取所有返回字段，不重复查询已查缺口。" },
+        visit_date: { type: "string", description: "补查临时公告时可提供实际访问日期，格式 YYYY-MM-DD" },
+        refresh: { type: "boolean", description: "明确需要重新核实时跳过缓存一次；同一任务同事项最多两次查询/复用，不能无限刷新" },
       },
       required: ["place"],
     },
     async execute(args, ctx) {
+      args = normalizeReviewArgs(args);
       ctx?.signal?.throwIfAborted();
       const request = cancellableFetch(fetchFn, ctx?.signal);
-      const place = requireString(args, "place");
       const city = typeof args.city === "string" ? args.city.trim() : "";
+      await ctx?.evidence?.load();
+      const inputPlace = requireString(args, "place");
+      const place = ctx?.evidence?.canonicalPlaceName(inputPlace, city) ?? inputPlace;
       const aspect = typeof args.aspect === "string" ? args.aspect.trim() : "";
+      const openingFields = aspect === "开放时间" ? requestedOpeningFields({ ...args, place }) : [];
+      if (openingFields.length) annotateToolCall({ opening_fields: { requested: openingFields, retrieved_sources: 0, extracted: [], evidence_ids: [] } });
       const suffix =
         aspect === "人均价格" ? "人均 价格 多少钱"
         : aspect === "招牌菜" ? "招牌菜 必点 推荐"
         : aspect === "排队" ? "排队 等位 攻略"
         : aspect === "游玩时长" ? "建议游玩时长"
-        : aspect === "开放时间" || aspect === "闭馆时间" ? "开放时间 每周 闭馆 官方"
+        : aspect === "开放时间" ? [...openingFields.map((field) => OPENING_KEYWORDS[field]), args.visit_date].filter(Boolean).join(" ")
         : "点评 评价 值得去吗";
 
       const errors: string[] = [];
+      const task = ctx?.queryAttempts;
+      let challengeState = task && challenges.get(task);
+      if (task && !challengeState && openingFields.length) {
+        challengeState = new Map();
+        challenges.set(task, challengeState);
+      }
       let searchSucceeded = false; // 至少一个引擎成功返回过页面（用于区分"没搜到相关"与"搜索失败"）
       const collected: SearchResult[] = [];
-      const durationHints: Array<{ text: string; source: string }> = [];
-      for (const engine of SEARCH_ENGINES) {
-        for (const searchQuery of queryVariants(place, city, suffix)) {
+      const finishOpening = async (sources: readonly SearchResult[], interrupted = false): Promise<string> => {
+        if (!openingFields.length) return "";
+        const facts = ctx?.evidence ? await ctx.evidence.observeOpening(city, place, sources, openingFields, interrupted || Boolean(args.visit_date)) : extractOpeningFacts(city, place, sources, openingFields);
+        const verified = facts.filter((f) => f.status === "verified" && !isHistoricalOpening(f));
+        const historical = facts.find((f) => isHistoricalOpening(f));
+        annotateToolCall({ opening_fields: { requested: openingFields, retrieved_sources: sources.filter((s) => s.url).length, body_sources: sources.filter((s) => s.content_kind === "page" || s.engine === "official-web").length,
+          extracted: verified.filter((f) => openingFields.includes(f.field)).map((f) => f.field), evidence_ids: verified.map((f) => f.id) } });
+        const summary = ctx?.evidence?.openingSummary(city, place, [...new Set([...openingFields, ...facts.filter((f) => f.status === "verified").map((f) => f.field)])])
+          ?? facts.filter((f) => !interrupted || f.status !== "not_found").map((f) => `${f.field}: ${f.status}${f.value === undefined ? "" : ` ${JSON.stringify(f.value)} evidence_id=${f.id}`}`).join("\n");
+        const unconfirmed = openingFields.filter((field) => !verified.some((fact) => fact.field === field));
+        const blocked = interrupted && unconfirmed.length
+          ? `\n开放信息查询受阻，待确认字段：${unconfirmed.join("、")}。已取得的有效字段仍可使用。`
+          : "";
+        return `\n开放字段证据（逐字段保存，未知不等于关闭；场地开放与表演场次分开）：\n${summary}${historical ? "\n仅历史参考：上述过期时段不适用于当前排程。" : ""}${blocked}`;
+      };
+      let requestCount = 0;
+      const visitedPages = new Set<string>();
+      const navigation: SearchResult[] = [];
+      const readPriority = (source: SearchResult) => {
+        if (/维基百科|百科全书|百度知道/.test(source.title)) return -1;
+        if (/开放时间|参观指南|参观须知|票务服务/.test(source.title)) return 100;
+        if (/官网|官方网站/.test(source.title) || source.kind === "official" || source.engine === "official-web") return 80;
+        try { if (new URL(source.url ?? "").hostname.endsWith(".gov.cn")) return 60; } catch { /* 无地址不排序加权。 */ }
+        return 0;
+      };
+      const requestPage = cancellableFetch(fetchFn === fetch ? fetchPublicOpeningPage : fetchFn, ctx?.signal);
+      const readSource = async (): Promise<boolean> => {
+        if (!openingFields.length || requestCount >= 4 || visitedPages.size >= 3) return false;
+        const candidates = [...navigation.splice(0), ...filterRelevant(collected, place, city, true)
+          .filter((source) => readPriority(source) >= 0).sort((a, b) => readPriority(b) - readPriority(a))];
+        for (const source of candidates) {
+          if (source.content_kind === "page" || source.engine === "official-web") continue;
+          let url = openingPageUrl(source.url);
+          if (!url || visitedPages.has(url.href) || (isSearchPage(url) && !is360Redirect(url))) continue;
+          // 已知搜索跳转需要预留一次请求读取落地页。
+          if (is360Redirect(url) && requestCount >= 3) continue;
+          visitedPages.add(url.href);
           try {
-            const response = await request(engine.buildUrl(searchQuery), {
-              headers: { "User-Agent": USER_AGENT, "Accept-Language": "zh-CN,zh;q=0.9" },
-              signal: AbortSignal.timeout(engine.timeoutMs ?? 30_000),
-            });
-            if (!response.ok) {
-              errors.push(`${engine.name}: HTTP ${response.status}`);
-              break; // 引擎不可用 → 换下一个引擎
+            const signal = AbortSignal.timeout(6_000);
+            const read = (target: URL) => {
+              requestCount++;
+              return requestPage(target.href, { redirect: "manual", signal, headers: { "User-Agent": USER_AGENT, "Accept-Language": "zh-CN,zh;q=0.9" } });
+            };
+            let response = await read(url);
+            if ([301, 302, 303, 307, 308].includes(response.status) && requestCount < 4) {
+              const location = response.headers.get("location");
+              await response.body?.cancel();
+              const target = location && openingPageUrl(new URL(location, url).href);
+              if (!target || isSearchPage(target) || isSearchChallenge("", target.href) || (url.protocol === "https:" && target.protocol !== "https:")) {
+                errors.push("正文跳转目标不可用");
+                return true;
+              }
+              url = target;
+              response = await read(url);
             }
-            searchSucceeded = true;
-            const html = await response.text();
-            collected.push(...engine.parse(html).map((result) => ({ ...result, engine: engine.name })));
-            // 顺手提取"建议游玩时长"类句子（百度 AI 摘要/攻略页面里常直接给时长）
-            for (const hint of extractDurationHints(pageText(html), MAX_DURATION_HINTS, placeTokens(place))) {
-              if (durationHints.length >= MAX_DURATION_HINTS) break;
-              const key = hint.replace(/\s+/g, "").slice(0, 26);
-              if (durationHints.some((entry) => entry.text.replace(/\s+/g, "").slice(0, 26) === key)) continue;
-              durationHints.push({ text: hint, source: engine.name });
+            const contentType = response.headers.get("content-type");
+            if (!response.ok || (contentType && !/html|text\/plain/i.test(contentType))) {
+              await response.body?.cancel();
+              errors.push("正文未返回可读取页面");
+              return true;
             }
-          } catch (error) {
+            const html = await readOpeningPage(response);
+            if (isSearchChallenge(html, url.href)) {
+              observeProviderError("opening-page", "CAPTCHA");
+              errors.push("正文需要访问验证");
+              return true;
+            }
+            const snippet = openingPageSnippet(openingArticle(html));
+            const pageTitle = cleanHtml(/<title\b[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1] ?? "");
+            const belongs = mentionsOpeningPlace(`${pageTitle}\n${snippet ?? ""}`, place, city)
+              || mentionsOpeningPlace(source.title, place, city);
+            if (belongs) {
+              for (const target of openingNavigationLinks(html, url, openingFields)) {
+                if (!visitedPages.has(target.href)) navigation.push({ ...source, url: target.href, content_kind: "snippet" });
+              }
+            }
+            if (snippet && belongs) {
+              collected.unshift({ ...source, snippet, url: url.href, content_kind: "page" });
+            }
+          } catch {
             ctx?.signal?.throwIfAborted();
-            // 例如 DuckDuckGo 在部分网络环境不可达，降级到下一个引擎
-            errors.push(`${engine.name}: ${error instanceof Error ? error.message : String(error)}`);
-            break;
+            errors.push("正文读取失败");
           }
-          // 相关结果够用就不再补查下一个变体
-          if (filterRelevant(collected, place, city).length >= 3) break;
+          return true;
         }
-        // 跨引擎累计：单一引擎命中不足时由下一个引擎补足，凑够 3 条相关即停
-        if (filterRelevant(collected, place, city).length >= 3) break;
+        return false;
+      };
+      const readWithNavigation = async () => {
+        await readSource();
+        while (navigation.length && !hasEnoughReviewFacts(place, city, aspect, collected, 0, openingFields) && requestCount < 4 && visitedPages.size < 3) {
+          if (!await readSource()) break;
+        }
+      };
+      if (aspect === "开放时间") {
+        // 官网读取占用同一4次请求预算，不增加无限重试分支。
+        const counted: typeof fetch = (input, init) => { requestCount++; return request(input, init); };
+        try {
+          const source = await officialOpeningSource(place, city, counted);
+          if (source) {
+            searchSucceeded = true;
+            collected.push(source);
+            if (extractOpeningFacts(city, place, [source], openingFields).filter((f) => openingFields.includes(f.field)).every((f) => f.status === "verified" && !isHistoricalOpening(f))) {
+              return formatResults(place, [source], true) + await finishOpening([source]);
+            }
+          }
+        } catch (error) { ctx?.signal?.throwIfAborted(); errors.push(`官网: ${error instanceof Error ? error.message : String(error)}`); }
+      }
+      const durationHints: Array<{ text: string; source: string }> = [];
+      const variants = queryVariants(place, city, suffix);
+      if (openingFields.length) variants.reverse();
+      if (provider && requestCount < 4) {
+        requestCount++;
+        try {
+          const results = await provider.search(variants[0]!, { maxResults: 5, signal: ctx?.signal });
+          searchSucceeded = true;
+          collected.push(...results.slice(0, 5).map((result) => ({ ...result, snippet: result.snippet.slice(0, 4000), engine: result.engine ?? provider.name })));
+          if (!hasEnoughReviewFacts(place, city, aspect, collected, durationHints.length, openingFields)) await readWithNavigation();
+          if (hasEnoughReviewFacts(place, city, aspect, collected, durationHints.length, openingFields)) {
+            const relevant = filterRelevant(collected, place, city, false, openingFields.length > 0);
+            return formatResults(place, relevant, openingFields.length > 0) + await finishOpening(relevant);
+          }
+        } catch (error) { ctx?.signal?.throwIfAborted(); errors.push(`${provider.name}: ${error instanceof Error ? error.message : String(error)}`); }
+      }
+      // 每个引擎只用一个有差异的查询，最多4次HTTP；不在同一引擎反复换词。
+      const engines = openingFields.length ? OPENING_SEARCH_ENGINES : SEARCH_ENGINES;
+      for (const [engineIndex, engine] of engines.entries()) {
+        if (requestCount >= 4) break;
+        const recent = challengeState?.get(engine.name);
+        if (recent && recent.hits >= 2 && Date.now() - recent.at < CAPTCHA_COOLDOWN_MS) {
+          errors.push(`${engine.name}: 验证码退避中`);
+          continue;
+        }
+        requestCount++;
+        const searchQuery = variants[Math.min(engineIndex, variants.length - 1)]!;
+        try {
+          const response = await request(engine.buildUrl(searchQuery), {
+            headers: { "User-Agent": USER_AGENT, "Accept-Language": "zh-CN,zh;q=0.9" },
+            signal: AbortSignal.timeout(engine.timeoutMs ?? 8_000),
+          });
+          const html = await readOpeningPage(response, response.ok ? 2_000_000 : 30_000);
+          if (isSearchChallenge(html, response.url)) {
+            const at = Date.now(), previous = challengeState?.get(engine.name);
+            challengeState?.set(engine.name, { at, hits: previous && at - previous.at < CAPTCHA_COOLDOWN_MS ? previous.hits + 1 : 1 });
+            observeProviderError(engine.name, "CAPTCHA");
+            errors.push(`${engine.name}: 验证码/访问验证页面`);
+            continue;
+          }
+          if (!response.ok) {
+            errors.push(`${engine.name}: HTTP ${response.status}`);
+            continue;
+          }
+          if ((challengeState?.get(engine.name)?.hits ?? 0) < 2) challengeState?.delete(engine.name);
+          searchSucceeded = true;
+          collected.push(...engine.parse(html).map((result) => ({ ...result, engine: engine.name })));
+          // 顺手提取"建议游玩时长"类句子（百度 AI 摘要/攻略页面里常直接给时长）
+          for (const hint of extractDurationHints(pageText(html), MAX_DURATION_HINTS, placeTokens(place))) {
+            if (durationHints.length >= MAX_DURATION_HINTS) break;
+            const key = hint.replace(/\s+/g, "").slice(0, 26);
+            if (durationHints.some((entry) => entry.text.replace(/\s+/g, "").slice(0, 26) === key)) continue;
+            durationHints.push({ text: hint, source: engine.name });
+          }
+        } catch (error) {
+          ctx?.signal?.throwIfAborted();
+          // 例如 DuckDuckGo 在部分网络环境不可达，降级到下一个引擎
+          errors.push(`${engine.name}: ${error instanceof Error ? error.message : String(error)}`);
+          continue;
+        }
+        // 按本次所需事实停止；标题数量不能冒充闭馆或时长依据。
+        if (hasEnoughReviewFacts(place, city, aspect, collected, durationHints.length, openingFields)) break;
+        await readWithNavigation();
+        if (hasEnoughReviewFacts(place, city, aspect, collected, durationHints.length, openingFields)) break;
       }
 
-      const relevant = filterRelevant(collected, place, city);
+      // 最后一个搜索失败或被跳过时，也允许在剩余预算内补读候选。
+      while (!hasEnoughReviewFacts(place, city, aspect, collected, durationHints.length, openingFields) && await readSource()) { /* 正文与导航最多三个页面，同属四次请求预算 */ }
+      const relevant = filterRelevant(collected, place, city, false, openingFields.length > 0);
+      if (relevant.length === 0 && durationHints.length === 0 && (!searchSucceeded || openingFields.length > 0) && errors.length > 0) {
+        return `「${place}」的评价搜索失败（${errors.join("; ")}），本次未完成资料查询，不记为已查无依据。`;
+      }
+      const closureNote = openingFields.length ? await finishOpening(relevant, errors.length > 0) : ctx?.evidence === undefined ? "" : "\n" + await ctx.evidence.observeClosure(city, place, relevant);
       if (relevant.length > 0) {
-        return formatResults(place, relevant) + renderDurationHints(durationHints);
+        return formatResults(place, relevant, openingFields.length > 0) + renderDurationHints(durationHints) + closureNote;
       }
       if (durationHints.length > 0) {
         return (
           `「${place}」没有足够的评价摘要（已过滤百科/词典等无关结果），但提取到游玩时长参考：` +
           renderDurationHints(durationHints) +
-          "\n口碑数据不足，请以高德评分、人均等结构化数据为准。"
+          "\n口碑数据不足，请以高德评分、人均等结构化数据为准。" + closureNote
         );
-      }
-      if (!searchSucceeded && errors.length > 0) {
-        return `「${place}」的评价搜索失败（${errors.join("; ")}），建议参考其他来源判断。`;
       }
       return (
         `没有搜到「${place}」的相关评价内容（已过滤百科/词典等无关结果）。` +
-        `该地点网上口碑数据不足，请以高德评分、人均等结构化数据为准，不要臆测好坏。`
+        `该地点网上口碑数据不足，请以高德评分、人均等结构化数据为准，不要臆测好坏。${closureNote}`
       );
     },
   };
@@ -143,7 +320,7 @@ function queryVariants(place: string, city: string, suffix: string): string[] {
  * 相关性过滤：只保留提及地点名的结果，剔除百科/词典等噪声；
  * 有足够提及城市的结果时优先用它们（排除同名异地）。
  */
-function filterRelevant(results: SearchResult[], place: string, city: string): SearchResult[] {
+function filterRelevant(results: SearchResult[], place: string, city: string, allowTitleOnly = false, opening = allowTitleOnly): SearchResult[] {
   const tokens = placeTokens(place);
   const seen = new Set<string>();
   const relevantResults = results.filter((result) => {
@@ -151,21 +328,40 @@ function filterRelevant(results: SearchResult[], place: string, city: string): S
     if (seen.has(key)) return false; // 多个查询变体可能带回重复结果
     seen.add(key);
     if (NOISE_TITLE_PATTERN.test(result.title)) return false;
+    if (opening && /文库|招聘|招标/.test(result.title)) return false;
+    const url = opening && openingPageUrl(result.url);
+    if (url && /\.pdf$/i.test(url.pathname) && allowTitleOnly) return false;
+    if (url && isSearchPage(url) && !is360Redirect(url)
+      && !/\d{1,2}[:：][0-5]\d|全天开放|闭馆|闭园/.test(result.snippet)) return false;
+    if (/放心购|大牌汇聚|在线下单|退换无忧|淘你满意|淘宝|京东商城|广告推广/.test(`${result.title} ${result.snippet}`)) return false;
+    if (!allowTitleOnly && result.snippet.trim().length < 8 && !/(?:周[一二三四五六日天].*(?:闭馆|休馆)|\d{1,2}:\d{2}|全天开放|24小时|游玩.*\d.*小时)/.test(`${result.title} ${result.snippet}`)) return false;
     if (result.title.startsWith('"') || result.title.startsWith("“")) return false; // 搜索引擎回显的查询标题
     const text = `${result.title} ${result.snippet}`;
-    return tokens.some((token) => text.includes(token));
+    return opening ? mentionsOpeningPlace(text, place, city) : tokens.some((token) => text.includes(token));
   });
-  if (city !== "") {
+  if (!opening && city !== "") {
     const local = relevantResults.filter((result) => `${result.title} ${result.snippet}`.includes(city));
     if (local.length >= 2) return local;
   }
   return relevantResults;
 }
 
-function formatResults(place: string, results: SearchResult[]): string {
-  const lines = results
+function hasEnoughReviewFacts(place: string, city: string, aspect: string, collected: SearchResult[], durationCount: number, fields: ReturnType<typeof requestedOpeningFields>): boolean {
+  const relevant = filterRelevant(collected, place, city, false, aspect === "开放时间");
+  if (aspect === "开放时间") return extractOpeningFacts(city, place, relevant, fields).filter((f) => fields.includes(f.field)).every((f) => f.status === "verified" && !isHistoricalOpening(f));
+  if (aspect === "游玩时长") return durationCount > 0;
+  return relevant.length >= 3;
+}
+
+function formatResults(place: string, results: SearchResult[], opening = false): string {
+  const containsOpeningDetail = (result: SearchResult) => /\d{1,2}[:：][0-5]\d|全天|闭馆|闭园|暂停开放/.test(result.snippet);
+  const ranked = opening
+    ? [...results.filter(containsOpeningDetail), ...results.filter((result) => !containsOpeningDetail(result))]
+    : results;
+  const lines = ranked
     .slice(0, 5)
-    .map((r, i) => `${i + 1}. ${r.title}${r.snippet === "" ? "" : `\n   ${r.snippet}`}`);
+    .map((r, i) => `${i + 1}. ${r.title}${r.snippet === "" ? "" : `\n   ${r.snippet}`}${r.url ? `\n   来源 ${r.url}` : ""}`);
+  if (opening) return `「${place}」的开放信息来源片段（供核对，适用条件以原文为准）：\n` + lines.join("\n");
   const popularity = extractPopularity(results);
   return (
     `「${place}」的网络评价摘要（搜索引擎结果，非官方评分，仅供参考）:\n` +
@@ -318,6 +514,9 @@ const SEARCH_ENGINES: Array<{
     parse: parseDuckDuckGo,
   },
 ];
+// 南昌样本中DuckDuckGo返回过明确的游览资料，360多为验证页或中转链接。
+const OPENING_SEARCH_ENGINES = SEARCH_ENGINES.filter((engine) => engine.name !== "360")
+  .concat(SEARCH_ENGINES.filter((engine) => engine.name === "360"));
 
 /** 360 搜索: <li class="res-list"> 块内 <h3><a>标题</a> + res-desc 摘要 */
 function parse360(html: string): SearchResult[] {
@@ -331,34 +530,39 @@ function parse360(html: string): SearchResult[] {
     const snippetMatch =
       block.match(/<p[^>]*class="[^"]*res-desc[^"]*"[^>]*>([\s\S]*?)<\/p>/) ??
       block.match(/<p[^>]*>([\s\S]*?)<\/p>/);
-    results.push({ title, snippet: snippetMatch === null ? "" : cleanHtml(snippetMatch[1]) });
+    results.push({ title, snippet: snippetMatch === null ? "" : cleanHtml(snippetMatch[1]), url: resultUrl(block, "https://www.so.com") });
   }
   return results;
 }
 
-/** 百度结果页: <h3> 内的 <a> 标题 + c-abstract/content-right 摘要（两列按序配对） */
+/** 按各自标题后至下一标题的局部区域取摘要，避免缺摘要时把后一个结果错配给前一个。 */
 function parseBaidu(html: string): SearchResult[] {
-  const titles: string[] = [];
-  for (const match of html.matchAll(/<h3[^>]*>[\s\S]*?<a[^>]*>([\s\S]*?)<\/a>[\s\S]*?<\/h3>/g)) {
-    const title = cleanHtml(match[1]);
-    if (title !== "") titles.push(title);
+  // 新版结果把落地页和摘要放在卡片属性及服务端渲染数据里。
+  const cards = [...html.matchAll(/<div\b[^<>]*\bmu="([^"]+)"[^<>]*>/gi)];
+  const modern: SearchResult[] = [];
+  for (const [index, card] of cards.entries()) {
+    if (!/\bclass="result\s/.test(card[0])) continue;
+    const block = html.slice(card.index + card[0].length, cards[index + 1]?.index ?? html.length);
+    const title = cleanHtml(/<h3\b[^>]*>([\s\S]*?)<\/h3>/i.exec(block)?.[1] ?? "");
+    if (!title) continue;
+    let snippet = "";
+    const data = /<!--s-data:(\{"summaryData"[\s\S]*?)-->/.exec(block)?.[1];
+    if (data) try {
+      // 渲染器对HTML注释中的连字符转义，恢复后才是JSON。
+      const lines = JSON.parse(data.replaceAll("\\-", "-")).summaryData?.generalLines;
+      if (Array.isArray(lines)) snippet = cleanHtml(lines.flatMap((line) => Array.isArray(line?.data) ? line.data : [])
+        .flatMap((part) => typeof part?.text === "string" ? [part.text] : []).join(" ")).slice(0, 1500);
+    } catch { /* 卡片数据损坏时仍可使用标题和落地页。 */ }
+    const url = resultUrl(`<a href="${card[1]}">`, "https://www.baidu.com");
+    modern.push({ title, snippet, url });
   }
-  const snippets: string[] = [];
-  for (const match of html.matchAll(
-    /<(?:div|span)[^>]*class="[^"]*(?:c-abstract|c-span-last|content-right_[^"\s]*)[^"]*"[^>]*>([\s\S]*?)<\/(?:div|span)>/g,
-  )) {
-    snippets.push(cleanHtml(match[1]));
-  }
-
-  const results: SearchResult[] = [];
-  const count = Math.max(titles.length, snippets.length);
-  for (let i = 0; i < count; i++) {
-    const title = titles[i] ?? "";
-    const snippet = snippets[i] ?? "";
-    if (title === "" && snippet === "") continue;
-    results.push({ title, snippet });
-  }
-  return results;
+  if (modern.length) return modern;
+  const titles = [...html.matchAll(/<h3[^>]*>[\s\S]*?<a[^>]*>([\s\S]*?)<\/a>[\s\S]*?<\/h3>/g)];
+  return titles.map((match, index) => {
+    const block = html.slice(match.index + match[0].length, titles[index + 1]?.index ?? html.length);
+    const snippet = block.match(/<(?:div|span|p)[^>]*class="[^"]*(?:c-abstract|c-span-last|content-right_[^"\s]*)[^"]*"[^>]*>([\s\S]*?)<\/(?:div|span|p)>/);
+    return { title: cleanHtml(match[1]!), snippet: snippet ? cleanHtml(snippet[1]!) : "", url: resultUrl(match[0], "https://www.baidu.com") };
+  });
 }
 
 /** Bing 结果页: <li class="b_algo"> 块内 <h2><a>标题</a></h2> + 第一个 <p>摘要</p> */
@@ -373,30 +577,29 @@ function parseBing(html: string): SearchResult[] {
     const title = cleanHtml(titleMatch[1]);
     const snippet = snippetMatch === null ? "" : cleanHtml(snippetMatch[1]);
     if (title === "" && snippet === "") continue;
-    results.push({ title, snippet });
+    results.push({ title, snippet, url: resultUrl(block, "https://www.bing.com") });
   }
   return results;
 }
 
 /** DuckDuckGo HTML 版结果页: result__a 标题 + result__snippet 摘要 */
 function parseDuckDuckGo(html: string): SearchResult[] {
-  const titles: string[] = [];
-  const snippets: string[] = [];
+  const titles = [...html.matchAll(/<a[^>]*class="[^"]*result__a[^"]*"[^>]*>([\s\S]*?)<\/a>/g)];
+  return titles.map((match, index) => {
+    const block = html.slice(match.index + match[0].length, titles[index + 1]?.index ?? html.length), snippet = /<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>/.exec(block);
+    return { title: cleanHtml(match[1]!), snippet: snippet ? cleanHtml(snippet[1]!) : "", url: resultUrl(match[0], "https://html.duckduckgo.com") };
+  });
+}
 
-  for (const match of html.matchAll(/<a[^>]*class="[^"]*result__a[^"]*"[^>]*>([\s\S]*?)<\/a>/g)) {
-    titles.push(cleanHtml(match[1]));
-  }
-  for (const match of html.matchAll(/<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>/g)) {
-    snippets.push(cleanHtml(match[1]));
-  }
-
-  const results: SearchResult[] = [];
-  const count = Math.min(titles.length, snippets.length);
-  for (let i = 0; i < count; i++) {
-    if (titles[i] === "" && snippets[i] === "") continue;
-    results.push({ title: titles[i], snippet: snippets[i] });
-  }
-  return results;
+function resultUrl(block: string, base: string): string | undefined {
+  const href = /<a\b[^>]*\bhref=["']([^"']+)["']/i.exec(block)?.[1]; if (!href) return undefined;
+  try {
+    let url = new URL(unescapeEntities(href), base);
+    const destination = url.searchParams.get("uddg"); if (destination) url = new URL(destination);
+    const encoded = url.hostname.endsWith("bing.com") ? url.searchParams.get("u") : undefined;
+    if (encoded?.startsWith("a1")) url = new URL(Buffer.from(encoded.slice(2), "base64url").toString("utf8"));
+    return ["http:", "https:"].includes(url.protocol) ? url.href : undefined;
+  } catch { return undefined; }
 }
 
 function cleanHtml(fragment: string): string {

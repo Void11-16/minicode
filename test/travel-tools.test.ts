@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { ToolRegistry } from "../src/tools/tool.ts";
 import { createAttractionsTool } from "../src/tools/attractions.ts";
 import { setAmapKey } from "../src/tools/amap-access.ts";
 import { createReviewsTool } from "../src/tools/reviews.ts";
@@ -442,4 +443,31 @@ test("search_attractions: 博物馆搜索失败时输出可见警告", async () 
   assert.match(output, /⚠️ 博物馆[/]纪念馆搜索失败（quota exceeded），以上仅为风景名胜结果/);
 
   setAmapKey(undefined);
+});
+
+test("旅游景点候选默认筛4.3，保留必去主景区并与放宽查询分开缓存", async (t) => {
+  const poi = (id: string, name: string, rating: string, parent?: string) => ({
+    id, name, parent, cityname: "西安市", type: "风景名胜", location: "109.2821,34.3863", biz_ext: { rating },
+  });
+  setAmapKey("test-key", async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname.includes("geocode")) return amapResponse({ geocodes: [{ formatted_address: "陕西省西安市", province: "陕西省", city: "西安市", country: "中国", location: "109.2821,34.3863" }] });
+    return amapResponse({ pois: [
+      poi("parent", "秦始皇帝陵博物院", "4.1"),
+      poi("child", "秦兵马俑壹号坑大厅", "4.7", "parent"),
+      poi("other", "华清宫", "4.6"),
+      poi("boundary", "临潼博物馆", "4.3"),
+      poi("low", "普通候选公园", "4.2"),
+    ] });
+  });
+  t.after(() => setAmapKey(undefined));
+  const registry = new ToolRegistry().register(createAttractionsTool());
+  const ctx = { workspace: process.cwd(), travelMode: true, brief: { title: "西安三日游", destination: "西安", mustVisit: ["兵马俑"], avoid: [] } };
+  const args = { location: "西安", city: "西安" };
+  const output = await registry.execute("search_attractions", JSON.stringify(args), ctx);
+  assert.match(output, /1\. 秦始皇帝陵博物院.*内部推荐.*秦兵马俑壹号坑大厅/);
+  assert.match(output, /临潼博物馆/);
+  assert.doesNotMatch(output, /普通候选公园/);
+  const unrestricted = await registry.execute("search_attractions", JSON.stringify({ ...args, min_rating: 0 }), ctx);
+  assert.match(unrestricted, /普通候选公园/);
 });

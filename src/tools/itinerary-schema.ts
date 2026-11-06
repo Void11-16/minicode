@@ -29,11 +29,22 @@ export interface ItineraryItem {
   readonly id: string;
   readonly time?: string;
   readonly end_time?: string;
+  /** 用户指定或已确认预约/车次的固定开始时刻，自动路线修复不得顺延。 */
+  readonly time_locked?: boolean;
   readonly type: ItineraryItemType;
   readonly subtype?: MealSubtype;
   /** 业务细分类型，如古迹/博物馆/公园；meal 可填菜系 */
   readonly place_type?: string;
   readonly name: string;
+  /** 动作说明，与地点身份分开，如返回酒店、办理入住。 */
+  readonly activity?: string;
+  /** 重游说明；不构成用户授权，不能据此跳过重复检查。 */
+  readonly repeat_reason?: string;
+  /** 程序根据地点证据回填的包含关系；不是第二个独立游览安排。 */
+  readonly parent_visit?: ScenicParent;
+  readonly closure_holiday_exception?: boolean;
+  /** 主景区内部可选地点，不单独计数、不生成路线停留点。 */
+  readonly recommended_spots?: readonly string[];
   readonly location?: ItineraryLocation;
   readonly planned_duration_min?: number;
   readonly transport_mode?: string;
@@ -48,8 +59,13 @@ export interface ItineraryItem {
   readonly stay_nights?: number;
   readonly evidence_observed_at?: number;
   readonly opening_hours?: ItineraryOpeningHours;
+  /** 开放信息由证据仓库回填，保留实际采用的字段证据ID。 */
+  readonly opening_evidence_ids?: readonly string[];
+  readonly opening_sessions?: readonly { readonly starts: string; readonly ends?: string }[];
+  readonly closed_dates?: readonly string[];
   readonly closed_on?: readonly string[];
   readonly closure_verified?: boolean;
+  readonly closure_policy_version?: number;
   readonly reservation_required?: boolean;
   readonly cuisine?: string;
   readonly source?: string;
@@ -61,6 +77,8 @@ export interface ItineraryItem {
   readonly route_evidence_id?: string;
   readonly route_verified?: boolean;
   readonly route_duration_min?: number;
+  /** 程序生成的路线绑定/日序差异；每次保存重新计算，模型无需填写。 */
+  readonly route_binding_error?: string;
 }
 
 export interface ItineraryOpeningHours {
@@ -91,9 +109,27 @@ export interface Itinerary {
   readonly travelers?: number;
   readonly room_count?: number;
   readonly constraints?: ItineraryConstraints;
+  /** 粗排预留不计入已完成日期；实际安排仍以days为准。 */
+  readonly outline?: readonly ItineraryOutlineDay[];
+  readonly excluded_visits?: readonly ExcludedVisit[];
 }
 
+export interface ScenicParent { readonly name: string; readonly evidence_id?: string }
+export interface RepeatVisitPermission { readonly name: string; readonly user_message_id: string; readonly user_quote: string }
+export interface PlannedVisit { readonly name: string; readonly evidence_id?: string; readonly repeat_reason?: string; readonly parent_visit?: ScenicParent }
+export interface ItineraryOutlineDay { readonly date: string; readonly theme?: string; readonly visits: readonly PlannedVisit[] }
+export interface ExcludedVisit extends PlannedVisit { readonly reason: string }
+
 export interface ItineraryConstraints {
+  /** 仅由宿主根据真实用户消息生成；保存工具不接受模型提供的授权。 */
+  readonly repeat_visit_permissions?: readonly RepeatVisitPermission[];
+  readonly must_visit?: readonly string[];
+  readonly route_tolerance_min?: number;
+  readonly route_tolerance_ratio?: number;
+  readonly allow_hotel_changes?: boolean;
+  readonly base_stay_name?: string;
+  /** 远郊日单段交通上限，分钟；默认 240，普通城市日仍为 150。 */
+  readonly remote_leg_limit_min?: number;
   readonly start_date?: string;
   readonly end_date?: string;
   readonly expected_days?: number;
@@ -200,7 +236,8 @@ export function parseItinerary(raw: unknown): Itinerary {
 
   const title = optionalString(source.title);
   if (title === undefined || title === "") throw new Error("title 必须是非空字符串");
-  if (!Array.isArray(source.days) || source.days.length === 0) {
+  const outline = parseOutline(source.outline);
+  if (!Array.isArray(source.days) || (source.days.length === 0 && !outline?.length)) {
     throw new Error("days 必须是非空数组");
   }
 
@@ -217,10 +254,16 @@ export function parseItinerary(raw: unknown): Itinerary {
     dates.set(day.date, index);
   }
   const constraints = objectOf(source.constraints);
+  if (constraints?.route_tolerance_min !== undefined) boundedNumber(constraints.route_tolerance_min, "route_tolerance_min", 0, 15);
+  if (constraints?.route_tolerance_ratio !== undefined) boundedNumber(constraints.route_tolerance_ratio, "route_tolerance_ratio", 0, .25);
+  if (constraints?.remote_leg_limit_min !== undefined) boundedNumber(constraints.remote_leg_limit_min, "remote_leg_limit_min", 60, 480);
+  if (constraints?.must_visit !== undefined && (!Array.isArray(constraints.must_visit) || constraints.must_visit.some((v) => typeof v !== "string" || v.trim() === ""))) throw new Error("must_visit 必须为非空名称的数组");
   if (constraints?.recommendation_mode !== undefined && !["off", "advisory", "strict"].includes(String(constraints.recommendation_mode))) throw new Error("recommendation_mode 不合法");
   if (constraints?.meal_candidates_target !== undefined && (!Number.isInteger(constraints.meal_candidates_target) || Number(constraints.meal_candidates_target) < 1 || Number(constraints.meal_candidates_target) > 20)) throw new Error("meal_candidates_target 需要 1-20 的整数");
   if (source.budget_source !== undefined && !["brief", "explicit"].includes(String(source.budget_source))) throw new Error("budget_source 不合法");
   return { title, days,
+    ...(outline === undefined ? {} : { outline }),
+    ...(source.excluded_visits === undefined ? {} : { excluded_visits: parseExcludedVisits(source.excluded_visits) }),
     ...(source.budget_source === undefined ? {} : { budget_source: source.budget_source as "brief" | "explicit" }),
     ...(source.travelers === undefined ? {} : { travelers: positiveInteger(source.travelers, "travelers") }),
     ...(source.room_count === undefined ? {} : { room_count: positiveInteger(source.room_count, "room_count") }),
@@ -228,7 +271,14 @@ export function parseItinerary(raw: unknown): Itinerary {
     ...(source.revision === undefined ? {} : { revision: positiveNumber(source.revision, "revision") }),
     ...(source.budget_per_person_yuan === undefined ? {} : { budget_per_person_yuan: nonNegativeNumber(source.budget_per_person_yuan, "budget_per_person_yuan") }),
     ...(constraints === null ? {} : { constraints: {
+      ...(constraints.repeat_visit_permissions === undefined ? {} : { repeat_visit_permissions: parseRepeatPermissions(constraints.repeat_visit_permissions) }),
+      ...(constraints.must_visit === undefined ? {} : { must_visit: [...new Set((constraints.must_visit as string[]).map((v) => v.trim()))] }),
       ...(constraints.expected_days === undefined ? {} : { expected_days: positiveNumber(constraints.expected_days, "expected_days") }),
+      ...(constraints.route_tolerance_min === undefined ? {} : { route_tolerance_min: Number(constraints.route_tolerance_min) }),
+      ...(constraints.route_tolerance_ratio === undefined ? {} : { route_tolerance_ratio: Number(constraints.route_tolerance_ratio) }),
+      ...(constraints.allow_hotel_changes === undefined ? {} : { allow_hotel_changes: parseBoolean(constraints.allow_hotel_changes, "allow_hotel_changes") }),
+      ...(constraints.base_stay_name === undefined ? {} : { base_stay_name: optionalString(constraints.base_stay_name) }),
+      ...(constraints.remote_leg_limit_min === undefined ? {} : { remote_leg_limit_min: Number(constraints.remote_leg_limit_min) }),
       ...(constraints.start_date === undefined ? {} : { start_date: optionalString(constraints.start_date) }),
       ...(constraints.end_date === undefined ? {} : { end_date: optionalString(constraints.end_date) }),
       ...(constraints.destination === undefined ? {} : { destination: optionalString(constraints.destination) }),
@@ -240,6 +290,43 @@ export function parseItinerary(raw: unknown): Itinerary {
       ...Object.fromEntries(["require_accommodation", "require_routes", "require_place_evidence", "recommendations"].flatMap((key) => constraints[key] === undefined ? [] : [[key, parseBoolean(constraints[key], key)]])),
     } }),
   };
+}
+
+function parsePlannedVisit(raw: unknown): PlannedVisit {
+  const source = objectOf(raw), name = optionalString(source?.name);
+  if (!source || !name || name.length > 200) throw new Error("粗排景点需要不超过200字的name");
+  return { name, ...(source.evidence_id === undefined ? {} : { evidence_id: optionalString(source.evidence_id) }), ...(source.repeat_reason === undefined ? {} : { repeat_reason: optionalString(source.repeat_reason) }), ...(source.parent_visit === undefined ? {} : { parent_visit: parseScenicParent(source.parent_visit) }) };
+}
+
+function parseScenicParent(raw: unknown): ScenicParent {
+  const parent = objectOf(raw), name = parent && optionalString(parent.name);
+  if (!name || name.length > 100) throw new Error("parent_visit需要有效主景区name");
+  return { name, ...(parent.evidence_id === undefined ? {} : { evidence_id: optionalString(parent.evidence_id) }) };
+}
+
+function parseRepeatPermissions(raw: unknown): RepeatVisitPermission[] {
+  if (!Array.isArray(raw) || raw.length > 100) throw new Error("repeat_visit_permissions最多100项");
+  return raw.map((value) => {
+    const row = objectOf(value), name = row && optionalString(row.name), user_message_id = row && optionalString(row.user_message_id), user_quote = row && optionalString(row.user_quote);
+    if (!name || !user_message_id || !user_quote || name.length > 100 || user_message_id.length > 200 || user_quote.length > 500) throw new Error("重游授权需要地点、真实用户消息ID和500字以内原文");
+    return { name, user_message_id, user_quote };
+  });
+}
+function parseOutline(raw: unknown): ItineraryOutlineDay[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw) || raw.length > 90) throw new Error("outline 需要最多90天的数组");
+  const dates = new Set<string>();
+  return raw.map((entry) => {
+    const value = objectOf(entry), date = optionalString(value?.date);
+    if (!value || !date || !/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(Date.parse(date)) || new Date(date).toISOString().slice(0, 10) !== date || dates.has(date)) throw new Error("outline.date 必须为有效、不重复的YYYY-MM-DD日期");
+    if (!Array.isArray(value.visits) || value.visits.length > 20) throw new Error("outline.visits 需要最多20个主景点的数组");
+    dates.add(date);
+    return { date, ...(value.theme === undefined ? {} : { theme: optionalString(value.theme) }), visits: value.visits.map(parsePlannedVisit) };
+  }).sort((a, b) => a.date.localeCompare(b.date));
+}
+function parseExcludedVisits(raw: unknown): ExcludedVisit[] {
+  if (!Array.isArray(raw) || raw.length > 100) throw new Error("excluded_visits 需要最多100个景点的数组");
+  return raw.map((entry) => { const value = objectOf(entry), reason = optionalString(value?.reason); if (!reason || reason.length > 500) throw new Error("排除景点必须说明reason，最多500字"); return { ...parsePlannedVisit(entry), reason }; });
 }
 
 function parseDay(raw: unknown, dayIndex: number, ids: Map<string, number>): ItineraryDay {
@@ -282,11 +369,23 @@ function uniqueId(requested: string, ids: Map<string, number>, defaultId: string
   }
 }
 
+/** 新增交通可由明确端点生成展示名，地点活动仍要求真实名称。 */
+export function itineraryItemName(source: Record<string, unknown>): string | undefined {
+  const name = optionalString(source.name);
+  if (name !== undefined) return name;
+  const type = TYPE_ALIASES[optionalString(source.type) ?? ""];
+  if (type === "transport") {
+    const from = optionalString(source.from), to = optionalString(source.to);
+    if (from && to) return `${from} → ${to}`;
+    if (optionalString(source.route_evidence_id)) return "交通";
+  }
+  return ["rest", "free_time", "note"].includes(type ?? "") ? optionalString(source.activity) : undefined;
+}
+
 function parseItem(raw: unknown, defaultId: string, ids: Map<string, number>, dayIndex: number): ItineraryItem {
   const source = objectOf(raw);
   if (source === null) throw new Error("行程条目必须是对象");
-
-  const name = optionalString(source.name);
+  const name = itineraryItemName(source);
   if (name === undefined || name === "") throw new Error("每个行程条目必须有非空 name");
 
   const originalType = optionalString(source.type) ?? "";
@@ -316,6 +415,7 @@ function parseItem(raw: unknown, defaultId: string, ids: Map<string, number>, da
   const cuisine = optionalString(source.cuisine);
   const sourceName = optionalString(source.source);
   const note = optionalString(source.note);
+  if (source.recommended_spots !== undefined && (type !== "visit" || !Array.isArray(source.recommended_spots) || source.recommended_spots.length > 10 || source.recommended_spots.some((v) => typeof v !== "string" || v.trim() === "" || v.length > 100))) throw new Error("recommended_spots 仅用于景点，最多 10 个非空名称（各不超过 100 字）");
   return {
     id,
     ...(source.room_price_per_night === undefined ? {} : { room_price_per_night: nonNegativeNumber(source.room_price_per_night, "room_price_per_night") }),
@@ -328,12 +428,19 @@ function parseItem(raw: unknown, defaultId: string, ids: Map<string, number>, da
     ...(source.route_evidence_id === undefined ? {} : { route_evidence_id: optionalString(source.route_evidence_id) }),
     ...(source.route_verified === undefined ? {} : { route_verified: parseBoolean(source.route_verified, "route_verified") }),
     ...(source.route_duration_min === undefined ? {} : { route_duration_min: nonNegativeNumber(source.route_duration_min, "route_duration_min") }),
+    ...(source.route_binding_error === undefined ? {} : { route_binding_error: optionalString(source.route_binding_error) }),
     ...(time !== undefined ? { time } : {}),
     ...(endTime !== undefined ? { end_time: endTime } : {}),
+    ...(source.time_locked === undefined ? {} : { time_locked: parseBoolean(source.time_locked, "time_locked") }),
     type,
     ...(subtype !== undefined ? { subtype } : {}),
     ...(placeType !== undefined ? { place_type: placeType } : {}),
     name,
+    ...(source.activity === undefined ? {} : { activity: optionalString(source.activity) }),
+    ...(source.repeat_reason === undefined ? {} : { repeat_reason: optionalString(source.repeat_reason) }),
+    ...(source.parent_visit === undefined ? {} : { parent_visit: parseScenicParent(source.parent_visit) }),
+    ...(source.closure_holiday_exception === undefined ? {} : { closure_holiday_exception: parseBoolean(source.closure_holiday_exception, "closure_holiday_exception") }),
+    ...(source.recommended_spots === undefined ? {} : { recommended_spots: [...new Set((source.recommended_spots as string[]).map((v) => v.trim()))] }),
     ...(source.location === undefined ? {} : { location: parseLocation(source.location) }),
     ...(plannedDuration !== undefined ? { planned_duration_min: plannedDuration } : {}),
     ...(transportMode !== undefined ? { transport_mode: transportMode } : {}),
@@ -343,8 +450,14 @@ function parseItem(raw: unknown, defaultId: string, ids: Map<string, number>, da
     ...(costPerPerson !== undefined ? { cost_per_person: costPerPerson } : {}),
     ...(ticketPrice !== undefined ? { ticket_price_per_person: ticketPrice } : {}),
     ...(source.opening_hours === undefined ? {} : { opening_hours: parseOpeningHours(source.opening_hours) }),
+    ...(source.opening_evidence_ids === undefined ? {} : { opening_evidence_ids: parseStringList(source.opening_evidence_ids, "opening_evidence_ids", 5) }),
+    ...(source.closed_dates === undefined ? {} : { closed_dates: parseStringList(source.closed_dates, "closed_dates", 100).map((day) => {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || !Number.isFinite(Date.parse(day)) || new Date(day).toISOString().slice(0, 10) !== day) throw new Error("closed_dates需要有效ISO日期"); return day;
+    }) }),
+    ...(source.opening_sessions === undefined ? {} : { opening_sessions: parseSessions(source.opening_sessions) }),
     ...(closedOn !== undefined ? { closed_on: closedOn } : {}),
     ...(source.closure_verified === undefined ? {} : { closure_verified: parseBoolean(source.closure_verified, "closure_verified") }),
+    ...(source.closure_policy_version === undefined ? {} : { closure_policy_version: positiveInteger(source.closure_policy_version, "closure_policy_version") }),
     ...(source.reservation_required === undefined ? {} : { reservation_required: parseBoolean(source.reservation_required, "reservation_required") }),
     ...(cuisine !== undefined ? { cuisine } : {}),
     ...(sourceName !== undefined ? { source: sourceName } : {}),
@@ -358,7 +471,7 @@ function parseOpeningHours(raw: unknown): ItineraryOpeningHours {
   if (source === null) throw new Error("opening_hours 必须是对象");
 
   const opens = optionalTime(source.opens, "opening_hours.opens");
-  const closes = optionalTime(source.closes, "opening_hours.closes");
+  const closes = source.closes === "24:00" ? "24:00" : optionalTime(source.closes, "opening_hours.closes");
   if (opens === undefined || closes === undefined) {
     throw new Error("opening_hours.opens / closes 必须是 HH:MM");
   }
@@ -378,6 +491,15 @@ function parseIntervals(raw: unknown): readonly { opens: string; closes: string 
     const interval = parseOpeningHours(entry);
     return { opens: interval.opens, closes: interval.closes };
   });
+}
+
+function parseStringList(raw: unknown, field: string, max: number): string[] {
+  if (!Array.isArray(raw) || raw.length > max || raw.some((v) => typeof v !== "string" || !v.trim() || v.length > 200)) throw new Error(`${field}需要最多${max}项非空字符串`);
+  return [...new Set(raw.map((v: string) => v.trim()))];
+}
+function parseSessions(raw: unknown): { starts: string; ends?: string }[] {
+  if (!Array.isArray(raw) || raw.length > 30) throw new Error("opening_sessions需要最多30项");
+  return raw.map((entry) => { const v = objectOf(entry), starts = v && optionalTime(v.starts, "sessions.starts"); if (!v || !starts) throw new Error("场次需要有效开始时间"); return { starts, ...(v.ends === undefined ? {} : { ends: optionalTime(v.ends, "sessions.ends") }) }; });
 }
 
 function positiveInteger(raw: unknown, field: string): number {
