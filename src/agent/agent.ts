@@ -1,5 +1,5 @@
 import { loadBriefForTitle } from "../tools/brief.ts";
-import { activeDayTask, taskDates, setDayTaskDraft, selectDayTask, extendDayTaskAttempts, blockDayTask, recordDayTaskRound, dayTaskScope, dayTaskHistory, dayTaskDefinitions, dayTaskCallIssue, isExplicitPlanEdit, dayTaskRounds, dayTaskCalls } from "../core/day-tasks.ts";
+import { activeDayTask, taskDates, setDayTaskDraft, selectDayTask, extendDayTaskAttempts, blockDayTask, recordDayTaskRound, dayTaskScope, dayTaskHistory, dayTaskDefinitions, dayTaskCallIssue, isExplicitPlanEdit, localDayEditScope, dayTaskRounds, dayTaskCalls } from "../core/day-tasks.ts";
 import { evidenceId } from "../tools/travel-evidence.ts";
 import { executionStateOf, type ToolExecutionState } from "../core/execution-state.ts";
 import { recoverInterruptedToolCalls } from "./tool-recovery.ts";
@@ -20,7 +20,7 @@ import { travelFocusDay, renderFocusedTravelState } from "../core/travel-context
 import type { Session } from "../core/session.ts";
 import type { ChatProvider, LLMResult } from "../llm/provider.ts";
 import { isCompactedToolArguments, type PromptMessage, type ToolCall } from "../core/message.ts";
-import { parseItinerary } from "../tools/itinerary-schema.ts";
+import { parseItinerary, type Itinerary } from "../tools/itinerary-schema.ts";
 import { applyBriefRequirements, inspectItinerary, renderMarkdown } from "../tools/itinerary.ts";
 import { renderQualityReport } from "../tools/itinerary-validator.ts";
 import type { ItinerarySnapshot, ToolContext, ToolRegistry } from "../tools/tool.ts";
@@ -44,7 +44,7 @@ import {
   updateTravelStateFromSnapshot,
 } from "../core/travel-state.ts";
 import { compactToolResults, type ToolResultForContext } from "./tool-output.ts";
-import { nextRouteFollowUp, pendingRouteRepairs } from "./travel-finalization.ts";
+import { localDayEditReply, nextRouteFollowUp, pendingRouteRepairs } from "./travel-finalization.ts";
 import { recordDeliveryProgress, deliveryGuidance, DEFER_OPTIONAL_EVIDENCE_AFTER, MAX_DELIVERY_STAGNATION, isDeferredEvidenceCall, focusedEvidenceDefinitions, essentialVisitInfoDefinitions, repairOnlyDefinitions, MAX_REDUNDANT_CALLS_BEFORE_REPAIR, MAX_REDUNDANT_ROUNDS, REPAIR_TOOL_NAMES, planningGuidance, planningProgress, planningDefinitions, recoverCoverage, basicLayerActive, basicLayerCallIssue, basicLayerDefinitions } from "./travel-progress.ts";
 
 function safeEmit(callback:()=>void):void{
@@ -332,6 +332,9 @@ export class ChatAgent {
       const plan = this.sessionValue.travelState?.itinerary;
       if (!failedSaveThisRun || cumulative.operationRecovery || cumulative.blockedKind === "dependency"
         || (committedPlanThisRun && plan?.strictPass && plan.complete !== false)) return undefined;
+      if ([...failures.values()].some(({ reason }) => reason.includes("[VISIT_ADDITION_CONFLICT]"))) {
+        return "你可以让我在该日期换一个更近的新增景点，或明确告诉我哪一天的哪项安排可以调整。";
+      }
       if ([...failures.values()].some(({ reason }) => reason.includes("[DAY_SCHEDULE_CONFLICT]"))) {
         return "如果结束时间或固定预约不能调整，请告诉我新增景点的优先顺序，我可以据此重新安排。";
       }
@@ -386,12 +389,22 @@ export class ChatAgent {
       cumulative.basicDiscoveryCalls ??= new Map();
       const basicQueries = () => cumulative.basicDiscoveryCalls!.get(this.sessionValue.travelState?.brief?.title ?? "") ?? 0;
       const researchOnly = /(?:核实|查询|重查|刷新|查一下|看看).*(?:开放|闭馆|天气|资料|时长)|(?:检查|查看|读取|加载|展示).*(?:当前|已有|已保存)?行程/.test(trimmed) && !/规划|补齐|生成|(?<!已)保存|重排|调整行程/.test(trimmed);
-      const explicitEdit = isExplicitPlanEdit(trimmed);
-      let dailyEnabled = !explicitEdit && !researchOnly;
       const planningRequested = /规划|行程|补齐|续跑|接着|继续|旅游|旅行|保存|(?:玩|去).{0,20}[一二三四五六七八九十\d]+(?:天|日)/.test(trimmed);
       const explicitlyNew = /(?:新建|另建|另起|另做|另存|再(?:做|排|规划|生成)一份).{0,16}(?:行程|旅行|旅程|日游|天)|(?:新建|另建|另起|另做|再(?:做|排|规划|生成))一份|(?:新的一趟|新的行程|新的旅行)/.test(trimmed);
-      const resumingDates = !explicitlyNew && /继续|补齐|续跑|接着|还缺|缺失|未完成|剩余|后[面续].*(?:天|行程)/.test(trimmed);
       const currentTravel = this.sessionValue.travelState;
+      let editScope = !explicitlyNew ? localDayEditScope(currentTravel, trimmed) : undefined;
+      let localEditBefore: Itinerary | undefined;
+      let localEditCommit: ItinerarySnapshot | undefined;
+      let localEditAttempted = false;
+      const localEditSummary = (scope: NonNullable<typeof editScope>) => {
+        if (localEditCommit) return localDayEditReply(scope, localEditBefore, localEditCommit);
+        if (cumulative.operationRecovery) return planStatus();
+        const day = scope.day_number ? `第 ${scope.day_number} 天（${scope.date}）` : scope.date;
+        return `${day}尚未写入新的修改。`;
+      };
+      const explicitEdit = isExplicitPlanEdit(trimmed);
+      let dailyEnabled = (!explicitEdit || explicitlyNew || !currentTravel?.itinerary) && !researchOnly;
+      const resumingDates = !explicitlyNew && !editScope && /继续|补齐|续跑|接着|还缺|缺失|未完成|剩余|后[面续].*(?:天|行程)/.test(trimmed);
       const newTravelPlan = explicitlyNew || (planningRequested && !currentTravel?.brief && !currentTravel?.itinerary && !resumingDates && dailyEnabled);
       if (!dailyEnabled) {
         const active = activeDayTask(this.sessionValue.travelState);
@@ -437,11 +450,15 @@ export class ChatAgent {
         const brief = await loadBriefForTitle(briefRoot, briefTitle);
         if (brief) this.sessionValue.setTravelState(updateTravelStateFromBrief(this.sessionValue.travelState, { ...brief }));
       }
-      if (resumingDates && previousPlan) {
+      if ((resumingDates || editScope) && previousPlan) {
         const planRoot = tools.get("save_itinerary")?.operationRoot ?? this.workspace;
         const file = planFileFor(planRoot, "plans", previousPlan.title, "json");
         try {
           const saved = parseItinerary(JSON.parse(await readFile(file, "utf8")));
+          if (editScope) {
+            localEditBefore = saved;
+            editScope = { ...editScope, revision: saved.revision ?? 0 };
+          }
           this.committedSnapshot = { file, ...inspectItinerary(applyBriefRequirements(saved, this.sessionValue.travelState?.brief), tools.evidence) };
           this.sessionValue.setTravelState(updateTravelStateFromSnapshot(this.sessionValue.travelState, this.committedSnapshot));
         } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
@@ -457,7 +474,7 @@ export class ChatAgent {
       const allowReviews = () => !this.sessionValue.travelState?.brief || cumulative.allowAdvisoryReviews === true || strictMeals();
       const pendingVisitInfo = () => {
         const state = this.sessionValue.travelState;
-        if (!state?.brief || cumulative.allowAdvisoryReviews || cumulative.allowVisitInfoQueries || strictMeals()) return undefined;
+        if (editScope || !state?.brief || cumulative.allowAdvisoryReviews || cumulative.allowVisitInfoQueries || strictMeals()) return undefined;
         const active = activeDayTask(state);
         const focus = travelFocusDay(state, trimmed);
         const slot = active ? state.itinerary?.outline?.find((day) => day.date === active.date) : state.itinerary?.outline?.[focus - 1];
@@ -466,6 +483,24 @@ export class ChatAgent {
       };
       if (cumulative.deliveryProgress === undefined) recordDeliveryProgress(this.sessionValue.travelState, cumulative);
       for (;;) {
+        if (controller.signal.aborted) throw new TurnAbortedError();
+        for (const message of options.takeSteeredMessages?.() ?? []) {
+          this.sessionValue.add("user", message);
+          cumulative.allowAdvisoryReviews ||= /口碑|评价|点评|排队|招牌|人均价格/.test(message);
+          cumulative.allowVisitInfoQueries ||= /游[玩览]时长|开放时间|闭馆|停止入园|最后入场|场次|公告|重新核实|重查|刷新|重新查询/.test(message);
+          cumulative.redundantCalls = 0; cumulative.redundantRounds = 0;
+          if (isExplicitPlanEdit(message)) {
+            const active = activeDayTask(this.sessionValue.travelState);
+            if (active) this.sessionValue.setTravelState(blockDayTask(this.sessionValue.travelState!, active.date, "用户指定修订，暂停补天"));
+            dailyEnabled = false; dayPlanning = false;
+            editScope = localDayEditScope(this.sessionValue.travelState, message);
+            localEditBefore = this.itinerarySnapshot?.itinerary;
+            localEditCommit = undefined;
+            localEditAttempted = false;
+            savedRouteDates.clear();
+            resetDayLoop();
+          }
+        }
         if (exhausted()) { budgetGuidance = "已达到本次任务累计轮次、调用、token 或费用上限；自动续跑不会重置预算。"; break; }
         const snapshotBeforeRound = this.itinerarySnapshot;
         if (snapshotBeforeRound) {
@@ -495,13 +530,14 @@ export class ChatAgent {
         const saved = this.itinerarySnapshot;
         const routeCallSlots = Math.min(cumulative.maxCalls - cumulative.calls, dateTask ? dayTaskCalls(dateTask) - dateTask.attempt_calls : Infinity);
         // 日期软额度用尽后，已保存版本的路线仍可在累计预算内补查与提交。
-        const routeDates = dateTask ? new Set([dateTask.date]) : dailyEnabled ? undefined : savedRouteDates;
-        let routeFollowUp = saved && !basicStage && tools.get("save_itinerary") && (!dateTask || dateTask.layer === "schedule")
-          && (dayPlanning || supportsRouteQueries && (this.savedThisRun || dailyEnabled && resumingDates))
+        const routeDates = editScope ? new Set([editScope.date]) : dateTask ? new Set([dateTask.date]) : dailyEnabled ? undefined : savedRouteDates;
+        const routeFollowUp = saved && !basicStage && tools.get("save_itinerary") && (!dateTask || dateTask.layer === "schedule")
+          && (editScope ? localEditCommit && supportsRouteQueries : dayPlanning || supportsRouteQueries && (this.savedThisRun || dailyEnabled && resumingDates))
           ? nextRouteFollowUp(saved, tools.evidence, {
             dates: routeDates, maxQueries: supportsRouteQueries ? Math.min(4, routeCallSlots - 1) : 0,
             queriedLegs: queriedRouteLegs, attemptedRepairs: attemptedRouteCommits,
           }) : undefined;
+        if (editScope && localEditCommit && !routeFollowUp) break;
         const limit = await roundLimit();
         const finishedDates = dayPlanning && !dateTask && !routeFollowUp;
         const retryableDates = finishedDates && this.sessionValue.travelState?.itinerary?.dayTasks?.some((task) => task.status !== "saved");
@@ -517,6 +553,7 @@ export class ChatAgent {
           else { circuitOpen = true; failureGuidance = cumulative.blockedReason ?? ((cumulative.deliveryStagnantRounds ?? 0) >= MAX_DELIVERY_STAGNATION ? "连续 20 轮未推进交付，本阶段已停滞；不是预算耗尽。保留已保存版本及待修问题。" : "连续 12 轮无实际进展，本阶段已停滞；不是预算耗尽。保留已保存版本及待修问题。"); break; }
         }
         if (executed >= limit) {
+          if (editScope && localEditCommit) break;
           // 预算用尽：先问宿主能否续期（例如按行程天数放宽），不能续期才收尾
           if (extensions >= BUDGET_EXTENSION_LIMIT) break;
           const decision = await budgetExtension(options, limit);
@@ -532,21 +569,6 @@ export class ChatAgent {
         }
         if (controller.signal.aborted) throw new TurnAbortedError();
 
-        // 排干 steer 注入的消息（在每次 LLM 调用前生效，模型可据此转向）
-        const steered = options.takeSteeredMessages?.() ?? [];
-        for (const message of steered) {
-          this.sessionValue.add("user", message);
-          cumulative.allowAdvisoryReviews ||= /口碑|评价|点评|排队|招牌|人均价格/.test(message);
-          cumulative.allowVisitInfoQueries ||= /游[玩览]时长|开放时间|闭馆|停止入园|最后入场|场次|公告|重新核实|重查|刷新|重新查询/.test(message);
-          cumulative.redundantCalls = 0; cumulative.redundantRounds = 0;
-          if (isExplicitPlanEdit(message)) {
-            const active = activeDayTask(this.sessionValue.travelState);
-            if (active) this.sessionValue.setTravelState(blockDayTask(this.sessionValue.travelState!, active.date, "用户指定修订，暂停补天"));
-            dailyEnabled = false; dayPlanning = false; dateTask = undefined;
-            routeFollowUp = undefined;
-          }
-        }
-
         // 剩余轮数不足时注入收尾提醒（仅本次请求可见，不进入会话历史，避免污染后续轮次）
         const remaining = limit - executed - 1;
         const roundTaskDate = dateTask?.date;
@@ -556,19 +578,20 @@ export class ChatAgent {
           const loadingGuide = toolLoadingGuide(tools, this.sessionValue);
           const artifactGuide = renderArtifactGuide(this.sessionValue, this.workspace, this.sessionValue.travelMode ? cumulative.readVersions : undefined);
           const readGuide = this.sessionValue.travelMode ? renderReadProgress(cumulative.readVersions) : undefined;
-          const phaseGuide = flowEnabled ? planningGuidance(this.sessionValue.travelState) : "【用户指定任务】按本次用户需求处理；暂停自动推进完整行程，完成后如实报告结果。";
+          const phaseGuide = editScope ? `【用户指定日期】仅修改「${editScope.title}」的 ${editScope.date}，其他日期只用于去重与衔接。${editScope.edit === "append_visit" ? "追加时保留已有景点、游览时长和固定安排。若无候选可放入，说明具体取舍并请用户确认。" : ""}`
+            : flowEnabled ? planningGuidance(this.sessionValue.travelState) : "【用户指定任务】按本次用户需求处理；暂停自动推进完整行程，完成后如实报告结果。";
           const focusInput = [...this.sessionValue.history].reverse().find((message) => message.role === "user")?.content ?? trimmed;
-          const focusDay = roundTaskDate ? Math.max(1, taskDates(this.sessionValue.travelState!).indexOf(roundTaskDate) + 1) : travelFocusDay(this.sessionValue.travelState, focusInput);
-          const travelState = renderFocusedTravelState(this.sessionValue.travelState, focusDay, Math.floor(dynamicChars * 0.5));
+          const focusDay = editScope?.day_number ?? (roundTaskDate ? Math.max(1, taskDates(this.sessionValue.travelState!).indexOf(roundTaskDate) + 1) : travelFocusDay(this.sessionValue.travelState, focusInput));
+          const travelState = renderFocusedTravelState(this.sessionValue.travelState, focusDay, Math.floor(dynamicChars * 0.5), editScope?.date);
           const draftGate = shouldForceDraft(this.sessionValue.travelState, executed);
           const travelProgress = flowEnabled ? travelProgressGuidance(draftGate) : undefined;
-          const focusDate = roundTaskDate ?? this.sessionValue.travelState?.itinerary?.outline?.[focusDay - 1]?.date ?? this.sessionValue.travelState?.itinerary?.daySummaries?.find((day) => day.day === focusDay)?.date;
+          const focusDate = editScope?.date ?? roundTaskDate ?? this.sessionValue.travelState?.itinerary?.outline?.[focusDay - 1]?.date ?? this.sessionValue.travelState?.itinerary?.daySummaries?.find((day) => day.day === focusDay)?.date;
           const focusNames = [...(this.sessionValue.travelState?.places.filter((place) => focusDate ? place.date === focusDate : place.day === focusDay).map((place) => place.name) ?? []), ...(this.sessionValue.travelState?.itinerary?.outline?.find((slot) => slot.date === focusDate)?.visits.map((v) => v.name) ?? []), ...recentEvidenceNames(this.sessionValue)];
           const repeatPolicy = { constraints: { destination: this.sessionValue.travelState?.brief?.destination, repeat_visit_permissions: this.sessionValue.travelState?.itinerary?.repeatVisitPermissions } };
           const unavailableVisits = [...(this.sessionValue.travelState?.itinerary?.assignments?.filter((v) => v.date !== focusDate && !repeatVisitAllowed(repeatPolicy, v)).flatMap((v) => [v.name, ...(v.parent_visit ? [v.parent_visit.name] : [])]) ?? []), ...(this.sessionValue.travelState?.itinerary?.excludedVisits?.map((v) => v.name) ?? [])];
           const evidence = this.sessionValue.travelState?.brief === undefined ? "" : basicStage ? tools.evidence.basicCandidates(this.sessionValue.travelState.brief.destination) : tools.evidence.summary(this.sessionValue.travelState.brief.destination, [...focusNames, ...this.sessionValue.travelState.brief.mustVisit], Math.floor(dynamicChars * 0.3), unavailableVisits);
           const queryIndex = tools.evidence.queryContext([...focusNames, ...(this.sessionValue.travelState?.brief?.mustVisit ?? [])], Math.min(1600, Math.floor(dynamicChars * 0.2)));
-          const deliveryHint = deliveryGuidance(cumulative);
+          const deliveryHint = editScope ? undefined : deliveryGuidance(cumulative);
           const transientMessages = [
             ...(queryIndex === "" ? [] : [{ role: "system" as const, content: queryIndex }]),
             ...(deliveryHint === undefined ? [] : [{ role: "system" as const, content: deliveryHint }]),
@@ -605,7 +628,8 @@ export class ChatAgent {
           // 记录真实请求字符量（含 tool_calls 参数与临时提示），响应后校准估算系数
           const available = this.requestToolDefinitions(tools).filter((tool) => tool.name !== "load_travel_brief" || !this.sessionValue.travelState?.brief?.requirementVersion);
           const definitions = repairOnlyDefinitions(essentialVisitInfoDefinitions(available, pendingVisitInfo(), allowReviews()), repairOnly());
-          const requestTools = basicStage ? basicLayerDefinitions(definitions, basicQueries()) : dayPlanning && roundTaskDate ? dayTaskDefinitions(definitions, dayTaskScope(this.sessionValue.travelState, roundTaskDate)!) : (cumulative.deliveryStagnantRounds ?? 0) < DEFER_OPTIONAL_EVIDENCE_AFTER ? definitions : focusedEvidenceDefinitions(definitions, strictMeals(), cumulative.allowAdvisoryReviews);
+          const requestTools = editScope ? dayTaskDefinitions(definitions, editScope)
+            : basicStage ? basicLayerDefinitions(definitions, basicQueries()) : dayPlanning && roundTaskDate ? dayTaskDefinitions(definitions, dayTaskScope(this.sessionValue.travelState, roundTaskDate)!) : (cumulative.deliveryStagnantRounds ?? 0) < DEFER_OPTIONAL_EVIDENCE_AFTER ? definitions : focusedEvidenceDefinitions(definitions, strictMeals(), cumulative.allowAdvisoryReviews);
           const metrics = measureRequestContext(this.sessionValue, this.provider.systemPrompt, history, transientMessages, requestTools, options.maxPromptTokens);
           return { requestHistory, requestTools, metrics };
         };
@@ -700,6 +724,14 @@ export class ChatAgent {
           executed += 1; cumulative.rounds += 1;
           await this.checkpoint(options); nextDateTask(); continue;
         }
+        if (result.type === "text" && editScope) {
+          const detail = failureDetails();
+          return finish([
+            localEditSummary(editScope),
+            detail,
+            !localEditAttempted && result.content.trim() ? result.content : nextStep() ?? (!localEditAttempted ? EMPTY_MODEL_REPLY : undefined),
+          ].filter(Boolean).join("\n\n"));
+        }
         if (result.type === "text") {
           const progress = planningProgress(this.sessionValue.travelState);
           const snapshot = this.itinerarySnapshot;
@@ -751,6 +783,18 @@ export class ChatAgent {
         let dayCallsThisRound = 0;
         for (const call of result.toolCalls) {
           if (controller.signal.aborted) throw new TurnAbortedError();
+          if (editScope && call.name === "save_itinerary") localEditAttempted = true;
+          const effect = tools.get(call.name)?.effect;
+          if (editScope && call.name !== "save_itinerary" && (effect === "managed_write" || effect === "command")) {
+            cumulative.diagnostics.skip(call, cumulative.rounds + 1, "blocked");
+            pendingResults.push({ callId: call.id, toolName: call.name, output: `当前仅修改${editScope.date}，请通过save_itinerary提交。` });
+            continue;
+          }
+          if (editScope && localEditCommit && !routeFollowUp) {
+            cumulative.diagnostics.skip(call, cumulative.rounds + 1, "blocked");
+            pendingResults.push({ callId: call.id, toolName: call.name, output: "本次局部修改已提交，跳过本批剩余调用。" });
+            continue;
+          }
           if (uncertainEffect) {
             cumulative.diagnostics.skip(call, cumulative.rounds + 1, "blocked");
             pendingResults.push({ callId: call.id, toolName: call.name, output: "前序工具提交结果或导出需要核对，本批后续调用未执行；请先检查实际状态。" });
@@ -761,11 +805,14 @@ export class ChatAgent {
             const issue = basicLayerCallIssue(call.name, basicQueries());
             if (issue) { cumulative.diagnostics.skip(call, cumulative.rounds + 1, "blocked"); pendingResults.push({ callId: call.id, toolName: call.name, output: issue }); continue; }
           }
-          const scope = dayPlanning ? dayTaskScope(this.sessionValue.travelState, roundTaskDate) : undefined;
+          const scope = editScope ?? (dayPlanning ? dayTaskScope(this.sessionValue.travelState, roundTaskDate) : undefined);
           if (scope) {
             let issue: string | undefined;
             try { issue = dayTaskCallIssue(call.name, JSON.parse(call.arguments), scope); } catch { /* 参数错误交由正常执行处理。 */ }
-            if (activeDayTask(this.sessionValue.travelState)?.date !== roundTaskDate) issue = "本批任务状态已变化；程序将在下一轮重新评估日期与层级，本调用未执行。";
+            if (!scope.edit && activeDayTask(this.sessionValue.travelState)?.date !== roundTaskDate) issue = "本批任务状态已变化；程序将在下一轮重新评估日期与层级，本调用未执行。";
+            if (scope.edit === "append_visit" && call.name === "save_itinerary" && !localEditCommit && safeArguments(call.arguments)?.repair_routes !== undefined) {
+              issue = "请先用schedule或days保存新增景点，再核验本日变化的路线。";
+            }
             if (issue) {
               cumulative.diagnostics.skip(call, cumulative.rounds + 1, "blocked");
               pendingResults.push({ callId: call.id, toolName: call.name, output: issue }); continue;
@@ -822,7 +869,7 @@ export class ChatAgent {
             if (!circuitOpen) failureGuidance = undefined;
             continue;
           }
-          if (scope && (activeDayTask(this.sessionValue.travelState)?.attempt_calls ?? 0) + dayCallsThisRound >= dayTaskCalls(activeDayTask(this.sessionValue.travelState)!)) {
+          if (scope && !scope.edit && (activeDayTask(this.sessionValue.travelState)?.attempt_calls ?? 0) + dayCallsThisRound >= dayTaskCalls(activeDayTask(this.sessionValue.travelState)!)) {
             cumulative.diagnostics.skip(call, cumulative.rounds + 1, "blocked");
             pendingResults.push({ callId: call.id, toolName: call.name, output: "该日期本次工具额度已用完，本调用未执行；程序将切换到其他日期。" }); continue;
           }
@@ -844,6 +891,7 @@ export class ChatAgent {
           }
 
           let snapshotReceived = false;
+          let savedSnapshot: ItinerarySnapshot | undefined;
           let preparedArgs: Record<string, unknown> | undefined;
           let argumentCorrections: readonly string[] = [];
           cumulative.calls += 1;
@@ -878,6 +926,7 @@ export class ChatAgent {
                 if (call.name !== "save_itinerary" && (allocatingPlan || this.briefSavedThisRun && brief?.title !== snapshot.itinerary.title)) return;
                 this.committedSnapshot = snapshot;
                 if (call.name === "save_itinerary") {
+                  savedSnapshot = snapshot;
                   this.savedThisRun = true;
                   for (const dayNumber of snapshot.report.changed_days ?? []) {
                     const date = snapshot.itinerary.days[dayNumber - 1]?.date;
@@ -911,7 +960,13 @@ export class ChatAgent {
           }
           if (execution.error === undefined) {
             if (!isActivationTool(call.name)) hadSuccessfulToolCall = true;
-            if (call.name === "save_itinerary" && execution.executionState?.effect_status === "committed" && !execution.executionState.replayed) committedPlanThisRun = true;
+            if (call.name === "save_itinerary" && execution.executionState?.effect_status === "committed" && !execution.executionState.replayed) {
+              committedPlanThisRun = true;
+              if (editScope && savedSnapshot) {
+                localEditCommit = savedSnapshot;
+                editScope = { ...editScope, revision: savedSnapshot.itinerary.revision };
+              }
+            }
             if (call.name === "plan_day_routes") routesQueried = true;
             failureKey = "";
             failureCount = 0;
@@ -1008,7 +1063,7 @@ export class ChatAgent {
           await this.checkpoint(options);
         }
         if (routeFollowUp && cumulative.blockedKind !== "dependency") circuitOpen = false;
-        if (!dayPlanning && circuitOpen && cumulative.blockedKind !== "dependency") {
+        if (!editScope && !dayPlanning && circuitOpen && cumulative.blockedKind !== "dependency") {
           const recovery = recoverCoverage(this.sessionValue.travelState, cumulative);
           if (recovery) { circuitOpen = false; failureGuidance = recovery; stagnantRounds = 0; }
           else { cumulative.blockedKind = "no_progress"; cumulative.blockedReason = failureGuidance ?? "局部修订停滞，保留未完成版本"; }
@@ -1020,6 +1075,15 @@ export class ChatAgent {
         const unfinished = activeDayTask(this.sessionValue.travelState);
         if (unfinished) this.sessionValue.setTravelState(blockDayTask(this.sessionValue.travelState!, unfinished.date,
           modelFailure ? `模型请求未完成：${modelFailure}` : failureGuidance ?? budgetGuidance ?? "任务预算达到上限，保留该日期进度待续接"));
+      }
+      if (editScope) {
+        return finish([
+          localEditSummary(editScope),
+          modelFailure ? `模型请求未完成。原因是 ${modelFailure}` : undefined,
+          cumulative.operationRecovery && localEditCommit ? cumulative.blockedReason : undefined,
+          !localEditCommit ? failureDetails() ?? budgetGuidance ?? "本轮没有取得可保存的修改。" : undefined,
+          !localEditCommit ? nextStep() : undefined,
+        ].filter(Boolean).join("\n\n"));
       }
       // 优先用已保存状态交付。没有可用快照时，模型收尾失败也交付本地记录。
       const canonical = this.canonicalReply(false);

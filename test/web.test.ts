@@ -12,6 +12,9 @@ import type { ChatProvider, LLMResult, ToolDefinition } from "../src/llm/provide
 import type { PromptMessage } from "../src/core/message.ts";
 import { setAmapKey } from "../src/tools/amap-access.ts";
 import type { ToolBudgetAssessment } from "../src/runtime/tool-budget.ts";
+import { createSaveItineraryTool } from "../src/tools/itinerary.ts";
+import { updateTravelStateFromSnapshot } from "../src/core/travel-state.ts";
+import { parseItinerary } from "../src/tools/itinerary-schema.ts";
 
 /** 可控时序 Provider：chat 挂起直到测试显式 release（验证 steer/排队/停止的并发行为） */
 class ControlledProvider implements ChatProvider {
@@ -572,6 +575,55 @@ test("web: 模型请求失败时只发一次错误并保存可见的聊天回复
     const { currentId } = await (await fetch(`${base}/api/sessions`)).json();
     const saved = await new JsonFileSessionStore(join(root, ".minicode", "sessions")).load(currentId);
     assert.equal(saved?.history.at(-1)?.content, reply);
+  } finally {
+    await running.close();
+  }
+});
+
+test("web: 自然语言追加第二天，返回增量回复且第一天保持原样", async () => {
+  const root = await mkdtemp(join(tmpdir(), "minicode-web-local-edit-"));
+  const title = "北京对话追加回归";
+  const date = "2026-11-17";
+  const session = new Session("sess_web_local_edit");
+  session.add("user", "规划北京三日游");
+  await createSaveItineraryTool(root).execute({ title, days: [
+    { date: "2026-11-16", items: [{ name: "甲公园", type: "visit", time: "10:00", end_time: "11:00" }] },
+    { date, items: [{ name: "八达岭长城", type: "visit", time: "09:00", end_time: "12:00", time_locked: true }] },
+    { date: "2026-11-18", items: [{ name: "乙公园", type: "visit", time: "10:00", end_time: "11:00" }] },
+  ] }, { workspace: root, onItinerary: (snapshot) => session.setTravelState(updateTravelStateFromSnapshot(undefined, snapshot)) });
+  const load = async () => parseItinerary(JSON.parse(await readFile(join(root, "plans", `${title}.json`), "utf8")));
+  const original = await load();
+  await new JsonFileSessionStore(join(root, ".minicode", "sessions")).save(session);
+  let requests = 0;
+  const provider: ChatProvider = {
+    name: "web-local-edit",
+    async chat() { throw new Error("无需额外收尾请求"); },
+    async chatWithTools() {
+      requests++;
+      return { type: "tool_calls", toolCalls: [{ id: "append-only", name: "save_itinerary", arguments: JSON.stringify({
+        title, schedule: { date, start: "09:00", visits: [{ name: "八达岭长城" }, { name: "北京奥林匹克公园", duration_min: 90 }] },
+      }) }] };
+    },
+  };
+  const running = await startWebServer({ rootDir: root, port: 0, auth: false, providerOverride: provider });
+  const base = `http://127.0.0.1:${running.port}`;
+  try {
+    const response = await fetch(`${base}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "第二天的行程太少了，帮我追加可以去的地方" }),
+    });
+    const events: Record<string, unknown>[] = [];
+    await collectSse(response, (event) => { events.push(event); });
+    const reply = String(events.find((event) => event.type === "reply")?.text);
+    assert.match(reply, /修改第 2 天/);
+    assert.match(reply, /新增 北京奥林匹克公园/);
+    assert.equal(requests, 1);
+    assert.ok(events.some((event) => event.type === "done"));
+    const updated = await load();
+    assert.deepEqual(updated.days[0], original.days[0]);
+    assert.deepEqual(updated.days[2], original.days[2]);
+    assert.equal(updated.days[1]?.items.find((item) => item.name === "八达岭长城")?.planned_duration_min, 180);
   } finally {
     await running.close();
   }

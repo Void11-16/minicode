@@ -1,7 +1,7 @@
 import { buildDaySchedule, dayScheduleSchema, parseDaySchedule } from "./day-schedule.ts";
 import { validateToolArguments } from "./tool-contract.ts";
 import { derivePlanningLayers, planningOutline, planningLayerSummary } from "../core/planning-layers.ts";
-import { assertDayTaskSave, dayTaskDefinitions } from "../core/day-tasks.ts";
+import { assertDayTaskSave, assertVisitAddition, assertVisitAdditionDurations, dayTaskDefinitions } from "../core/day-tasks.ts";
 import { requiredVisitCoverage, requiredVisitGoals, requiredVisitGoalLabel } from "./required-visits.ts";
 import { normalizeStayReferences, isConcreteStayName } from "./stay-policy.ts";
 import { alignRouteContext, routeTimelineSignature } from "./itinerary-route-context.ts";
@@ -311,6 +311,9 @@ async function saveItineraryUnlocked(rootDir: string, args: Record<string, unkno
   const merge = args.merge !== false;
   const file = itineraryFile(rootDir, title);
   const saved = await readSaved(file);
+  const localEdit = ctx?.dayPlanningScope?.edit ? ctx.dayPlanningScope : undefined;
+  if (localEdit && !saved) throw new Error("未找到要修改的已保存行程，请重新选择行程。");
+  if (localEdit?.revision !== undefined && localEdit.revision !== (saved?.revision ?? 0)) throw new Error("行程版本冲突，请重新读取后再提交");
   if (args.expected_revision !== undefined && args.expected_revision !== (saved?.revision ?? 0)) throw new Error("行程版本冲突，请重新读取后再提交");
   if (ctx?.basicPlanning && (args.schedule !== undefined || args.days !== undefined || args.edits !== undefined || args.repair_routes !== undefined || !Array.isArray(args.outline))) throw new ToolValidationError([{ code: "BASIC_LAYER_OUTLINE_REQUIRED", path: "outline", message: "基础层先保存各日期的景点outline，不提交详细时间草稿。", hint: "使用outline=[{date,visits:[{name,evidence_id}]}]；未识别必去由后续独立任务处理，不会阻挡其他日期。" }]);
   const sessionBrief = ctx?.brief?.title === title ? ctx.brief : undefined;
@@ -327,6 +330,7 @@ async function saveItineraryUnlocked(rootDir: string, args: Record<string, unkno
     if (["days", "outline", "edits", "repair_routes", "merge_mode"].some((key) => args[key] !== undefined) || args.merge === false) throw new Error("schedule不能与days/outline/edits/repair_routes/merge_mode/merge=false混用");
     const input = scheduleInput;
     if (ctx?.dayPlanningScope && (!["schedule", "budget"].includes(ctx.dayPlanningScope.layer ?? "") || input.date !== ctx.dayPlanningScope.date)) throw new Error("DAY_TASK_FROZEN：schedule仅生成当前日期");
+    if (localEdit?.edit === "append_visit" && saved && input.visits) assertVisitAdditionDurations(saved, input.date, input.visits);
     const base = applyBriefRequirements(saved ?? { title, days: [], constraints: args.constraints as Itinerary["constraints"] }, brief ?? undefined);
     const day = buildDaySchedule(base, input, evidence);
     const existingOutline = planningOutline(base);
@@ -439,6 +443,7 @@ async function saveItineraryUnlocked(rootDir: string, args: Record<string, unkno
   const repeatPermissions = resolveRepeatPermissions(itinerary, saved, ctx?.userRequests);
   itinerary = parseItinerary({ ...itinerary, constraints: { ...itinerary.constraints, repeat_visit_permissions: repeatPermissions.length ? repeatPermissions : undefined } });
   assertDayTaskSave(saved, itinerary, ctx?.dayPlanningScope, args, true);
+  if (localEdit?.edit === "append_visit" && saved) assertVisitAddition(saved, itinerary, localEdit.date, args.repair_routes !== undefined);
   itinerary = withRequiredVisitGoals(itinerary, evidence);
   const strict = args.strict === true;
   const changedDays = itinerary.days.flatMap((day, index) => {

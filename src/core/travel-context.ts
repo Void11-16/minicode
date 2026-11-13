@@ -1,13 +1,10 @@
-import { activeDayTask } from "./day-tasks.ts";
+import { activeDayTask, requestedTravelDays } from "./day-tasks.ts";
 import { renderTravelState, type TravelState } from "./travel-state.ts";
 
 /** 明确指定日期优先；否则先补缺失日期，完整后再处理具体日期的问题。 */
 export function travelFocusDay(state: TravelState | undefined, input: string): number {
-  const requested = /(?:第\s*([一二三四五六七八九十两\d]{1,3})\s*天|\bday\s*(\d+))/i.exec(input);
-  const label = requested?.[1] ?? requested?.[2] ?? "";
-  const digits: Record<string, number> = { 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
-  const explicit = label.includes("十") ? (digits[label.split("十")[0]!] ?? 1) * 10 + (digits[label.split("十")[1]!] ?? 0) : digits[label] ?? Number(label);
-  if (Number.isInteger(explicit) && explicit >= 1 && explicit <= 60) return explicit;
+  const [explicit] = requestedTravelDays(input);
+  if (explicit !== undefined) return explicit;
   const active = activeDayTask(state);
   if (active) { const index = state?.itinerary?.outline?.findIndex((slot) => slot.date === active.date); if (index !== undefined && index >= 0) return index + 1; }
   const brief = state?.brief;
@@ -30,19 +27,19 @@ export function travelFocusDay(state: TravelState | undefined, input: string): n
 }
 
 /** 全局约束、版本和跨天景点去重始终保留；只有当前日展开完整条目与待修问题。 */
-export function renderFocusedTravelState(state: TravelState | undefined, day: number, maxChars = 6000): string | undefined {
+export function renderFocusedTravelState(state: TravelState | undefined, day: number, maxChars = 6000, editDate?: string): string | undefined {
   if (state === undefined) return undefined;
-  const task = activeDayTask(state);
+  const task = editDate ? undefined : activeDayTask(state);
   const global = renderTravelState({ ...state,
     places: state.places.filter((place) => place.kind === "visit"),
     ...(state.itinerary === undefined ? {} : { itinerary: { ...state.itinerary, timeline: undefined, issues: [], ...(task ? { score: undefined, issueCount: undefined, strictPass: undefined, repairDays: undefined } : {}) } }),
   }, Infinity);
   if (global === undefined) return undefined;
-  const date = task?.date ?? state.itinerary?.outline?.[day - 1]?.date;
+  const date = editDate ?? task?.date ?? state.itinerary?.outline?.[day - 1]?.date;
   const actualDay = date === undefined ? day : state.itinerary?.daySummaries?.find((entry) => entry.date === date)?.day;
   const sections = [global, `当前工作日期：${date ?? `Day ${day}`}。${date ? "按date保存/读取；预留但未保存的日期直接补齐，不要读取不存在的单日。" : "其他日期按需读取，不要重读整份行程。"}`];
   if (state.itinerary?.daySummaries?.length) sections.push("已保存日期：" + state.itinerary.daySummaries.map((d) => `D${d.day} ${d.date ?? "日期未定"} ${d.itemCount}项${task || d.strictPass === undefined ? "" : d.strictPass ? " 日内通过" : " 日内待修"}`).join("；"));
-  if (!task && state.itinerary?.repairDays?.length) sections.push(`建议局部修复日期：${state.itinerary.repairDays.join("、")}；其余已通过日期保持。`);
+  if (!editDate && !task && state.itinerary?.repairDays?.length) sections.push(`建议局部修复日期：${state.itinerary.repairDays.join("、")}；其余已通过日期保持。`);
   const timeline = state.itinerary?.timeline?.split("\n").filter((line) => actualDay !== undefined && line.startsWith(`D${actualDay} `)).join("\n");
   const details: string[] = [];
   if (timeline) details.push(`当前日条目索引：\n${timeline}`);
@@ -62,7 +59,7 @@ export function renderFocusedTravelState(state: TravelState | undefined, day: nu
     for (const boundary of [previous, next].filter((entry) => entry !== undefined)) sections.push(`相邻日期衔接：${boundary.date} ${JSON.stringify(boundary === previous ? boundary.last : boundary.first)}`);
     sections.push("已保存景点仅用于占用去重；新日期必须能衔接相邻日期停留点和固定酒店。跨日冲突优先调整当前日期，不能改旧日规避。");
   }
-  const issues = [...(state.itinerary?.issues ?? [])].filter((issue) => !task || issue.date === task.date || (actualDay !== undefined && issue.day === actualDay)).sort((a, b) =>
+  const issues = [...(state.itinerary?.issues ?? [])].filter((issue) => (!task && !editDate) || issue.date === date || (actualDay !== undefined && issue.day === actualDay)).sort((a, b) =>
     a.level.localeCompare(b.level) || Number(b.day === day) - Number(a.day === day));
   details.push(...issues.slice(0, 6).map((issue) => `[${issue.level}]${issue.date ? ` ${issue.date}` : issue.day === undefined ? "" : ` Day ${issue.day}`} ${issue.code ?? ""}: ${issue.message}`));
   // 约束不按字符截断；超大约束交由完整请求预算明确拒绝，避免静默遗失忌口等信息。

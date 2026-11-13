@@ -3,6 +3,8 @@ import type { Itinerary, ItineraryDay } from "../tools/itinerary-schema.ts";
 import { inheritedScheduleStay } from "../tools/day-schedule.ts";
 import { dayRouteLegs, repairDayRoutes } from "../tools/itinerary-route-repair.ts";
 import { evidenceId, type TravelEvidenceStore } from "../tools/travel-evidence.ts";
+import { sameVisitName } from "../tools/required-visits.ts";
+import type { DayPlanningScope } from "../core/day-tasks.ts";
 
 interface RouteRequest {
   args: { city: string; stops: string[]; mode: string; leg_modes: string[] };
@@ -10,6 +12,33 @@ interface RouteRequest {
   legKeys: string[];
 }
 interface RouteRepair { date: string; key: string; stay?: true }
+
+export function localDayEditReply(scope: DayPlanningScope, before: Itinerary | undefined, snapshot: ItinerarySnapshot): string {
+  const { itinerary, report } = snapshot;
+  const dayNumber = itinerary.days.findIndex((day) => day.date === scope.date) + 1;
+  const day = itinerary.days[dayNumber - 1];
+  const oldVisits = before?.days.find((day) => day.date === scope.date)?.items.filter((item) => item.type === "visit") ?? [];
+  const visits = day?.items.filter((item) => item.type === "visit") ?? [];
+  const city = itinerary.constraints?.destination;
+  const match = (name: string, items: typeof visits) => items.find((item) => sameVisitName(item.name, name, city));
+  const describe = (item: (typeof visits)[number]) => `${item.name}${item.time ? `（${item.time}${item.end_time ? `–${item.end_time}` : ""}）` : ""}`;
+  const added = visits.filter((item) => !match(item.name, oldVisits)).map(describe);
+  const removed = oldVisits.filter((item) => !match(item.name, visits)).map((item) => item.name);
+  const moved = visits.flatMap((item) => {
+    const old = match(item.name, oldVisits);
+    return old && (old.time !== item.time || old.end_time !== item.end_time) ? [`${describe(old)} → ${describe(item)}`] : [];
+  });
+  const issues = report.issues.filter((issue) => issue.level !== "P2" &&
+    (issue.date === scope.date || issue.day === dayNumber || issue.related_days?.includes(dayNumber)));
+  return [
+    `已保存「${itinerary.title}」v${itinerary.revision ?? 1}，修改第 ${scope.day_number ?? dayNumber} 天（${scope.date}）。`,
+    added.length ? `新增 ${added.join("、")}。` : undefined,
+    removed.length ? `移除 ${removed.join("、")}。` : undefined,
+    moved.length ? `时间调整 ${moved.join("、")}。` : undefined,
+    issues.length ? ["本次涉及的待处理问题", "", ...issues.slice(0, 3).map((issue) => `- ${issue.message}`)].join("\n") : undefined,
+    report.issues.some((issue) => issue.level !== "P2" && !issues.includes(issue)) ? "全程其他待处理事项见行程质量报告。" : undefined,
+  ].filter(Boolean).join("\n\n");
+}
 
 /** 连续缺段可以合成一条查询。已查段、未定方式和无坐标的端点各自跳过。 */
 export function pendingDayRouteRequests(day: ItineraryDay, city: string, evidence: TravelEvidenceStore, attempted: ReadonlySet<string> = new Set()): RouteRequest[] {

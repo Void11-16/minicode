@@ -5,9 +5,8 @@ import { materializedDay } from "../tools/itinerary-planning.ts";
 import type { CumulativeToolBudget } from "./execution-budget.ts";
 import type { PromptMessage } from "./message.ts";
 import type { ToolDefinition } from "../llm/provider.ts";
-import { requiredVisitCoverage, requiredVisitMatches } from "../tools/required-visits.ts";
+import { requiredVisitCoverage, requiredVisitMatches, sameVisitName } from "../tools/required-visits.ts";
 import { ToolValidationError } from "./tool-error.ts";
-import { sameVisitName } from "../tools/required-visits.ts";
 import { itemEndMinutes } from "../tools/itinerary-timeline.ts";
 import { timeToMinutes } from "../tools/itinerary-schema.ts";
 
@@ -50,7 +49,7 @@ export interface DayPlanningScope {
   readonly revision?: number;
 }
 
-const ADD_VISIT = /(?:追加|补上|补充|加上|加(?:个|一个|几个|一处|些|点|入|安排)|增加|多安排|再(?:安排|排|去|加)).{0,18}(?:景点|地方|去处|逛|参观|游览|活动|公园|博物馆|长城)|(?:给|在|把)?第\s*[一二三四五六七八九十两\d]+\s*天.{0,30}(?:追加|加上|加入|增加|多安排|再加|再安排)/;
+const ADD_VISIT = /(?:追加|补上|补充|[加补](?:上|个|一个|几个|一处|几处|一些|些|点|入|安排)|增加|多(?:安排|排|去)|再(?:安排|排|去|加)).{0,18}(?:景点|地方|去处|逛|参观|游览|活动|公园|博物馆|长城)|第\s*[一二三四五六七八九十两\d]+\s*天.{0,30}(?:追加|加上|加入|增加|多安排|再加|再安排)/;
 
 export function taskDates(state: TravelState): string[] {
   const brief = state.brief, plan = state.itinerary;
@@ -170,7 +169,8 @@ export function dayTaskScope(state: TravelState | undefined, date?: string): Day
 export function isExplicitPlanEdit(input: string): boolean {
   if (/评测自动续跑/.test(input)) return false;
   if (/重新规划|重做行程|重新生成/.test(input)) return true;
-  return ADD_VISIT.test(input) || /^(?:请|帮我|麻烦)?(?:把|将).{0,40}(?:改|换成|删除|调整|替换|缩短)/.test(input) || /修改需求|更新需求|更改需求/.test(input) || /^(?:请|帮我|麻烦|把|将|我想|我需要)?\s*(?:修改|修复|修订|重排|调整|替换|删除|调换|缩短)/.test(input) || /第\s*[一二三四五六七八九十两\d]+\s*天.{0,20}(?:改为|换成|调整|删除|修改|缩短)/.test(input);
+  return ADD_VISIT.test(input) && (requestedTravelDays(input).length > 0 || /\d{4}-\d{2}-\d{2}/.test(input)) ||
+    /^(?:请|帮我|麻烦)?(?:把|将).{0,40}(?:改|换成|删除|调整|替换|缩短)/.test(input) || /修改需求|更新需求|更改需求/.test(input) || /^(?:请|帮我|麻烦|把|将|我想|我需要)?\s*(?:修改|修复|修订|重排|调整|替换|删除|调换|缩短)/.test(input) || /第\s*[一二三四五六七八九十两\d]+\s*天.{0,20}(?:改为|换成|调整|删除|修改|缩短)/.test(input);
 }
 
 export function requestedTravelDays(input: string): number[] {
@@ -191,7 +191,9 @@ export function localDayEditScope(state: TravelState | undefined, input: string)
   const candidates = new Set([...literal, ...requested.map((day) => dates[day - 1] ?? plan.daySummaries?.find((entry) => entry.day === day)?.date)]);
   const date = candidates.size === 1 ? [...candidates][0] : undefined;
   if (!date || !dates.includes(date) && !plan.daySummaries?.some((entry) => entry.date === date)) return undefined;
-  const append = ADD_VISIT.test(input) && !/缩短|压缩|缩减|减少|延长|删掉|删除|去掉|取消|替换|换成|调换|改为|推迟|提前|重排/.test(input);
+  const requestedChange = /^(?:可以|同意|确认|请(?:把|将)?|帮我(?:把|将)?|把|将|允许).{0,32}(?:缩短|压缩|缩减|减少|延长|删掉|删除|去掉|取消|替换|换成|调换|改为|推迟|提前|重排)/.test(input)
+    && !/(?:不|别|勿|避免)(?:要|能|得)?(?:再|随意)?(?:缩短|压缩|缩减|减少|延长|删掉|删除|去掉|取消|替换|换成|调换|改为|推迟|提前|重排)/.test(input);
+  const append = ADD_VISIT.test(input) && !requestedChange;
   return { title: plan.title, date, layer: "schedule", edit: append ? "append_visit" : "update", revision: plan.revision,
     day_number: dates.includes(date) ? dates.indexOf(date) + 1 : plan.daySummaries?.find((entry) => entry.date === date)?.day,
     locked_dates: (plan.daySummaries ?? []).flatMap((entry) => entry.date && entry.date !== date ? [entry.date] : []) };
@@ -275,31 +277,52 @@ export function assertDayTaskSave(saved: Itinerary | null, plan: Itinerary, scop
     const before = saved?.outline?.find((day) => day.date === patch.date);
     if (JSON.stringify(before?.visits.map((visit) => visit.name)) !== JSON.stringify(patch.visits?.map((visit) => visit.name))) fail(`不能改动其他日期${patch.date}的基础安排`);
   }
-  for (const date of scope.locked_dates) if (JSON.stringify(saved?.outline?.find((day) => day.date === date)) !== JSON.stringify(plan.outline?.find((day) => day.date === date))) fail(`不能改动${date}的景点预留`);
+  for (const date of scope.locked_dates) {
+    const previous = saved?.outline?.find((day) => day.date === date);
+    if (scope.edit && !previous) continue; // 旧版行程首次从已保存日期派生粗排。
+    if (JSON.stringify(previous) !== JSON.stringify(plan.outline?.find((day) => day.date === date))) fail(`不能改动${date}的景点预留`);
+  }
 }
 
 /** 比较真实保存前后的日程，schedule、days 和路线修订都不能绕过追加保护。 */
+function visitAdditionConflict(date: string, message: string): never {
+  throw new ToolValidationError([{ code: "VISIT_ADDITION_CONFLICT", path: "days", date, message,
+    hint: "保留已安排景点和原时长、顺序、固定预约及住宿。可尝试更近或更短的新增候选，需要改动既有安排时请先询问用户。" }]);
+}
+
+export function assertVisitAdditionDurations(saved: Itinerary, date: string, visits: readonly { name: string; duration_min?: number }[]): void {
+  for (const item of saved.days.find((day) => day.date === date)?.items.filter((item) => item.type === "visit") ?? []) {
+    const next = visits.find((visit) => sameVisitName(item.name, visit.name, saved.constraints?.destination));
+    const duration = visitDuration(item);
+    if (next?.duration_min !== undefined && duration !== undefined && next.duration_min !== duration) {
+      visitAdditionConflict(date, `追加景点需要把「${item.name}」的游览时长从 ${duration} 分钟改为 ${next.duration_min} 分钟，请先确认。`);
+    }
+  }
+}
+
+function visitDuration(item: ItineraryDay["items"][number]): number | undefined {
+  const end = itemEndMinutes(item);
+  return item.time && end !== undefined ? end - timeToMinutes(item.time) : item.planned_duration_min;
+}
+
 export function assertVisitAddition(saved: Itinerary, plan: Itinerary, date: string, routeRepair: boolean): void {
   const before = saved.days.find((day) => day.date === date);
   const after = plan.days.find((day) => day.date === date);
   const original = before?.items.filter((item) => item.type === "visit") ?? [];
   const next = after?.items.filter((item) => item.type === "visit") ?? [];
   const city = plan.constraints?.destination;
-  const fail = (message: string): never => { throw new ToolValidationError([{ code: "VISIT_ADDITION_CONFLICT", path: "days", date, message,
-    hint: "保留已安排景点和原时长、顺序、固定预约及住宿；尝试更近或更短的新增候选。需要改动既有安排时请先请用户确认。" }]); };
-  const duration = (item: ItineraryDay["items"][number]) => item.time && itemEndMinutes(item) !== undefined
-    ? itemEndMinutes(item)! - timeToMinutes(item.time) : item.planned_duration_min;
+  const fail = (message: string): never => visitAdditionConflict(date, message);
   let previousIndex = -1;
   for (const item of original) {
     const index = next.findIndex((entry) => sameVisitName(item.name, entry.name, city));
     if (index < 0) fail(`追加景点会移除已安排的「${item.name}」。`);
     if (index <= previousIndex) fail(`追加景点会改动「${item.name}」的既有游览顺序。`);
-    const was = duration(item), willBe = duration(next[index]!);
+    const was = visitDuration(item), willBe = visitDuration(next[index]!);
     if (was !== undefined && willBe !== was) fail(`追加景点需要把「${item.name}」的游览时长从 ${was} 分钟改为 ${willBe === undefined ? "待定" : `${willBe} 分钟`}，请先确认。`);
     previousIndex = index;
   }
   for (const item of before?.items.filter((entry) => entry.time_locked) ?? []) {
-    if (!after?.items.some((entry) => entry.type === item.type && entry.name === item.name && entry.time_locked && entry.time === item.time && duration(entry) === duration(item))) {
+    if (!after?.items.some((entry) => entry.type === item.type && entry.name === item.name && entry.time_locked && entry.time === item.time && visitDuration(entry) === visitDuration(item))) {
       fail(`追加景点会改动「${item.name}」的固定安排 ${item.time ?? ""}，请先确认。`);
     }
   }
@@ -307,6 +330,7 @@ export function assertVisitAddition(saved: Itinerary, plan: Itinerary, date: str
     if (!after?.items.some((entry) => entry.type === "accommodation" && entry.name === item.name && entry.stay_nights === item.stay_nights)) fail(`追加景点会改动住宿「${item.name}」，请先确认。`);
   }
   if (before?.schedule_input?.return_station && after?.schedule_input?.return_station !== before.schedule_input.return_station) fail("追加景点会改动返程站点，请先确认。");
+  if (before?.available_start !== after?.available_start || before?.available_end !== after?.available_end) fail("追加景点会改动已保存的出发或结束时间边界，请先确认。");
   if (!routeRepair && !next.some((item) => !original.some((entry) => sameVisitName(item.name, entry.name, city)))) fail("本次提交没有新增景点。");
 }
 

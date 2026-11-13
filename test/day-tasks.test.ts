@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { ChatAgent } from "../src/agent/agent.ts";
 import { Session } from "../src/core/session.ts";
 import { updateTravelStateFromBrief, updateTravelStateFromSnapshot } from "../src/core/travel-state.ts";
-import { activeDayTask, blockDayTask, selectDayTask, extendDayTaskAttempts, recordDayTaskRound, dayTaskScope, DAY_TASK_ROUNDS, DAY_TASK_CALLS } from "../src/core/day-tasks.ts";
+import { activeDayTask, blockDayTask, selectDayTask, extendDayTaskAttempts, recordDayTaskRound, dayTaskScope, localDayEditScope, DAY_TASK_ROUNDS, DAY_TASK_CALLS } from "../src/core/day-tasks.ts";
 import type { CumulativeToolBudget } from "../src/core/execution-budget.ts";
 import { createSaveTravelBriefTool } from "../src/tools/brief.ts";
 import { createSaveItineraryTool } from "../src/tools/itinerary.ts";
@@ -31,6 +31,59 @@ async function fixture(t: TestContext, saved = [day(0)], count = 3) {
   return { root, title, registry, file, load, session, plan };
 }
 const toolCall = (id: string, args: Record<string, unknown>): LLMResult => ({ type: "tool_calls", toolCalls: [{ id, name: "save_itinerary", arguments: JSON.stringify(args) }] });
+
+const addToSecondDay = "第二天的行程太少了，帮我追加可以去的地方";
+
+test("局部追加只保存第二天，保护原游览时长，回复保存的增量", async (t) => {
+  const second = { ...day(1), items: [{ ...day(1).items[0]!, end_time: "13:00", planned_duration_min: 180, time_locked: true }] };
+  const f = await fixture(t, [day(0), second]);
+  assert.equal(localDayEditScope(f.session.travelState, addToSecondDay)?.date, dates[1]);
+  assert.equal(localDayEditScope(f.session.travelState, "第二天加一个景点，不要缩短原景点")?.edit, "append_visit");
+  assert.equal(localDayEditScope(f.session.travelState, "继续补齐缺失日期"), undefined);
+  await f.registry.evidence.observePlaces("search_attractions", "北京", "丁公园 | 坐标 39.9015,116.4000", "amap");
+  const calls: string[] = [];
+  const provider: ChatProvider = { name: "local-edit", chat: async () => { throw new Error("无须模型收尾"); }, chatWithTools: async (history, tools) => {
+    const n = calls.push("model");
+    assert.ok(history.some((message) => message.content.includes(`仅修改「${f.title}」的 ${dates[1]}`)));
+    const schema = tools.find((tool) => tool.name === "save_itinerary")?.parameters as { properties?: { schedule?: { properties: { date: { enum: unknown } } } } } | undefined;
+    assert.deepEqual(schema?.properties?.schedule?.properties.date.enum, [dates[1]]);
+    if (n === 1) return toolCall("wrong-day", { title: f.title, days: [day(2)] });
+    if (n === 2) return toolCall("shrink", { title: f.title, schedule: { date: dates[1], start: "10:00", visits: [{ name: names[1], duration_min: 75 }, { name: "丁公园", duration_min: 30 }] } });
+    if (n === 3) return toolCall("append", { title: f.title, schedule: { date: dates[1], start: "10:00", visits: [{ name: names[1] }, { name: "丁公园", duration_min: 30 }] } });
+    throw new Error("保存后不应再请求模型");
+  } };
+  const agent = new ChatAgent(f.session, provider, f.registry, f.root);
+  const reply = await agent.run(addToSecondDay, { cumulativeBudget: budget(), maxToolRounds: 10 });
+  const saved = await f.load();
+  assert.equal(saved.revision, (f.plan.revision ?? 0) + 1);
+  assert.deepEqual(saved.days[0], f.plan.days[0]);
+  assert.equal(saved.days.length, 2, "第三天继续待补");
+  const old = saved.days[1]?.items.find((item) => item.name === names[1]);
+  assert.equal(old?.planned_duration_min, 180);
+  assert.equal(old?.time, "10:00");
+  assert.equal(old?.time_locked, true);
+  assert.equal(calls.length, 3);
+  assert.match(reply, /修改第 2 天/);
+  assert.match(reply, /新增 丁公园/);
+  assert.doesNotMatch(reply, /各日期已按独立额度尝试/);
+  assert.ok(agent.history.some((message) => message.role === "tool" && message.content.includes("DAY_TASK_FROZEN")));
+  assert.ok(agent.history.some((message) => message.role === "tool" && /180 分钟改为 75 分钟/.test(message.content)));
+});
+
+test("追加放不下时保留原文件并把实际取舍交给用户", async (t) => {
+  const f = await fixture(t, [day(0), day(1)]);
+  const before = await readFile(f.file, "utf8");
+  let calls = 0;
+  const provider: ChatProvider = { name: "edit-tradeoff", chat: async () => "unused", chatWithTools: async () => ++calls === 1
+    ? toolCall("shorten", { title: f.title, schedule: { date: dates[1], visits: [{ name: names[1], duration_min: 75 }, { name: "丁公园" }] } })
+    : { type: "text", content: "我已经保存" } };
+  const reply = await new ChatAgent(f.session, provider, f.registry, f.root).run(addToSecondDay);
+  assert.equal(await readFile(f.file, "utf8"), before);
+  assert.match(reply, /尚未写入新的修改/);
+  assert.match(reply, /480 分钟改为 75 分钟/);
+  assert.match(reply, /哪项安排可以调整/);
+  assert.doesNotMatch(reply, /我已经保存/);
+});
 
 test("单日队列先遍历未尝试日期，再重试失败日期；各日轮次独立，Session恢复且不刷新硬预算", async (t) => {
   const f = await fixture(t), b = budget(); b.rounds = 20; b.calls = 50; b.tokens = 5000;
