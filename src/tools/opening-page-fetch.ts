@@ -34,6 +34,11 @@ export function isFakeIp(address: string): boolean {
   return fakeIp.check(address, "ipv4");
 }
 
+/** 198.18/15 是 Clash/Surge 等代理的常见 fake-IP 网段，默认放行；显式设 0 才拒绝。 */
+export function fakeIpAllowed(): boolean {
+  return process.env.MINICODE_ALLOW_FAKE_IP !== "0";
+}
+
 async function resolvePageAddress(host: string): Promise<string> {
   const servers = (process.env.MINICODE_DNS_SERVERS ?? "").split(",").map((value) => value.trim()).filter(Boolean);
   let addresses: string[];
@@ -52,9 +57,9 @@ async function resolvePageAddress(host: string): Promise<string> {
   if (publicAddress !== undefined) return publicAddress;
   const fakeAddress = addresses.find(isFakeIp);
   if (fakeAddress !== undefined) {
-    if (process.env.MINICODE_ALLOW_FAKE_IP === "1") return fakeAddress;
+    if (fakeIpAllowed()) return fakeAddress;
     throw new OpeningPageFetchError("FAKE_IP", host, fakeAddress,
-      `正文地址 ${host} 被解析到 fake-IP ${fakeAddress}；请关闭代理 fake-IP，或设置 MINICODE_DNS_SERVERS 指向可信 DNS；确认代理可信时可设置 MINICODE_ALLOW_FAKE_IP=1。`);
+      `正文地址 ${host} 被解析到 fake-IP ${fakeAddress}；当前已显式设置 MINICODE_ALLOW_FAKE_IP=0。关闭代理 fake-IP、设置 MINICODE_DNS_SERVERS，或移除该变量即可恢复默认放行。`);
   }
   const privateAddress = addresses.find((address) => nonPublic.check(address, "ipv4"));
   throw new OpeningPageFetchError("NON_PUBLIC_IP", host, privateAddress ?? addresses[0],

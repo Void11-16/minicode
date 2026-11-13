@@ -13,7 +13,7 @@ import { normalizeVisitInfoArgs } from "../src/tools/travel-query.ts";
 import { queryKeyArgs } from "../src/tools/travel-query.ts";
 import { TravelEvidenceStore, evidenceId } from "../src/tools/travel-evidence.ts";
 import type { OpeningSource } from "../src/tools/opening-facts.ts";
-import { OpeningPageFetchError, isFakeIp } from "../src/tools/opening-page-fetch.ts";
+import { OpeningPageFetchError, fakeIpAllowed, isFakeIp } from "../src/tools/opening-page-fetch.ts";
 
 const place = "测试公园", city = "南昌";
 const source = (snippet: string): OpeningSource => ({ title: `${place}参观指南`, snippet, url: "https://example.org/visit", engine: "fixture" });
@@ -219,4 +219,20 @@ test("搜索瞬时网络失败会有限重试，成功后继续解析", async ()
   assert.equal(bing, 2);
   assert.match(output, /hours: verified/);
   assert.match(output, /09:00/);
+});
+
+
+test("fake-IP 默认放行，显式 MINICODE_ALLOW_FAKE_IP=0 才拒绝", () => {
+  const previous = process.env.MINICODE_ALLOW_FAKE_IP;
+  try {
+    delete process.env.MINICODE_ALLOW_FAKE_IP;
+    assert.equal(fakeIpAllowed(), true);
+    process.env.MINICODE_ALLOW_FAKE_IP = "0";
+    assert.equal(fakeIpAllowed(), false);
+    process.env.MINICODE_ALLOW_FAKE_IP = "1";
+    assert.equal(fakeIpAllowed(), true);
+  } finally {
+    if (previous === undefined) delete process.env.MINICODE_ALLOW_FAKE_IP;
+    else process.env.MINICODE_ALLOW_FAKE_IP = previous;
+  }
 });

@@ -26,13 +26,13 @@ last_admission保留兼容的无条件字符串，或带日期/星期/月日范�
 
 ## 代理、fake-IP 与正文可诊断性
 
-`opening-page-fetch.ts` 会拒绝环回、私网和 `198.18.0.0/15` 等非公网地址。Clash/Surge 一类 fake-IP 模式常把域名解析到 `198.18.x.x`，此时所有官网正文都会被拒绝，工具只能使用搜索摘要。
+`opening-page-fetch.ts` 会拒绝环回、私网等非公网地址。Clash/Surge 一类 fake-IP 模式常把域名解析到 `198.18.x.x`；该网段默认放行，以便读取真实官网正文。
 
 处理方式：
 
 - 关闭代理的 fake-IP 模式，使用真实 DNS；
 - 或设置 `MINICODE_DNS_SERVERS=223.5.5.5,119.29.29.29`，正文解析使用显式 DNS；
-- 或确认代理可信后设置 `MINICODE_ALLOW_FAKE_IP=1`，仅放行 `198.18/15`，其他私网仍拒绝。
+- 默认放行 `198.18/15`，适配 Clash/Surge fake-IP；如需重新拒绝，设置 `MINICODE_ALLOW_FAKE_IP=0`。其他私网仍始终拒绝。
 
 失败会写入诊断 `page_errors`（主机、错误码、可操作提示），并计入 `opening_fields.body_sources`。连续 fake-IP 失败会短路本次正文抓取，继续尝试搜索来源，不再把正文请求预算耗尽。
 

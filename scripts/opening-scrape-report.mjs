@@ -5,7 +5,7 @@
  *
  *   node scripts/opening-scrape-report.mjs
  *   node scripts/opening-scrape-report.mjs --limit 1 --modes allow
- *   MINICODE_ALLOW_FAKE_IP=1 node scripts/opening-scrape-report.mjs --modes allow
+ *   默认允许 fake-IP；--modes blocked 会显式设置 MINICODE_ALLOW_FAKE_IP=0。
  */
 
 import { mkdir, rm, writeFile } from "node:fs/promises";
@@ -94,7 +94,7 @@ async function probe(place, city) {
 }
 
 async function runMode(mode) {
-  process.env.MINICODE_ALLOW_FAKE_IP = mode === "allow" ? "1" : "";
+  process.env.MINICODE_ALLOW_FAKE_IP = mode === "allow" ? "1" : "0";
   const results = [];
   console.log(`\n[${new Date().toLocaleString()}] mode=${mode} places=${places.length}`);
   for (const [place, city] of places) {
