@@ -25,6 +25,7 @@
 - [工具提交与恢复](docs/tool-execution-recovery.md)
 - [版本测评看板](docs/evaluation-dashboard.md)
 - [固定世界评测](docs/frozen-world-eval.md)
+- [开放信息与搜索来源](docs/opening-sources.md)
 - [一日旅行数据流图](docs/travel-dataflow.html)
 
 ## 快速开始

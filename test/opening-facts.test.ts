@@ -3,7 +3,7 @@ import { test, type TestContext } from "node:test";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { extractOpeningFacts, openingHoursFor, type OpeningSource } from "../src/tools/opening-facts.ts";
+import { extractOpeningFacts, openingHoursFor, sourceKind, type OpeningSource } from "../src/tools/opening-facts.ts";
 import { TravelEvidenceStore } from "../src/tools/travel-evidence.ts";
 import { createVisitInfoTool } from "../src/tools/place-visit-info.ts";
 import type { PlaceSearchProvider } from "../src/tools/place-sources.ts";
@@ -186,4 +186,76 @@ test("搜索HTTP200但没有相关来源，开放来源与提取均为零，未�
   assert.equal(requests, 4); assert.equal(result.http.success_rate, 1);
   assert.equal(result.opening.source_return_rate, 0); assert.equal(result.opening.page_content_return_rate, 0);
   assert.equal(result.opening.extraction_rate, 0); assert.equal(result.opening.retention_rate, null);
+});
+
+
+test("官方场馆域名与普通搜索摘要分级，馆方信息优先于第三方摘要", () => {
+  const official: OpeningSource = {
+    title: "呼和浩特博物院",
+    url: "http://www.hhhtbwg.cn/m/shjy/info/408.html",
+    snippet: "上午9:30开馆，17:00闭馆，16:30停止入馆，周一闭馆",
+    content_kind: "snippet",
+  };
+  const wechat: OpeningSource = {
+    title: "呼和浩特博物院参观攻略",
+    url: "https://mp.weixin.qq.com/s/example",
+    snippet: "开放时间09:00-17:00",
+    content_kind: "snippet",
+  };
+  assert.equal(sourceKind(official), "official");
+  assert.equal(sourceKind(wechat), "search");
+  const [hours, closure] = extractOpeningFacts("呼和浩特", "呼和浩特博物院", [wechat, official], ["hours", "closure"]);
+  assert.equal(openingHoursFor(hours)?.opens, "09:30");
+  assert.equal(openingHoursFor(hours)?.closes, "17:00");
+  assert.deepEqual(closure?.value, { closed_on: ["Monday"], holiday_exception: false });
+});
+
+test("旧日期、低质量摘要和跨字段矛盾不冒充已验证", () => {
+  const stale = extractOpeningFacts("桂林", "象鼻山景区", [{
+    title: "象鼻山开放时间",
+    url: "https://m.bjnews.com.cn/detail/example.html",
+    snippet: "2024-06-30起开放时间07:00-18:00",
+    content_kind: "snippet",
+  }], ["hours"]);
+  assert.equal(stale[0]?.status, "needs_confirmation");
+
+  const weak = extractOpeningFacts("福州", "冰心故居", [{
+    title: "冰心故居开放时间",
+    url: "https://news.qq.com/rain/a/example",
+    snippet: "开放时间08:30-09:30；16:30停止入馆",
+    content_kind: "snippet",
+  }], ["hours", "last_admission"]);
+  assert.ok(weak.every((fact) => fact.status !== "verified"));
+
+  const contradiction = extractOpeningFacts("福州", "冰心故居", [{
+    title: "冰心故居",
+    url: "https://www.fzswhg.com/visit",
+    snippet: "开放时间08:30-09:30；16:30停止入馆",
+    kind: "official",
+    content_kind: "page",
+  }], ["hours", "last_admission"]);
+  assert.equal(contradiction.find((fact) => fact.field === "hours")?.status, "needs_confirmation");
+  assert.equal(contradiction.find((fact) => fact.field === "last_admission")?.status, "conflicting");
+
+  const coherent = extractOpeningFacts("福州", "冰心故居", [{
+    title: "冰心故居",
+    url: "https://www.fzswhg.com/visit",
+    snippet: "开放时间08:00-17:00；16:30停止入馆",
+    kind: "official",
+    content_kind: "page",
+  }], ["hours", "last_admission"]);
+  assert.equal(coherent.find((fact) => fact.field === "hours")?.status, "verified");
+  assert.equal(coherent.find((fact) => fact.field === "last_admission")?.status, "verified");
+});
+
+test("开始日期只有起点且过于陈旧时降级为待确认", () => {
+  const [hours] = extractOpeningFacts("桂林", "象鼻山景区", [{
+    title: "象鼻山景区",
+    url: "https://www.guilin.gov.cn/example",
+    snippet: "开放时间07:00-18:00，自2024-06-30起执行",
+    kind: "government",
+    content_kind: "page",
+  }], ["hours"]);
+  assert.equal(hours?.status, "needs_confirmation");
+  assert.equal(openingHoursFor(hours), undefined);
 });

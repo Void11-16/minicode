@@ -17,6 +17,7 @@ export interface OpeningSource extends ClosureSource {
   readonly kind?: SourceKind;
   readonly content_kind?: "snippet" | "page";
   readonly closure_scope?: Pick<OpeningScope, "start_date" | "end_date">;
+  readonly published_at?: number;
 }
 export interface OpeningSession { readonly starts: string; readonly ends?: string }
 export interface OpeningValues {
@@ -26,7 +27,7 @@ export interface OpeningValues {
   sessions: readonly OpeningSession[];
   notices: { readonly closed_dates: readonly string[]; readonly closed_ranges: readonly { start: string; end?: string }[] };
 }
-export interface OpeningCitation { readonly title: string; readonly url?: string; readonly quote: string; readonly kind: SourceKind; readonly observed_at: number; readonly content_kind?: "snippet" | "page" }
+export interface OpeningCitation { readonly title: string; readonly url?: string; readonly quote: string; readonly kind: SourceKind; readonly observed_at: number; readonly content_kind?: "snippet" | "page"; readonly published_at?: number }
 export type OpeningFact = { [K in OpeningField]: {
   readonly id: string; readonly policy_version: number; readonly city: string; readonly name: string; readonly place_id?: string;
   readonly field: K; readonly status: OpeningStatus; readonly value?: OpeningValues[K]; readonly sources: readonly OpeningCitation[]; readonly observed_at: number;
@@ -43,19 +44,56 @@ export function requestedOpeningFields(args: Record<string, unknown>): OpeningFi
 }
 
 function normalized(text: string): string { return text.replace(/：/g, ":").replace(/([\u4e00-\u9fff]{2,3})省(?=博物(?:馆|院))/g, "$1"); }
-function sourceKind(source: OpeningSource): SourceKind {
+const KNOWN_OFFICIAL_HOSTS = new Set([
+  "dpm.org.cn", "www.dpm.org.cn", "chnmuseum.cn", "www.chnmuseum.cn",
+  "hhhtbwg.cn", "www.hhhtbwg.cn", "81-china.com", "www.81-china.com",
+  "cntwg.com", "www.cntwg.com", "szmuseum.com", "www.szmuseum.com",
+  "cdmuseum.com", "www.cdmuseum.com", "panda.org.cn", "www.panda.org.cn",
+]);
+
+function hostOf(source: OpeningSource): string | undefined {
+  try { return new URL(source.url ?? "").hostname.toLowerCase(); } catch { return undefined; }
+}
+
+/** 官方场馆域名不一定是 .gov.cn；标题和常见馆方域名都要参与分级。 */
+export function sourceKind(source: OpeningSource): SourceKind {
   if (source.kind) return source.kind;
-  try {
-    const url = new URL(source.url ?? "");
-    if (url.hostname.endsWith(".gov.cn")) return "government";
-    if (url.hostname.endsWith(".ctrip.com") && /\/sight\//.test(url.pathname)) return "platform";
-  } catch { /* 无URL不伪装成可追溯来源。 */ }
+  const host = hostOf(source);
+  if (host === undefined) return "search";
+  if (host.endsWith(".gov.cn")) return "government";
+  if (KNOWN_OFFICIAL_HOSTS.has(host)) return "official";
+  if (host.endsWith(".ctrip.com") && /\/sight\//.test(new URL(source.url!).pathname)) return "platform";
+  if (/官网|官方网站|官方站/.test(source.title)) return "official";
+  if (/(?:museum|bwg|bowuguan|dpm|chnmuseum|81-china|cntwg)/i.test(host) && !/(?:zhidao|baike|wenku|baijiahao)/.test(host)) return "official";
   return "search";
 }
 export function sourcePriority(fact: OpeningFact): number {
   return Math.max(-1, ...fact.sources.map((s) => SOURCE_PRIORITY[s.kind]));
 }
 
+const WEAK_SOURCE_HOST = /(?:^|\.)(?:zhidao\.baidu\.com|baijiahao\.baidu\.com|sohu\.com|qq\.com|163\.com|douyin\.com|meipian\.cn|jianshu\.com|xiaohongshu\.com|bendibao\.com|bjnews\.com\.cn)$/i;
+
+/** 只按域名和显式分级判断；新闻/问答/聚合页不能在没有正文时冒充可靠事实。 */
+export function isWeakOpeningSource(source: OpeningSource): boolean {
+  if (source.kind === "official" || source.kind === "government") return false;
+  const host = hostOf(source);
+  return host !== undefined && WEAK_SOURCE_HOST.test(host);
+}
+
+function sourcePublishedAt(source: OpeningSource): number | undefined {
+  if (source.published_at !== undefined && Number.isFinite(source.published_at)) return source.published_at;
+  // 只认标题、摘要开头或明确发布/更新标记附近的日期；票价政策里的“自某年起”不是发布时间。
+  const titleDate = source.title.match(/^\s*((?:20\d{2})[-年/]\d{1,2}[-月/]\d{1,2})/)?.[1];
+  const snippetLead = source.snippet.match(/^\s*((?:20\d{2})[-年/]\d{1,2}[-月/]\d{1,2})/)?.[1];
+  const marked = [...source.snippet.matchAll(/(?:发布|更新|发表于|日期|时间)[:：\s]*((?:20\d{2})[-年/]\d{1,2}[-月/]\d{1,2})/g)].map((match) => match[1]!);
+  const values = [titleDate, snippetLead, ...marked].flatMap((value) => {
+    if (value === undefined) return [];
+    const parts = value.split(/[-年/月]/).filter(Boolean);
+    const time = Date.parse(`${parts[0]}-${parts[1]!.padStart(2, "0")}-${parts[2]!.padStart(2, "0")}T00:00:00+08:00`);
+    return Number.isFinite(time) ? [time] : [];
+  });
+  return values.length ? Math.max(...values) : undefined;
+}
 const chinaDate = new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Shanghai" });
 
 export function isHistoricalOpening(fact: OpeningFact | undefined, now = externalNow().getTime()): boolean {
@@ -166,7 +204,8 @@ export function extractOpeningFacts(city: string, name: string, sources: readonl
         && !otherVenue && !otherOpeningSubject(s, subject, city, aliases) && !(/它们|这些场馆|类似|参考其他/.test(s) && !matches);
     }).flatMap((s) => /延时|试行|临时|[（(]除(?:国家)?(?:法定|国定)节?假日外[，,]\s*(?:周|星期)/.test(s)
       ? [s] : s.split(/[，,](?=\s*(?:周|星期|每周|开放|开馆|入馆|最后|最晚|《[^》]+》|\d{1,2}:[0-5]\d\s*(?:停止|截止)))/));
-    const text = sentences.join("；"), citation: OpeningCitation = { title: source.title, url: source.url, quote: text, kind, observed_at: now, content_kind: source.content_kind };
+    const publishedAt = sourcePublishedAt(source);
+    const text = sentences.join("；"), citation: OpeningCitation = { title: source.title, url: source.url, quote: text, kind, observed_at: now, content_kind: source.content_kind, ...(publishedAt === undefined ? {} : { published_at: publishedAt }) };
     const hours: TimeRule[] = [], sessions: OpeningSession[] = [], admissions: AdmissionRule[] = [];
     const extensions: { scope: OpeningScope; closes: string }[] = [];
     const tables = new Map<string, { scope: OpeningScope; opens: Set<string>; closes: Set<string> }>();
@@ -296,7 +335,7 @@ export function extractOpeningFacts(city: string, name: string, sources: readonl
   }
   const fields = new Set<OpeningField>([...requested, ...candidates.keys(), ...uncertain.keys()]);
   const today = chinaDate.format(now);
-  return [...fields].map((field) => {
+  const facts = [...fields].map((field) => {
     const values = candidates.get(field) ?? [];
     const current = field === "hours" ? values.filter(({ value }) =>
       (value as OpeningValues["hours"]).some((rule) => !rule.end_date || rule.end_date >= today)) : values;
@@ -316,9 +355,68 @@ export function extractOpeningFacts(city: string, name: string, sources: readonl
     let value = status === "verified" ? first : undefined;
     if (value && field === "closure") value = { ...(value as OpeningValues["closure"]), holiday_exception: best.some((v) => (v.value as OpeningValues["closure"]).holiday_exception) };
     const citations = unresolved ? uncertain.get(field)! : best.filter((v) => status !== "verified" || field === "closure" || JSON.stringify(v.value) === JSON.stringify(value)).map((v) => v.citation);
-    const id = createHash("sha256").update(JSON.stringify([OPENING_POLICY_VERSION, city, placeId ?? name, field, status, value, citations.map((s) => [s.url, s.kind, s.quote])])).digest("hex").slice(0, 20);
+    const id = openingFactId({ city, name, placeId, field, status, value, citations });
     return { id, policy_version: OPENING_POLICY_VERSION, city, name, place_id: placeId, field, status, value, sources: citations, observed_at: now } as OpeningFact;
   });
+  return applyOpeningCoherence(facts, now);
+}
+
+function openingFactId(input: {
+  readonly city: string;
+  readonly name: string;
+  readonly placeId?: string;
+  readonly field: OpeningField;
+  readonly status: OpeningStatus;
+  readonly value: OpeningValues[OpeningField] | undefined;
+  readonly citations: readonly OpeningCitation[];
+}): string {
+  return createHash("sha256").update(JSON.stringify([
+    OPENING_POLICY_VERSION, input.city, input.placeId ?? input.name, input.field, input.status, input.value,
+    input.citations.map((source) => [source.url, source.kind, source.quote]),
+  ])).digest("hex").slice(0, 20);
+}
+
+function withOpeningState(fact: OpeningFact, status: OpeningStatus): OpeningFact {
+  return {
+    ...fact,
+    status,
+    value: undefined,
+    id: openingFactId({ city: fact.city, name: fact.name, placeId: fact.place_id, field: fact.field, status, value: undefined, citations: fact.sources }),
+  } as OpeningFact;
+}
+
+/** 摘要来源、旧日期和跨字段矛盾不能悄悄变成已核验事实。 */
+function applyOpeningCoherence(facts: readonly OpeningFact[], now: number): OpeningFact[] {
+  const byField = new Map<OpeningField, OpeningFact>(facts.map((fact) => [fact.field, fact]));
+  const rawHours = byField.get("hours");
+  const last = byField.get("last_admission");
+  const staleBefore = now - 365 * 86_400_000;
+  const staleThreshold = chinaDate.format(staleBefore);
+  const weak = (fact: OpeningFact): boolean => fact.sources.length > 0 && fact.sources.every((source) =>
+    isWeakOpeningSource({ title: source.title, snippet: source.quote, url: source.url, kind: source.kind, content_kind: source.content_kind, ...(source.published_at === undefined ? {} : { published_at: source.published_at }) }));
+  const staleCited = (fact: OpeningFact): boolean => fact.sources.length > 0 && fact.sources.every((source) => source.published_at !== undefined && source.published_at < staleBefore);
+
+  if (rawHours?.status === "verified" && rawHours.value) {
+    const rules = rawHours.value as OpeningValues["hours"];
+    const staleStart = rules.length > 0 && rules.every((rule) => rule.start_date !== undefined && rule.end_date === undefined && rule.start_date < staleThreshold);
+    const shortWindow = rules.length === 1 && rules[0]!.closes !== "24:00" && closingMinute(rules[0]!) - clockMinutes(rules[0]!.opens) <= 60;
+    if (staleStart || staleCited(rawHours) || weak(rawHours) || shortWindow) byField.set("hours", withOpeningState(rawHours, "needs_confirmation"));
+  }
+
+  if (last?.status === "verified" && last.value) {
+    if (staleCited(last) || weak(last)) {
+      byField.set("last_admission", withOpeningState(last, "needs_confirmation"));
+    } else if (rawHours?.status === "verified" && rawHours.value) {
+      const rules = rawHours.value as OpeningValues["hours"];
+      const closes = Math.max(...rules.map(closingMinute));
+      const opens = Math.min(...rules.map((rule) => clockMinutes(rule.opens)));
+      const admission = last.value as OpeningValues["last_admission"];
+      const times = typeof admission === "string" ? [admission] : admission.map((rule) => rule.time);
+      if (times.some((value) => clockMinutes(value) >= closes || clockMinutes(value) <= opens)) byField.set("last_admission", withOpeningState(last, "conflicting"));
+    }
+  }
+
+  return facts.map((fact) => byField.get(fact.field) ?? fact);
 }
 
 function openingValuesConflict(field: OpeningField, a: OpeningValues[OpeningField], b: OpeningValues[OpeningField]): boolean {

@@ -29,6 +29,7 @@ export interface ToolCallObservation {
   new_evidence_keys: string[];
   http: HttpObservation[];
   provider_errors: { provider: string; category: ToolErrorCategory; code: string }[];
+  page_errors?: { host: string; code: string; message: string }[];
   opening_fields?: { requested: readonly string[]; retrieved_sources: number; body_sources?: number; extracted: readonly string[]; evidence_ids: readonly string[] };
   opening_saved_ids?: readonly string[];
 }
@@ -56,6 +57,16 @@ export function annotateToolCall(update: Partial<Pick<ToolCallObservation, "exec
 export function observeProviderError(provider: string, code: string): void {
   const current = scope.getStore();
   if (current) current.record.provider_errors.push({ provider, code: /^[A-Za-z0-9_]{1,40}$/.test(code) ? code : "UNKNOWN", category: toolErrorCategory(code) });
+}
+
+/** 正文抓取失败保留主机、错误码和可操作提示；不写入搜索参数或页面正文。 */
+export function observePageError(host: string, code: string, message: string): void {
+  const current = scope.getStore();
+  if (!current) return;
+  current.record.page_errors ??= [];
+  if (current.record.page_errors.length >= 20) return;
+  const entry = { host: host.slice(0, 120), code: code.slice(0, 40), message: message.slice(0, 240) };
+  if (!current.record.page_errors.some((item) => item.host === entry.host && item.code === entry.code && item.message === entry.message)) current.record.page_errors.push(entry);
 }
 
 /** 统计到响应头的耗时和进程内请求并发；嵌套 fetch 包装不重复计数。 */

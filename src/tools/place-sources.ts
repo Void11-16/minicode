@@ -1,11 +1,11 @@
 import { externalNow } from "../core/external-environment.ts";
-import { annotateToolCall, observeProviderError } from "../core/tool-diagnostics.ts";
+import { annotateToolCall, observePageError, observeProviderError } from "../core/tool-diagnostics.ts";
 import type { ToolContext } from "./tool.ts";
 import { cancellableFetch } from "./travel-request.ts";
-import { OPENING_FIELDS, type OpeningField, type OpeningSource } from "./opening-facts.ts";
+import { OPENING_FIELDS, sourceKind, type OpeningField, type OpeningSource } from "./opening-facts.ts";
 import { isOpeningVenueTitle, matchesOpeningCandidate, mentionsOpeningPlace, scopeOpeningCampus } from "./opening-place.ts";
 import { isSearchChallenge, openingArticle, openingPageSnippet, readOpeningPage, openingNavigationLinks } from "./opening-page.ts";
-import { fetchPublicOpeningPage, openingPageUrl } from "./opening-page-fetch.ts";
+import { OpeningPageFetchError, fetchPublicOpeningPage, openingPageUrl } from "./opening-page-fetch.ts";
 import { cleanHtml, isSearchPage, is360Redirect, queryVariants, filterPlaceSources, OPENING_SEARCH_ENGINES, SEARCH_ENGINES } from "./place-search.ts";
 import { extractDurationHints, MAX_DURATION_HINTS, placeTokens, type DurationHint } from "./visit-duration.ts";
 
@@ -22,6 +22,7 @@ interface Scope {
   sources: Map<string, Cached<OpeningSource[]>>;
   budgets: Map<string, { used: number; at: number }>;
   challenges: Map<string, { hits: number; at: number }>;
+  pageBlocked: Map<string, { code: string; host: string; message: string }>;
 }
 export interface PlaceLookupOptions {
   readonly place: string;
@@ -37,6 +38,7 @@ export interface PlaceLookupResult {
   sources: OpeningSource[];
   duration: DurationHint[];
   errors: string[];
+  page_errors: { host: string; code: string; message: string }[];
   requests: number;
   cacheHits: number;
   observedAt: number;
@@ -45,6 +47,8 @@ export interface PlaceLookupResult {
 const TTL = 30 * 60_000;
 const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36";
 const MAX_CALL_REQUESTS = 4;
+const MAX_SEARCH_REQUESTS = 4;
+const MAX_PAGE_REQUESTS = 3;
 export const MAX_PLACE_SOURCE_REQUESTS = 8;
 
 /**
@@ -60,16 +64,23 @@ export class PlaceSourceClient {
   async collect(options: PlaceLookupOptions, ctx?: ToolContext): Promise<PlaceLookupResult> {
     const owner = ctx?.queryAttempts ?? ctx?.evidence ?? this;
     let state = this.scopes.get(owner);
-    if (!state) { state = { cache: new Map(), sources: new Map(), budgets: new Map(), challenges: new Map() }; this.scopes.set(owner, state); }
+    if (!state) { state = { cache: new Map(), sources: new Map(), budgets: new Map(), challenges: new Map(), pageBlocked: new Map() }; this.scopes.set(owner, state); }
     const scope = state, now = externalNow().getTime(), entity = JSON.stringify([options.city.replace(/市$/, ""), options.place]);
     let budget = scope.budgets.get(entity);
     if (!budget || (!ctx?.queryAttempts && now - budget.at >= TTL)) { budget = { used: 0, at: now }; scope.budgets.set(entity, budget); }
     const entityBudget = budget;
-    const result: PlaceLookupResult = { sources: [], duration: [], errors: [], requests: 0, cacheHits: 0, observedAt: now };
+    if (options.refresh) scope.pageBlocked.delete(entity);
+    const result: PlaceLookupResult = { sources: [], duration: [], errors: [], page_errors: [], requests: 0, cacheHits: 0, observedAt: now };
     const opening = options.kind === "visit" && options.openingFields.length > 0;
     const request = cancellableFetch(this.fetchFn, ctx?.signal), requestPage = cancellableFetch(this.fetchFn === fetch ? fetchPublicOpeningPage : this.fetchFn, ctx?.signal);
-    const hasBudget = () => result.requests < MAX_CALL_REQUESTS && entityBudget.used < MAX_PLACE_SOURCE_REQUESTS;
-    const count = () => { if (!hasBudget()) throw new Error("地点来源请求预算已用尽"); result.requests++; entityBudget.used++; };
+    let searchRequests = 0, pageRequests = 0;
+    const hasSearchBudget = () => result.requests < MAX_CALL_REQUESTS && searchRequests < MAX_SEARCH_REQUESTS && entityBudget.used < MAX_PLACE_SOURCE_REQUESTS;
+    const hasPageBudget = () => result.requests < MAX_CALL_REQUESTS && pageRequests < MAX_PAGE_REQUESTS && entityBudget.used < MAX_PLACE_SOURCE_REQUESTS;
+    const count = (kind: "search" | "page") => {
+      if (kind === "search" ? !hasSearchBudget() : !hasPageBudget()) throw new Error("地点来源请求预算已用尽");
+      result.requests++; entityBudget.used++;
+      if (kind === "search") searchRequests++; else pageRequests++;
+    };
     const enough = () => options.enough(result.sources, result.duration);
     const observeDuration = (hints: readonly string[], source: string) => {
       if (!options.duration) return;
@@ -96,14 +107,15 @@ export class PlaceSourceClient {
       }
     };
     const readSource = async (): Promise<boolean> => {
-      if (visited.size >= 3) return false;
+      if (visited.size >= 3 || scope.pageBlocked.has(entity)) return false;
       const priority = (source: OpeningSource) => {
         const url = openingPageUrl(source.url);
         if (/维基百科|百科全书|百度知道/.test(source.title) || /^(?:easylearn\.baidu\.com|www\.douyin\.com)$/.test(url?.hostname ?? "")) return -1;
         if (opening && isOpeningVenueTitle(source.title, options.place, options.city)) return 130;
+        if (sourceKind(source) === "official") return 125;
         if (url?.hostname.endsWith(".gov.cn")) return 120;
         if (/开放时间|参观指南|参观须知|票务服务/.test(source.title)) return 100;
-        return /官网|官方网站/.test(source.title) || source.kind === "official" ? 80 : 0;
+        return /官网|官方网站/.test(source.title) ? 80 : 0;
       };
       const candidates = [...navigation, ...filterPlaceSources(result.sources, options.place, options.city, true, options.kind === "visit")
         .filter((source) => priority(source) >= 0).sort((a, b) => priority(b) - priority(a))];
@@ -113,7 +125,7 @@ export class PlaceSourceClient {
         if (!url || visited.has(url.href) || (isSearchPage(url) && !is360Redirect(url))) continue;
         const key = `page:${entity}:${url.href}`; let page = cached<PageSnapshot>(key)?.value;
         if (!page && source.content_kind === "page") continue;
-        if (!page && !hasBudget()) continue;
+        if (!page && !hasPageBudget()) continue;
         visited.add(url.href);
         const queued = navigation.indexOf(source);
         if (queued >= 0) navigation.splice(queued, 1);
@@ -121,14 +133,14 @@ export class PlaceSourceClient {
           if (!page) {
             const signal = AbortSignal.timeout(6_000);
             const read = (target: URL) => {
-              count();
+              count("page");
               return requestPage(target.href, { redirect: "manual", signal, headers: { "User-Agent": USER_AGENT, "Accept-Language": "zh-CN" } });
             };
             let response = await read(url);
             if ([301, 302, 303, 307, 308].includes(response.status)) {
               const location = response.headers.get("location");
               const target = location ? openingPageUrl(new URL(location, url).href) : undefined; await response.body?.cancel();
-              if (!target || isSearchPage(target) || isSearchChallenge("", target.href) || (url.protocol === "https:" && target.protocol !== "https:") || !hasBudget()) { result.errors.push("正文跳转目标不可用"); continue; }
+              if (!target || isSearchPage(target) || isSearchChallenge("", target.href) || (url.protocol === "https:" && target.protocol !== "https:") || !hasPageBudget()) { result.errors.push("正文跳转目标不可用"); continue; }
               url = target; response = await read(url);
             }
             if (!response.ok) { await response.body?.cancel(); result.errors.push(`正文HTTP ${response.status}`); continue; }
@@ -154,7 +166,19 @@ export class PlaceSourceClient {
           if (snippet && (belongs || scoped?.campus) && (!opening || scoped)) result.sources.unshift({ ...source, title,
             snippet, url: url.href, content_kind: "page" });
           if (belongs) observeDuration(page.duration, source.engine ?? "web");
-        } catch { ctx?.signal?.throwIfAborted(); result.errors.push("正文读取失败"); }
+        } catch (error) {
+          ctx?.signal?.throwIfAborted();
+          if (error instanceof OpeningPageFetchError) {
+            observePageError(url.hostname, error.code, error.message);
+            result.errors.push(error.message);
+            result.page_errors.push({ host: url.hostname, code: error.code, message: error.message });
+            if (error.code === "FAKE_IP") {
+              scope.pageBlocked.set(entity, { code: error.code, host: url.hostname, message: error.message });
+            }
+          } else {
+            result.errors.push("正文读取失败");
+          }
+        }
         return true;
       }
       return false;
@@ -172,8 +196,8 @@ export class PlaceSourceClient {
       if (!enough() && this.provider) {
         const query = searchQuery(0), key = `provider:${entity}:${query}`, hit = cached<SearchSnapshot>(key);
         if (hit) { result.sources.push(...hit.value.sources); observeDuration(hit.value.duration, this.provider.name); }
-        else if (hasBudget()) try {
-          count(); const sources = (await this.provider.search(query, { maxResults: 5, signal: ctx?.signal })).slice(0, 5).map((s) => ({ ...s, snippet: s.snippet.slice(0, 4000), engine: s.engine ?? this.provider!.name }));
+        else if (hasSearchBudget()) try {
+          count("search"); const sources = (await this.provider.search(query, { maxResults: 5, signal: ctx?.signal })).slice(0, 5).map((s) => ({ ...s, snippet: s.snippet.slice(0, 4000), engine: s.engine ?? this.provider!.name }));
           const duration = sources.flatMap((s) => extractDurationHints(s.snippet, MAX_DURATION_HINTS, placeTokens(options.place)));
           save(key, { sources, duration }); result.sources.push(...sources); observeDuration(duration, this.provider.name);
         } catch (error) { ctx?.signal?.throwIfAborted(); result.errors.push(`${this.provider.name}: ${error instanceof Error ? error.message : String(error)}`); }
@@ -185,11 +209,27 @@ export class PlaceSourceClient {
         const query = searchQuery(index), key = `search:${engine.name}:${query}`, hit = cached<SearchSnapshot>(key);
         if (hit) { result.sources.push(...hit.value.sources); observeDuration(hit.value.duration, engine.name); }
         else {
-          if (!hasBudget()) break;
+          if (!hasSearchBudget()) break;
           const recent = scope.challenges.get(engine.name);
           if (recent && recent.hits >= 2 && Date.now() - recent.at < 120_000) { result.errors.push(`${engine.name}: 验证码退避中`); continue; }
           try {
-            count(); const response = await request(engine.buildUrl(query), { signal: AbortSignal.timeout(engine.timeoutMs ?? 8_000), headers: { "User-Agent": USER_AGENT, "Accept-Language": "zh-CN" } });
+            let response: Response | undefined;
+            for (let attempt = 0; attempt < 2; attempt++) {
+              if (!hasSearchBudget()) throw new Error("地点来源请求预算已用尽");
+              try {
+                count("search");
+                response = await request(engine.buildUrl(query), { signal: AbortSignal.timeout(engine.timeoutMs ?? 8_000), headers: { "User-Agent": USER_AGENT, "Accept-Language": "zh-CN" } });
+                break;
+              } catch (error) {
+                ctx?.signal?.throwIfAborted();
+                if (attempt === 0 && isRetryableNetworkError(error) && hasSearchBudget()) {
+                  await new Promise((resolve) => setTimeout(resolve, 120));
+                  continue;
+                }
+                throw error;
+              }
+            }
+            if (response === undefined) throw new Error("搜索请求未返回");
             const html = await readOpeningPage(response, response.ok ? 2_000_000 : 30_000);
             if (isSearchChallenge(html, response.url)) {
               observeProviderError(engine.name, "CAPTCHA"); const at = Date.now(); scope.challenges.set(engine.name, { hits: (recent?.hits ?? 0) + 1, at }); result.errors.push(`${engine.name}: 验证码/访问验证页面`); continue;
@@ -216,4 +256,12 @@ export class PlaceSourceClient {
       annotateToolCall({ place_lookup: { kind: options.kind, requests: result.requests, cache_hits: result.cacheHits, entity_requests: entityBudget.used, entity_limit: MAX_PLACE_SOURCE_REQUESTS } });
     }
   }
+}
+
+
+function isRetryableNetworkError(error: unknown): boolean {
+  const value = error instanceof Error
+    ? `${error.name} ${error.message} ${String((error as Error & { cause?: { code?: string } }).cause?.code ?? "")}`
+    : String(error);
+  return /fetch failed|Timeout|timed out|ECONN|ENOTFOUND|EAI_AGAIN/i.test(value);
 }

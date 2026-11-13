@@ -13,6 +13,7 @@ import { normalizeVisitInfoArgs } from "../src/tools/travel-query.ts";
 import { queryKeyArgs } from "../src/tools/travel-query.ts";
 import { TravelEvidenceStore, evidenceId } from "../src/tools/travel-evidence.ts";
 import type { OpeningSource } from "../src/tools/opening-facts.ts";
+import { OpeningPageFetchError, isFakeIp } from "../src/tools/opening-page-fetch.ts";
 
 const place = "测试公园", city = "南昌";
 const source = (snippet: string): OpeningSource => ({ title: `${place}参观指南`, snippet, url: "https://example.org/visit", engine: "fixture" });
@@ -166,4 +167,56 @@ test("时长参考及其缓存复用都记为返回资料，不冒充自动回�
   for (const id of ["first", "reused"]) await diagnostics.run({ id, name: "get_place_visit_info", arguments: args }, 1, async () => ({ output: await registry.execute("get_place_visit_info", args) }));
   assert.equal(requests, 1); assert.deepEqual(diagnostics.records.map((record) => record.execution), ["executed", "cache_hit"]);
   assert.deepEqual(diagnostics.records.map((record) => record.query_status), ["returned", "returned"]);
+});
+
+
+test("fake-IP 识别：198.18/15 是代理测试网段，公网地址不误判", () => {
+  assert.equal(isFakeIp("198.18.3.63"), true);
+  assert.equal(isFakeIp("198.19.255.1"), true);
+  assert.equal(isFakeIp("1.1.1.1"), false);
+  const error = new OpeningPageFetchError("FAKE_IP", "www.dpm.org.cn", "198.18.3.63", "提示");
+  assert.equal(error.code, "FAKE_IP");
+  assert.equal(error.host, "www.dpm.org.cn");
+  assert.equal(error.address, "198.18.3.63");
+});
+
+test("正文 fake-IP 失败后短路正文并继续搜索，诊断保留 page_errors", async () => {
+  const urls: string[] = [];
+  const fetchStub: typeof fetch = async (input) => {
+    const url = String(input); urls.push(url);
+    if (url.includes("bing.com")) return new Response('<li class="b_algo"><h2><a href="https://museum.example/visit">测试公园参观指南</a></h2><p>详情见正文</p></li>');
+    if (url === "https://museum.example/visit") throw new OpeningPageFetchError("FAKE_IP", "museum.example", "198.18.3.63", "正文地址被解析到 fake-IP");
+    if (url.includes("baidu.com")) return new Response('<h3><a href="https://example.org/current">测试公园参观指南</a></h3><div class="c-abstract">开放时间09:00-17:00，16:30停止入园</div>');
+    return new Response("没有相关搜索结果");
+  };
+  const client = new PlaceSourceClient(fetchStub);
+  const tool = createVisitInfoTool(undefined, undefined, client);
+  const diagnostics = new ToolDiagnostics();
+  const output = await diagnostics.run({ id: "fake-ip", name: "get_place_visit_info", arguments: "{}" }, 1, async () => ({
+    output: await tool.execute({ place, city, fields: ["hours", "last_admission"] }, { workspace: ".", queryAttempts: new Map() }),
+  })).then((result) => result.output);
+
+  assert.match(output, /hours: verified/);
+  assert.match(output, /09:00/);
+  assert.ok(urls.some((url) => url.includes("baidu.com")), "正文失败后仍应继续尝试下一个搜索来源");
+  assert.ok(diagnostics.records[0]?.page_errors?.some((error) => error.code === "FAKE_IP"));
+  assert.equal(diagnostics.records[0]?.opening_fields?.body_sources, 0);
+});
+
+test("搜索瞬时网络失败会有限重试，成功后继续解析", async () => {
+  let bing = 0;
+  const fetchStub: typeof fetch = async (input) => {
+    const url = String(input);
+    if (url.includes("bing.com")) {
+      bing += 1;
+      if (bing === 1) throw new TypeError("fetch failed");
+      return new Response('<li class="b_algo"><h2><a href="https://example.org/current">测试公园参观指南</a></h2><p>开放时间09:00-17:00</p></li>');
+    }
+    return new Response("没有相关搜索结果");
+  };
+  const tool = createVisitInfoTool(undefined, undefined, new PlaceSourceClient(fetchStub));
+  const output = await tool.execute({ place, city, fields: ["hours"] }, { workspace: ".", queryAttempts: new Map() });
+  assert.equal(bing, 2);
+  assert.match(output, /hours: verified/);
+  assert.match(output, /09:00/);
 });

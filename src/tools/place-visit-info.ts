@@ -1,7 +1,7 @@
 import type { Tool } from "./tool.ts";
 import { requireString } from "./tool.ts";
 import { normalizeVisitInfoArgs, VISIT_INFO_FIELDS, type VisitInfoField } from "./travel-query.ts";
-import { annotateToolCall } from "../core/tool-diagnostics.ts";
+import { annotateToolCall, observePageError } from "../core/tool-diagnostics.ts";
 import { extractOpeningFacts, isHistoricalOpening, lastAdmissionFor, openingHoursFor, type OpeningFact, type OpeningField } from "./opening-facts.ts";
 import { PlaceSourceClient, type PlaceSearchProvider } from "./place-sources.ts";
 import { renderDurationHints } from "./visit-duration.ts";
@@ -46,6 +46,7 @@ export function createVisitInfoTool(fetchFn: typeof fetch = fetch, provider?: Pl
           const focus = (["hours", "closure", "sessions", "last_admission", "notices", "visit_duration"] as const).find((field) => needed.includes(field)) ?? "hours";
           return focus === "notices" && visitDate ? `${KEYWORDS.notices} ${visitDate}` : KEYWORDS[focus];
         } }, ctx);
+      for (const error of result.page_errors) observePageError(error.host, error.code, error.message);
       const interrupted = result.errors.length > 0;
       const facts = ctx?.evidence ? await ctx.evidence.observeOpening(city, place, result.sources, opening, interrupted || Boolean(args.visit_date), result.observedAt)
         : extractOpeningFacts(city, place, result.sources, opening, undefined, result.observedAt);
@@ -64,7 +65,7 @@ export function createVisitInfoTool(fetchFn: typeof fetch = fetch, provider?: Pl
         renderDurationHints(result.duration),
         ...(fields.includes("visit_duration") && !result.duration.length ? ["未找到可引用的游玩时长参考，保持待确认，不编造时长。"] : []),
         ...(facts.some((fact) => isHistoricalOpening(fact)) ? ["仅历史参考：过期时段不适用于当前排程。"] : []),
-        ...(interrupted && unconfirmed.length ? [`开放信息查询受阻，待确认字段：${unconfirmed.join("、")}。已取得的有效字段仍可使用。`] : []),
+        ...(interrupted && unconfirmed.length ? [`开放信息查询受阻，待确认字段：${unconfirmed.join("、")}。已取得的有效字段仍可使用。${result.errors.length ? `原因：${[...new Set(result.errors)].slice(0, 2).join("；")}` : ""}`] : []),
       ].filter(Boolean).join("\n");
     },
   };
