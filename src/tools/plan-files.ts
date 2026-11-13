@@ -14,7 +14,7 @@ export function planFileFor(rootDir: string, subDir: string, title: string, exte
 
 /** 锁覆盖完整读改写过程，也保护同目录的其他 Node 进程。活进程的锁不会超时被抢占。 */
 export async function withPlanLock<T>(file: string, action: () => Promise<T>, signal?: AbortSignal): Promise<T> {
-  await mkdir(dirname(file), { recursive: true });
+  await ensureDirectory(dirname(file));
   const lock = `${file}.lock`;
   const deadline = Date.now() + 30_000;
   for (;;) {
@@ -46,18 +46,40 @@ export async function withPlanLock<T>(file: string, action: () => Promise<T>, si
 }
 
 /** 单文件原子替换，失败时清理临时文件；JSON 作为提交记录最后写入。 */
-export async function atomicWrite(file: string, content: string): Promise<void> {
+export async function atomicWrite(file: string, content: string, mode?: number): Promise<void> {
   const temporary = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
-  const handle = await open(temporary, "wx");
+  const existingMode = mode ?? await stat(file).then((value) => value.mode & 0o777, (error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; return undefined; });
+  const handle = await open(temporary, "wx", existingMode);
   try {
     await handle.writeFile(content, "utf8");
     await handle.sync();
     await handle.close();
     await rename(temporary, file);
+    await syncDirectory(dirname(file));
   } catch (error) {
     await handle.close().catch(() => {});
     await unlink(temporary).catch(() => {});
     throw error;
+  }
+}
+
+/** rename 的目录项也需要刷盘；不支持目录 fsync 的平台只能提供降级保证。 */
+export async function syncDirectory(directory: string): Promise<void> {
+  const handle = await open(directory, "r");
+  try { await handle.sync(); }
+  catch (error) { if (!["EINVAL", "ENOTSUP", "EBADF"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error; }
+  finally { await handle.close(); }
+}
+
+/** 新目录本身及父目录项也要同步，避免仅刷文件却丢失刚创建的路径。 */
+export async function ensureDirectory(directory: string, mode?: number): Promise<void> {
+  const created = await mkdir(directory, { recursive: true, mode });
+  if (created === undefined) return;
+  let cursor = resolve(directory);
+  for (;;) {
+    await syncDirectory(cursor);
+    if (cursor === resolve(created)) { await syncDirectory(dirname(cursor)); return; }
+    cursor = dirname(cursor);
   }
 }
 

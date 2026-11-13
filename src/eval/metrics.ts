@@ -1,9 +1,13 @@
-import { scenicVisitKey } from "../tools/scenic-area.ts";
+import type { TravelEvidenceStore } from "../tools/travel-evidence.ts";
+import { derivePlanningLayers } from "../core/planning-layers.ts";
+import { mainDestinationKey } from "../tools/scenic-area.ts";
 import { timelineGaps } from "../tools/itinerary-timeline.ts";
 import { recommendationCoverage, recommendationPolicy } from "../tools/recommendation-policy.ts";
 import type { Itinerary, ItineraryItem } from "../tools/itinerary-schema.ts";
 import { totalCostPerPerson, validateItinerary } from "../tools/itinerary-validator.ts";
 import type { ItineraryQualityStatus } from "../tools/itinerary-validator.ts";
+import { checkRequirements, type EvalRequirements, type EvalRequirementCheck } from "./requirements.ts";
+import { measureDelivery, type DeliveryMetrics } from "./delivery-metrics.ts";
 
 /**
  * 行程质量评测指标 —— 离线评测骨架的核心。
@@ -15,9 +19,13 @@ export interface EvalExpectations {
   readonly expectedDays: number;
   readonly mustVisit?: readonly string[];
   readonly budgetPerPersonYuan?: number;
+  readonly requirements?: EvalRequirements;
 }
 
 export interface ItineraryEvalMetrics {
+  readonly delivery?: DeliveryMetrics;
+  /** 案例需求单独验收，避免改变通用质量分与历史评分版本。 */
+  readonly requirementChecks?: readonly EvalRequirementCheck[];
   // 硬校验（来自 validate_itinerary）
   readonly status: ItineraryQualityStatus;
   readonly score: number;
@@ -25,6 +33,10 @@ export interface ItineraryEvalMetrics {
   readonly issueCounts: { readonly P0: number; readonly P1: number; readonly P2: number };
   readonly issueCodes: readonly string[];
   // 结构
+  readonly basicDays?: number;
+  readonly basicComplete?: boolean;
+  readonly checkedDays?: number;
+  readonly readyDays?: number;
   readonly days: number;
   readonly expectedDays: number;
   readonly visitsPerDay: number;
@@ -45,6 +57,9 @@ export interface ItineraryEvalMetrics {
   readonly routeIssueCount: number;
   // 预算
   readonly costPerPerson: number;
+  readonly recordedCostPerPerson?: number;
+  readonly estimatedCostPerPerson?: number;
+  readonly budgetStatus?: import("../tools/trip-budget.ts").TripBudgetReport["status"];
   readonly budgetPerPersonYuan: number | undefined;
   readonly budgetRatio: number | undefined;
 }
@@ -62,6 +77,7 @@ const ROUTE_ISSUE_CODES = new Set([
 export function computeItineraryMetrics(
   itinerary: Itinerary,
   expectations: EvalExpectations,
+  evidence?: TravelEvidenceStore,
 ): ItineraryEvalMetrics {
   const validated = { ...itinerary, constraints: { ...itinerary.constraints, expected_days: expectations.expectedDays,
     must_visit: [...new Set([...(itinerary.constraints?.must_visit ?? []), ...(expectations.mustVisit ?? [])])] } };
@@ -75,12 +91,15 @@ export function computeItineraryMetrics(
   const meals = coverage.meals;
   const target = recommendationPolicy(itinerary).minCandidates;
   const visitCount = itinerary.days.reduce(
-    (sum, day) => sum + new Set(day.items.filter((item) => item.type === "visit").map((item) => scenicVisitKey(item.name, item.parent_visit?.name))).size,
+    (sum, day) => sum + new Set(day.items.filter((item) => item.type === "visit").map((item) => mainDestinationKey(item.name, item.parent_visit?.name, item.evidence_verified ? item.area_group?.name : undefined))).size,
     0,
   );
-  const cost = totalCostPerPerson(itinerary);
+  const layers = derivePlanningLayers(validated, report, evidence && ((visit, date) => evidence.visitFeasibility(visit, validated.constraints?.destination ?? "", date)));
+  const budget = report.budget, cost = budget ? budget.projected / budget.plan.travelers : totalCostPerPerson(itinerary);
 
   return {
+    delivery: measureDelivery(itinerary, expectations.mustVisit ?? [], expectations.requirements?.dates),
+    ...(expectations.requirements === undefined ? {} : { requirementChecks: checkRequirements(itinerary, expectations.requirements) }),
     status: report.status,
     score,
     scoreVersion: report.score_version,
@@ -91,6 +110,7 @@ export function computeItineraryMetrics(
         ...(expectedDayMismatch ? ["expected-day-count-mismatch"] : []),
       ]),
     ],
+    basicDays: layers.basic_days, basicComplete: layers.basic_complete, checkedDays: layers.checked_days, readyDays: layers.ready_days,
     days: itinerary.days.length,
     expectedDays: expectations.expectedDays,
     visitsPerDay: itinerary.days.length === 0 ? 0 : visitCount / itinerary.days.length,
@@ -108,6 +128,7 @@ export function computeItineraryMetrics(
     maxGapMinutes: Math.max(0, ...itinerary.days.flatMap(timelineGaps).map((gap) => gap.minutes)),
     routeIssueCount: report.issues.filter((issue) => ROUTE_ISSUE_CODES.has(issue.code)).length,
     costPerPerson: cost,
+    ...(budget ? { recordedCostPerPerson: budget.recorded / budget.plan.travelers, estimatedCostPerPerson: budget.estimated / budget.plan.travelers, budgetStatus: budget.status } : {}),
     budgetPerPersonYuan: expectations.budgetPerPersonYuan,
     budgetRatio:
       expectations.budgetPerPersonYuan === undefined || expectations.budgetPerPersonYuan <= 0

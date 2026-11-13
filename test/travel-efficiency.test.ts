@@ -1,6 +1,6 @@
 import { assessToolBudget } from "../src/runtime/tool-budget.ts";
 import { updateTravelStateFromBrief } from "../src/core/travel-state.ts";
-import { essentialReviewDefinitions, focusedEvidenceDefinitions } from "../src/agent/travel-progress.ts";
+import { essentialVisitInfoDefinitions, focusedEvidenceDefinitions } from "../src/agent/travel-progress.ts";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { mkdtemp, readFile, writeFile, rm, stat } from "node:fs/promises";
@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { ToolRegistry } from "../src/tools/tool.ts";
 import { queryKeyArgs } from "../src/tools/travel-query.ts";
 import { TravelEvidenceStore } from "../src/tools/travel-evidence.ts";
-import { createReviewsTool } from "../src/tools/reviews.ts";
+import { createVisitInfoTool } from "../src/tools/place-visit-info.ts";
 import { createPlanRoutesTool } from "../src/tools/transit.ts";
 import { createSaveItineraryTool, createLoadItineraryTool } from "../src/tools/itinerary.ts";
 import { createReadFileTool } from "../src/tools/files.ts";
@@ -28,7 +28,7 @@ test("省略/显式默认值、忽略参数、路线auto/transit共用查询键�
   assert.deepEqual(queryKeyArgs("plan_day_routes", { city: "北京", stops: ["甲", "乙"] }), queryKeyArgs("plan_day_routes", { city: "北京", stops: [" 甲 ", "乙"], mode: "transit" }));
   assert.notDeepEqual(queryKeyArgs("plan_day_routes", { stops: ["甲", "乙"] }), queryKeyArgs("plan_day_routes", { stops: ["乙", "甲"] }));
   assert.notDeepEqual(queryKeyArgs("search_restaurants", { city: "甲" }), queryKeyArgs("search_restaurants", { city: "甲", min_rating: 4.2 }));
-  assert.deepEqual(queryKeyArgs("get_place_reviews", { place: "故宫博物院闭馆时间", city: "北京", aspect: "闭馆日" }), queryKeyArgs("get_place_reviews", { place: "故宫博物院", city: "北京", aspect: "开放时间" }));
+  assert.deepEqual(queryKeyArgs("get_place_visit_info", { place: "故宫博物院闭馆时间", city: "北京" }), queryKeyArgs("get_place_visit_info", { place: "故宫博物院", city: "北京", fields: ["hours", "closure"] }));
 });
 
 test("并发相同查询只执行一次；不同取消信号独立，失败后清理在途记录", async (t) => {
@@ -50,7 +50,7 @@ test("并发相同查询只执行一次；不同取消信号独立，失败后�
 
 test("广告与空摘要不凑停止条件；百度缺摘要不串到下一条结果，关键闭馆事实齐备即停", async (t) => {
   const root = await temp(t), registry = new ToolRegistry(root); let requests = 0;
-  registry.register(createReviewsTool((async (input: string | URL | Request) => {
+  registry.register(createVisitInfoTool((async (input: string | URL | Request) => {
     const url = String(input);
     if (url.includes("dpm.org.cn")) return new Response("无可用规则");
     requests++;
@@ -58,22 +58,22 @@ test("广告与空摘要不凑停止条件；百度缺摘要不串到下一条�
     assert.match(url, /baidu.com/);
     return new Response('<h3><a>故宫博物院空标题</a></h3><h3><a href="https://example.com/visit">故宫博物院参观须知</a></h3><div class="c-abstract">故宫博物院09:00-17:00。故宫博物院每周一闭馆。故宫博物院建议游玩4小时。</div>');
   }) as typeof fetch));
-  const output = await registry.execute("get_place_reviews", JSON.stringify({ place: "故宫博物院", city: "北京", aspect: "开放时间" }));
+  const output = await registry.execute("get_place_visit_info", JSON.stringify({ place: "故宫博物院", city: "北京" }));
   assert.equal(requests, 2); assert.doesNotMatch(output, /淘宝|空标题|链接[012]/); assert.match(output, /Monday/);
   assert.ok(registry.evidence.hasVerifiedClosure("北京", "故宫博物院"));
-  const reused = await registry.execute("get_place_reviews", JSON.stringify({ place: "故宫博物院", city: "北京", aspect: "游玩时长" }));
-  assert.equal(requests, 2); assert.match(reused, /复用.*游玩时长/);
+  const reused = await registry.execute("get_place_visit_info", JSON.stringify({ place: "故宫博物院", city: "北京", fields: ["visit_duration"] }));
+  assert.equal(requests, 2); assert.match(reused, /复用[\s\S]*游玩时长/);
 });
 
-test("搜索无有效依据时最多4次HTTP，保持未知；已有闭馆事实换aspect无需联网", async (t) => {
+test("搜索无有效依据时最多4次HTTP，保持未知；已知字段再次查询无需联网", async (t) => {
   const root = await temp(t), evidence = new TravelEvidenceStore(root); let requests = 0;
-  const tool = createReviewsTool((async () => { requests++; return new Response('<h3><a>故宫博物院</a></h3>'); }) as typeof fetch);
-  assert.match(await tool.execute({ place: "故宫博物院", city: "北京", aspect: "开放时间" }, { workspace: root, evidence }), /没有搜到/);
+  const tool = createVisitInfoTool((async () => { requests++; return new Response('<h3><a>故宫博物院</a></h3>'); }) as typeof fetch);
+  assert.match(await tool.execute({ place: "故宫博物院", city: "北京" }, { workspace: root, evidence }), /未找到依据/);
   assert.equal(requests, 4); assert.equal(evidence.hasVerifiedClosure("北京", "故宫博物院"), false);
   await evidence.observeClosure("北京", "故宫博物院", [{ title: "故宫博物院", snippet: "故宫博物院每周一闭馆。" }]);
   const registry = new ToolRegistry(root); registry.register(tool);
-  const output = await registry.execute("get_place_reviews", JSON.stringify({ place: "故宫博物院", city: "北京", aspect: "闭馆时间" }));
-  assert.equal(requests, 4); assert.match(output, /复用.*已查开放字段/); assert.match(output, /每周闭馆：沿用已有闭馆依据/); assert.match(output, /开放时段：未找到依据/);
+  const output = await registry.execute("get_place_visit_info", JSON.stringify({ place: "故宫博物院", city: "北京" }));
+  assert.equal(requests, 4); assert.match(output, /复用.*已查参观字段/); assert.match(output, /每周闭馆：沿用已有闭馆依据/); assert.match(output, /开放时段：未找到依据/);
 });
 
 test("路线ABC改BCD只查询新CD；缓存不续期，改方向/端点/方式与refresh仍重查", async (t) => {
@@ -149,12 +149,12 @@ test("已查关键事项从模型工具选项移除，仍保留新场馆查询�
   const root = await temp(t), registry = new ToolRegistry(root), session = new Session();
   session.setTravelMode(true); session.setTravelState(updateTravelStateFromBrief(undefined, { title: "北京一日游", destination: "北京", mustVisit: ["故宫博物院", "中国国家博物馆"] }));
   let requests = 0, executions = 0;
-  registry.register({ name: "get_place_reviews", alwaysActive: true, description: "test", parameters: { type: "object", properties: {} }, execute: async () => { executions++; return "没有搜到相关评价内容"; } });
+  registry.register({ name: "get_place_visit_info", alwaysActive: true, description: "test", parameters: { type: "object", properties: {} }, execute: async () => { executions++; return "没有搜到参观资料"; } });
   registry.register(createSaveItineraryTool(root));
-  const review = (name: string, id: string) => ({ id, name: "get_place_reviews", arguments: JSON.stringify({ place: name, aspect: "开放时间" }) });
+  const review = (name: string, id: string) => ({ id, name: "get_place_visit_info", arguments: JSON.stringify({ place: name }) });
   const provider: ChatProvider = { name: "specific-facts", chat: async () => "结束", chatWithTools: async (_history, tools): Promise<LLMResult> => {
     requests++;
-    const definition = tools.find((tool) => tool.name === "get_place_reviews");
+    const definition = tools.find((tool) => tool.name === "get_place_visit_info");
     if (requests === 1) return { type: "tool_calls", toolCalls: [review("故宫博物院", "a")] };
     if (requests === 2) {
       assert.deepEqual(((definition!.parameters.properties as Record<string, { enum: string[] }>).place!).enum, ["中国国家博物馆"]);
@@ -167,7 +167,7 @@ test("已查关键事项从模型工具选项移除，仍保留新场馆查询�
   } };
   const b: CumulativeToolBudget = { calls: 0, rounds: 0, tokens: 0, maxCalls: 30, maxRounds: 30 };
   await new ChatAgent(session, provider, registry, root).run("北京一日游", { cumulativeBudget: b, maxToolRounds: 30 });
-  assert.equal(executions, 2); assert.equal(b.diagnostics!.records.filter((r) => r.tool === "get_place_reviews" && r.execution === "blocked").length, 1);
+  assert.equal(executions, 2); assert.equal(b.diagnostics!.records.filter((r) => r.tool === "get_place_visit_info" && r.execution === "blocked").length, 1);
   assert.equal(JSON.parse(await readFile(join(root, "plans/北京一日游.json"), "utf8")).days.length, 1);
 });
 
@@ -181,9 +181,9 @@ test("显式口碑需求不被默认关键资料策略误拦，收敛规则不�
     return requests++ === 0 ? { type: "tool_calls", toolCalls: [{ id: "review", name: "get_place_reviews", arguments: JSON.stringify({ place: "故宫", aspect: "口碑" }) }] } : { type: "text", content: "已查询" };
   } };
   await new ChatAgent(session, provider, registry, root).run("专门查一下故宫口碑", { maxToolRounds: 10 }); assert.equal(calls, 1);
-  const narrowed = essentialReviewDefinitions([{ name: "get_place_reviews", description: "test", parameters: {} }], ["故宫"]);
+  const narrowed = essentialVisitInfoDefinitions([{ name: "get_place_visit_info", description: "test", parameters: {} }], ["故宫"]);
   const focused = focusedEvidenceDefinitions(narrowed, false);
-  assert.deepEqual((focused[0]!.parameters.properties as Record<string, { enum: string[] }>).aspect!.enum, ["开放时间"]);
+  assert.deepEqual((focused[0]!.parameters.properties as Record<string, { enum: string[] }>).place!.enum, ["故宫"]);
 });
 
 
@@ -212,7 +212,7 @@ test("候选摘要按类别保留酒店与主景区，不被后来的大量餐�
 
 test("重复查询混入新搜索也会进入修订阶段，补齐有效日期后恢复正常检索", async (t) => {
   const root = await temp(t), registry = new ToolRegistry(root), session = new Session(); session.setTravelMode(true);
-  session.setTravelState(updateTravelStateFromBrief(undefined, { title: "北京三日游", destination: "北京", mustVisit: [] }));
+  session.setTravelState(updateTravelStateFromBrief(undefined, { title: "北京一日游", destination: "北京", mustVisit: [] }));
   let requests = 0, executions = 0;
   registry.register({ name: "search_attractions", description: "test", parameters: {}, execute: async () => { executions++; return "候选"; } });
   registry.register(createSaveItineraryTool(root));
@@ -222,14 +222,15 @@ test("重复查询混入新搜索也会进入修订阶段，补齐有效日期�
     if (requests === 1) return { type: "tool_calls", toolCalls: [search("缓存中心")] };
     if (requests <= 7) return { type: "tool_calls", toolCalls: [search("缓存中心"), search(`新中心${requests}`)] };
     if (requests === 8) { assert.equal(tools.some((tool) => tool.name === "search_attractions"), false); return { type: "tool_calls", toolCalls: [search("本应暂缓的中心")] }; }
-    if (requests === 9) return { type: "tool_calls", toolCalls: [{ id: "save", name: "save_itinerary", arguments: JSON.stringify({ ...savedArgs, title: "北京三日游" }) }] };
+    if (requests === 9) return { type: "tool_calls", toolCalls: [{ id: "save", name: "save_itinerary", arguments: JSON.stringify({ ...savedArgs, title: "北京一日游" }) }] };
     if (requests === 10) { assert.equal(tools.some((tool) => tool.name === "search_attractions"), true); return { type: "tool_calls", toolCalls: [search("恢复后的中心")] }; }
     return { type: "text", content: "完成" };
   } };
   const budget: CumulativeToolBudget = { calls: 0, rounds: 0, tokens: 0, maxCalls: 100, maxRounds: 100 };
-  await new ChatAgent(session, provider, registry, root).run("规划", { cumulativeBudget: budget, maxToolRounds: 100 });
-  assert.equal(requests, 11); assert.equal(executions, 8);
-  assert.ok(await readFile(join(root, "plans/北京三日游.json"), "utf8"));
+  const reply = await new ChatAgent(session, provider, registry, root).run("规划", { cumulativeBudget: budget, maxToolRounds: 100 });
+  assert.equal(requests, 13); assert.equal(executions, 8);
+  assert.match(reply, /停止空转/); assert.match(reply, /strict 未通过/);
+  assert.ok(await readFile(join(root, "plans/北京一日游.json"), "utf8"));
 });
 
 
@@ -244,8 +245,8 @@ test("预算续期不把已查无依据当成可反复修复；P2提示不单独
   session.add("tool", await save.execute(input, { workspace: root, evidence: registry.evidence }), { toolName: "save_itinerary" });
   const options = { rootDir: root, session, initialLimit: 30, currentLimit: 30, ceiling: 150, extensionStep: 15 };
   assert.equal((await assessToolBudget(options)).repair.canImprove, false, "未知闭馆不再是需要续期的硬错误");
-  registry.register({ name: "get_place_reviews", description: "test", parameters: {}, execute: async () => "没有搜到相关评价内容" });
-  await registry.execute("get_place_reviews", JSON.stringify({ city: "北京", place: "单馆博物馆", aspect: "开放时间" }));
+  registry.register({ name: "get_place_visit_info", description: "test", parameters: {}, execute: async () => "没有搜到参观资料" });
+  await registry.execute("get_place_visit_info", JSON.stringify({ city: "北京", place: "单馆博物馆" }));
   const checked = await assessToolBudget(options);
   assert.equal(checked.repair.canImprove, false); assert.equal(checked.repair.items.find((item) => item.code === "unverified-closure")?.category, "uncertain");
   await registry.evidence.observeClosure("北京", "单馆博物馆", [{ title: "单馆博物馆", snippet: "单馆博物馆每周一闭馆。" }]);
@@ -255,4 +256,25 @@ test("预算续期不把已查无依据当成可反复修复；P2提示不单独
   const newSession = new Session(); newSession.add("tool", noop, { toolName: "save_itinerary" });
   const after = await assessToolBudget({ ...options, session: newSession });
   assert.equal(after.quality.available, true); assert.equal(after.repair.canImprove, false);
+});
+
+
+test("显式参观时长需求只放开参观工具，模型绕过目录调用一般口碑仍被拦截", async (t) => {
+  const root = await temp(t), registry = new ToolRegistry(root), session = new Session(); session.setTravelMode(true);
+  session.setTravelState(updateTravelStateFromBrief(undefined, { title: "北京游", destination: "北京", mustVisit: ["故宫"] }));
+  let reviews = 0, visits = 0, rounds = 0;
+  registry.register({ name: "get_place_reviews", alwaysActive: true, description: "test", parameters: {}, execute: async () => { reviews++; return "体验很好"; } });
+  registry.register({ name: "get_place_visit_info", alwaysActive: true, description: "test", parameters: {}, execute: async () => { visits++; return "未找到可引用的游玩时长"; } });
+  const budget: CumulativeToolBudget = { calls: 0, rounds: 0, tokens: 0, maxCalls: 10, maxRounds: 10 };
+  const provider: ChatProvider = { name: "visit-only", chat: async () => "结束", chatWithTools: async (_history, tools): Promise<LLMResult> => {
+    assert.ok(tools.some((tool) => tool.name === "get_place_visit_info"));
+    assert.equal(tools.some((tool) => tool.name === "get_place_reviews"), false);
+    return rounds++ === 0 ? { type: "tool_calls", toolCalls: [
+      { id: "optional", name: "get_place_reviews", arguments: JSON.stringify({ place: "故宫" }) },
+      { id: "duration", name: "get_place_visit_info", arguments: JSON.stringify({ place: "故宫", fields: ["visit_duration"] }) },
+    ] } : { type: "text", content: "时长待确认" };
+  } };
+  await new ChatAgent(session, provider, registry, root).run("查一下故宫游玩时长", { cumulativeBudget: budget, maxToolRounds: 10 });
+  assert.equal(visits, 1); assert.equal(reviews, 0); assert.equal(budget.allowVisitInfoQueries, true); assert.equal(budget.allowAdvisoryReviews, false);
+  assert.equal(budget.diagnostics!.records.find((record) => record.tool === "get_place_reviews")?.execution, "blocked");
 });

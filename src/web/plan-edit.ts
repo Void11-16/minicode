@@ -152,7 +152,10 @@ export async function suggestPlanOptions(
   const destination = String((plan.constraints as Record<string, unknown> | undefined)?.destination ?? "");
   const evidence = new TravelEvidenceStore(rootDir);
   await evidence.observePlaces(kind === "meal" ? "search_restaurants" : "search_attractions", destination,
-    options.map((o) => `${o.name} | 坐标 ${o.latitude.toFixed(6)},${o.longitude.toFixed(6)}${o.rating === undefined ? "" : ` | 评分 ${o.rating}`}${o.cost === undefined ? "" : ` | 人均 ¥${o.cost}`}${o.recommended_spots?.length ? ` | 内部推荐 ${JSON.stringify(o.recommended_spots)}` : ""}`).join("\n"), "amap", scenicGroups.map((group) => ({ parent: group.main.poi.name, children: group.spots })));
+    options.map((o) => `${o.name} | 坐标 ${o.latitude.toFixed(6)},${o.longitude.toFixed(6)}${o.rating === undefined ? "" : ` | 评分 ${o.rating}`}${o.cost === undefined ? "" : ` | 人均 ¥${o.cost}`}${o.recommended_spots?.length ? ` | 内部推荐 ${JSON.stringify(o.recommended_spots)}` : ""}`).join("\n"), "amap", scenicGroups.flatMap((group) => [
+      { parent: group.main.poi.name, children: group.spots, relation: "scenic_child" as const },
+      { parent: group.main.poi.name, children: group.area_spots, relation: "geographic_area" as const },
+    ]));
   const value: SuggestResult = { available: true, options };
   suggestCache.set(cacheKey, { value, expiresAt: Date.now() + SUGGEST_TTL_MS });
   return value;
@@ -199,7 +202,7 @@ export async function applyPlanEdit(
       throw new Error("op 只能是 replace / move / remove");
     }
 
-  }, { workspace: rootDir, ...ctx, evidence });
+  }, { workspace: rootDir, ...ctx, operationRequest: body, evidence });
   return { quality: { status: snapshot.report.status, score: snapshot.report.score }, revision: snapshot.itinerary.revision };
 }
 
@@ -230,7 +233,7 @@ async function replaceItem(item: PlanItem, replacement: Record<string, unknown>,
   }
 
   // 地点身份变化后，旧证据、评分、价格和预约信息全部失效。
-  for (const field of ["recommended_spots", "closure_policy_version", "evidence_id", "evidence_verified", "evidence_observed_at", "closure_verified", "rating", "cost_per_person", "ticket_price_per_person", "room_price_per_night", "opening_hours", "closed_on", "reservation_required", "cuisine"]) delete item[field];
+  for (const field of ["parent_visit", "area_group", "covered_visits", "recommended_spots", "closure_policy_version", "evidence_id", "evidence_verified", "evidence_observed_at", "closure_verified", "rating", "cost_per_person", "ticket_price_per_person", "room_price_per_night", "opening_hours", "closed_on", "reservation_required", "cuisine"]) delete item[field];
   item.name = name;
   item.location = {
     name,

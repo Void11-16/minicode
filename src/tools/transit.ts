@@ -37,6 +37,7 @@ export function createPlanRoutesTool(fetchFn: FetchLike = fetch): Tool {
   return {
     name: "plan_day_routes",
     alwaysActive: "travel",
+    supportsRoutineRouteQuery: true,
     description:
       "规划行程中相邻地点之间的通勤：按访问顺序传入地点列表，逐段返回交通方式（公交/地铁优先，" +
       "降级驾车）与耗时、步行距离、全天通勤总时长，并标记超过 60 分钟的路段。" +

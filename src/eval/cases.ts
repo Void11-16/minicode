@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { parseRequirements, type EvalRequirements } from "./requirements.ts";
 
 /**
  * 金标准样例：一组"典型用户请求 + 预期口径"。
@@ -16,6 +17,10 @@ export interface EvalCase {
   readonly taste?: string;
   /** 套件筛选标签，例如 food / remote-day / representative */
   readonly tags?: readonly string[];
+  /** 独立于模型自填 constraints 的需求验收；不改变通用质量评分口径。 */
+  readonly requirements?: EvalRequirements;
+  /** 需要人工复核的体验维度，不计作自动通过。 */
+  readonly review_focus?: readonly string[];
   /** 用户视角的原始需求（--live 模式直接作为首条消息） */
   readonly request: string;
 }
@@ -68,7 +73,7 @@ export async function loadCases(file: string): Promise<EvalCase[]> {
 }
 
 function parseCases(raw: readonly unknown[], label: string): EvalCase[] {
-  const cases = raw.map((item, index) => parseCase(item, `${label}[${index}]`));
+  const cases = raw.map((item, index) => parseEvalCase(item, `${label}[${index}]`));
   const ids = new Set<string>();
   for (const item of cases) {
     if (ids.has(item.id)) throw new Error(`${label}: 样例 id 重复: ${item.id}`);
@@ -77,7 +82,7 @@ function parseCases(raw: readonly unknown[], label: string): EvalCase[] {
   return cases;
 }
 
-function parseCase(raw: unknown, label: string): EvalCase {
+export function parseEvalCase(raw: unknown, label: string): EvalCase {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     throw new Error(`${label}: 样例必须是 JSON 对象`);
   }
@@ -88,8 +93,8 @@ function parseCase(raw: unknown, label: string): EvalCase {
   if (typeof record.days !== "number" || !Number.isInteger(record.days) || record.days <= 0) {
     throw new Error(`${label}: days 需要正整数`);
   }
-  if (record.budget_per_person_yuan !== undefined && typeof record.budget_per_person_yuan !== "number") {
-    throw new Error(`${label}: budget_per_person_yuan 需要数字`);
+  if (record.budget_per_person_yuan !== undefined && (typeof record.budget_per_person_yuan !== "number" || !Number.isFinite(record.budget_per_person_yuan) || record.budget_per_person_yuan < 0)) {
+    throw new Error(`${label}: budget_per_person_yuan 需要非负有限数字`);
   }
   if (record.must_visit !== undefined && (!Array.isArray(record.must_visit) || record.must_visit.some((v) => typeof v !== "string" || !v.trim()))) throw new Error(`${label}: must_visit 需要非空名称数组`);
   if (record.taste !== undefined && typeof record.taste !== "string") {
@@ -104,6 +109,9 @@ function parseCase(raw: unknown, label: string): EvalCase {
   const tags = Array.isArray(record.tags)
     ? [...new Set(record.tags.map((tag) => (tag as string).trim()))]
     : undefined;
+  if (record.review_focus !== undefined && (!Array.isArray(record.review_focus) || record.review_focus.some((value) => typeof value !== "string" || !value.trim()))) {
+    throw new Error(`${label}: review_focus 需要非空字符串数组`);
+  }
   return {
     id: requireSafeCaseId(id, label),
     title,
@@ -112,6 +120,8 @@ function parseCase(raw: unknown, label: string): EvalCase {
     ...(record.budget_per_person_yuan === undefined ? {} : { budget_per_person_yuan: record.budget_per_person_yuan }),
     ...(record.taste === undefined ? {} : { taste: record.taste }),
     ...(tags === undefined ? {} : { tags }),
+    ...(record.requirements === undefined ? {} : { requirements: parseRequirements(record.requirements, record.days, label) }),
+    ...(record.review_focus === undefined ? {} : { review_focus: [...new Set((record.review_focus as string[]).map((value) => value.trim()))] }),
     request,
   };
 }

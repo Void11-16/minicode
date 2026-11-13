@@ -24,6 +24,7 @@ function harness() {
     currentRoutes: { days: [] }, currentDay: -1, routeGeneration: 1,
     routeRequests: new Map(), routeControllers: new Map(), loadedRouteDays: new Set(), routeStates: new Map(),
     planController: null, mapListController: null,
+    planMeta: new Map(),
     renderMapSide() {}, renderDay() {}, renderDayTabs() {}, closeItemEditor() {}, cancelRouteRequests() {}, renderPlanMeta() {}, mapToast() {},
     useDisplayCoordinates(value: unknown) { return value; },
     apiFetch: async () => response(payload()),

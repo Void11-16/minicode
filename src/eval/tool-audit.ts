@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Message } from "../core/message.ts";
 import { toolErrorCategory } from "../core/tool-diagnostics.ts";
-import { normalizeReviewArgs, queryKeyArgs, TRAVEL_QUERY_TOOLS } from "../tools/travel-query.ts";
+import { normalizePlaceName, queryKeyArgs, TRAVEL_QUERY_TOOLS } from "../tools/travel-query.ts";
 import { assertInsideRoot } from "../tools/tool.ts";
 import { loadManifest, requireSafeRunId } from "./run-store.ts";
 import { renderToolDiagnostics } from "./tool-diagnostics.ts";
@@ -29,8 +29,11 @@ export function auditLegacyToolMessages(messages: readonly Message[]) {
       try {
         let args = JSON.parse(call.arguments || "{}");
         if (!args || typeof args !== "object" || Array.isArray(args) || args._truncated) continue;
-        if (call.name === "get_place_reviews") args = normalizeReviewArgs(args);
-        const key = createHash("sha256").update(JSON.stringify([call.name, queryKeyArgs(call.name, args)])).digest("hex");
+        // 仅历史审计识别旧职责；运行中的口碑工具仍拒绝这些参数。
+        const oldVisit = call.name === "get_place_reviews" && /^(?:开放时间|闭馆时间|闭馆日|游玩时长)$/.test(args.aspect);
+        const keyArgs = oldVisit ? queryKeyArgs("get_place_visit_info", { place: normalizePlaceName(args.place), city: args.city,
+          ...(args.aspect === "游玩时长" ? { fields: ["visit_duration"] } : args.fields ? { fields: args.fields } : {}) }) : queryKeyArgs(call.name, args);
+        const key = createHash("sha256").update(JSON.stringify([call.name, keyArgs])).digest("hex");
         row.argument_keys++; if (keys.has(key)) row.duplicates++; keys.add(key);
         if (TRAVEL_QUERY_TOOLS.includes(call.name)) { queryKeyCount++; if (queryKeys.has(key)) queryDuplicates++; queryKeys.add(key); }
       } catch { /* 缺失或压缩参数不能当成相同查询。 */ }

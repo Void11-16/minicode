@@ -1,7 +1,10 @@
+import { loadItineraryQualityInputs, bindItineraryEvidence } from "../tools/itinerary.ts";
 import { parseItinerary } from "../tools/itinerary-schema.ts";
+import { FrozenWorldRuntime, checkWorldItinerary, evalImplementationHash, loadExternalWorld, type WorldSnapshot } from "./external-world.ts";
 import { summarizeToolDiagnostics, type ToolDiagnosticsSummary } from "./tool-diagnostics.ts";
 import { createExecutionBudget, executionInputLimit } from "../core/execution-budget.ts";
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { copyFile, readFile, writeFile } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 import { ChatAgent } from "../agent/agent.ts";
@@ -27,6 +30,7 @@ import { briefForSessionTitle, toolRoundsForBrief } from "../tools/brief.ts";
 import type { EvalCase, EvalSuite } from "./cases.ts";
 import { findItinerary } from "./itinerary-file.ts";
 import { computeItineraryMetrics, type ItineraryEvalMetrics } from "./metrics.ts";
+import { requirementFailures } from "./requirements.ts";
 import {
   casesToResume,
   createAttemptDirectory,
@@ -60,6 +64,7 @@ export const EVAL_BUDGET_EXTENSION_STEP = 15;
 const MAX_COMPLETENESS_RETRIES = 2;
 
 interface LiveContext {
+  readonly implementationHash: string;
   readonly config: Awaited<ReturnType<ConfigStore["load"]>>;
   readonly profile: ModelProfile | undefined;
   readonly providerName: string;
@@ -78,6 +83,7 @@ export interface NewLiveRunOptions {
   readonly limit?: number;
   readonly profileFilter?: string;
   readonly onProgress?: (message: string) => void;
+  readonly worldPath?: string;
 }
 
 export interface ResumeLiveRunOptions {
@@ -94,7 +100,11 @@ export interface ResumeLiveRunOptions {
  * 新批次必须使用全新的 run id。live 产物只写入 eval/runs，不再覆盖任何历史批次。
  */
 export async function runNewLiveSuite(options: NewLiveRunOptions): Promise<EvalRunManifest> {
-  const context = await prepareLiveContext(options.rootDir, options.profileFilter);
+  const snapshot = options.worldPath ? await loadExternalWorld(options.worldPath) : undefined;
+  if (snapshot && (options.cases.length !== 1 || !isDeepStrictEqual(options.cases[0], snapshot.world.eval_case))) {
+    throw new Error("固定世界必须使用快照内相同的唯一案例，不能混入其他城市或改写需求");
+  }
+  const context = await prepareLiveContext(options.rootDir, options.profileFilter, !snapshot);
   const suiteHash = sha256(await readFile(options.suitePath, "utf8"));
   const now = new Date().toISOString();
   const manifest: EvalRunManifest = {
@@ -104,6 +114,20 @@ export async function runNewLiveSuite(options: NewLiveRunOptions): Promise<EvalR
     created_at: now,
     updated_at: now,
     mode: "live",
+    architecture: "agent",
+    ...(snapshot ? { external_data: {
+      mode: "frozen" as const,
+      id: snapshot.world.id,
+      version: snapshot.world.version,
+      sha256: snapshot.sha256,
+      implementation_sha256: context.implementationHash,
+      snapshot: "external-world.json" as const,
+      now: snapshot.world.now,
+      time_zone: snapshot.world.time_zone,
+      provenance: snapshot.world.provenance.kind,
+      cache: "cold" as const,
+      assistance: "none" as const,
+    } } : {}),
     suite: {
       id: options.suite.id,
       name: options.suite.name,
@@ -136,6 +160,7 @@ export async function runNewLiveSuite(options: NewLiveRunOptions): Promise<EvalR
     })),
   };
   await createRun(join(options.rootDir, "eval", "runs"), manifest, options.suite);
+  if (snapshot) await writeFile(join(options.rootDir, "eval", "runs", options.runId, "external-world.json"), snapshot.text, "utf8");
   options.onProgress?.(
     `批次 ${options.runId} 已创建 · ${options.suite.id}@${options.suite.version} · ${options.cases.length} 个案例`,
   );
@@ -145,6 +170,8 @@ export async function runNewLiveSuite(options: NewLiveRunOptions): Promise<EvalR
     options.suite,
     context,
     options.onProgress,
+    undefined,
+    snapshot,
   );
 }
 
@@ -157,7 +184,10 @@ export async function resumeLiveSuite(options: ResumeLiveRunOptions): Promise<Ev
   const loaded = await loadManifest(runsRoot, options.runId);
   let manifest = markRunningAttemptsInterrupted(loaded);
   const suite = await loadSuiteSnapshot(runsRoot, options.runId);
-  const context = await prepareLiveContext(options.rootDir, options.profileFilter);
+  const snapshot = manifest.external_data ? await loadExternalWorld(join(runDirectory(runsRoot, manifest.run_id), "external-world.json")) : undefined;
+  if (snapshot && snapshot.sha256 !== manifest.external_data?.sha256) throw new Error("固定世界快照哈希不匹配，不能续跑被修改的场景");
+  if (manifest.external_data && manifest.external_data.implementation_sha256 !== await evalImplementationHash()) throw new Error("评测源码已变化，固定世界续跑不能混合实现版本；请新建批次");
+  const context = await prepareLiveContext(options.rootDir, options.profileFilter, !snapshot);
   requireComparableContext(manifest, context);
 
   const selectedIds = new Set(options.caseIds ?? []);
@@ -197,7 +227,7 @@ export async function resumeLiveSuite(options: ResumeLiveRunOptions): Promise<Ev
   await writeManifest(runsRoot, manifest);
   await writeRunArtifacts(runsRoot, manifest);
   options.onProgress?.(`续跑批次 ${options.runId} · 待运行 ${targets.length} 个未通过案例`);
-  return executeCases(runsRoot, manifest, suite, context, options.onProgress, new Set(targets.map((item) => item.eval_case.id)));
+  return executeCases(runsRoot, manifest, suite, context, options.onProgress, new Set(targets.map((item) => item.eval_case.id)), snapshot);
 }
 
 export function initialToolRoundsForCase(evalCase: Pick<EvalCase, "days" | "request">): number {
@@ -216,9 +246,9 @@ export function defaultRunId(suiteId: string, now: Date = new Date()): string {
   return `${stamp}-${suiteId}`;
 }
 
-async function prepareLiveContext(rootDir: string, profileFilter: string | undefined): Promise<LiveContext> {
+async function prepareLiveContext(rootDir: string, profileFilter: string | undefined, configureAmap = true): Promise<LiveContext> {
   const config = await new ConfigStore(join(rootDir, ".minicode", "config.json")).load();
-  setAmapKey(config.amapApiKey);
+  if (configureAmap) setAmapKey(config.amapApiKey);
   const modelsFile = await new ModelProfileStore(join(rootDir, ".minicode", "models.json")).loadWithSeed(config);
   const profile = modelsFile.profiles.find((item) => item.id === (profileFilter ?? modelsFile.defaultProfile))
     ?? modelsFile.profiles[0];
@@ -229,6 +259,7 @@ async function prepareLiveContext(rootDir: string, profileFilter: string | undef
   const pricing = resolvePricing(config, profile);
   return {
     config,
+    implementationHash: await evalImplementationHash(),
     profile,
     providerName: probe.name,
     model: modelInfo(profile, probe.name, config.deepseekModel, config.llmModel),
@@ -293,6 +324,7 @@ async function executeCases(
   context: LiveContext,
   onProgress?: (message: string) => void,
   selectedCaseIds?: ReadonlySet<string>,
+  snapshot?: WorldSnapshot,
 ): Promise<EvalRunManifest> {
   let manifest = initialManifest;
   const cases = suite.cases.filter(
@@ -307,7 +339,9 @@ async function executeCases(
     const directory = await createAttemptDirectory(runsRoot, manifest.run_id, evalCase.id, attempt);
     const startedAt = new Date().toISOString();
     const started = Date.now();
-    const systemPrompt = composeAttemptPrompt(evalCase, directory, context.config);
+    const worldRuntime = snapshot ? new FrozenWorldRuntime(snapshot.world) : undefined;
+    const makePrompt = () => composeAttemptPrompt(evalCase, directory, context.config);
+    const systemPrompt = worldRuntime ? worldRuntime.run(makePrompt) : makePrompt();
     const prompt = promptInfo(systemPrompt, context.config.systemPrompt);
     let preliminary = attemptRecord({
       evalCase,
@@ -316,6 +350,7 @@ async function executeCases(
       runRoot: runDirectory(runsRoot, manifest.run_id),
       startedAt,
       durationMs: 0,
+      implementationHash: context.implementationHash,
       status: "running",
       model: context.model,
       prompt,
@@ -331,7 +366,7 @@ async function executeCases(
     onProgress?.(`\n▶ ${evalCase.id} · ${evalCase.title} · attempt-${attempt}`);
     let finalized: EvalAttemptRecord;
     try {
-      finalized = await runAttempt({
+      const generate = () => runAttempt({
         runRoot: runDirectory(runsRoot, manifest.run_id),
         directory,
         evalCase,
@@ -342,7 +377,9 @@ async function executeCases(
         prompt,
         context,
         onProgress,
+        frozenWorld: Boolean(snapshot),
       });
+      finalized = worldRuntime ? await worldRuntime.run(generate) : await generate();
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       finalized = {
@@ -357,6 +394,28 @@ async function executeCases(
         note: "生成过程中抛出异常",
         telemetry: { ...preliminary.telemetry, duration_ms: Date.now() - started },
       };
+    }
+    if (worldRuntime) {
+      let checks: ReturnType<typeof checkWorldItinerary> = [];
+      if (finalized.itinerary_path) {
+        try { checks = checkWorldItinerary(worldRuntime.world, parseItinerary(JSON.parse(await readFile(join(runDirectory(runsRoot, manifest.run_id), finalized.itinerary_path), "utf8")))); }
+        catch { /* runAttempt 已记录文件解析失败；仍保存外部数据请求，不能中断整个批次。 */ }
+      }
+      const report = { ...worldRuntime.report(), checks, prior_failure: finalized.failure ?? null };
+      await writeFile(join(directory, "external-data.json"), `${JSON.stringify(report, null, 2)}\n`, "utf8");
+      // 快照缺口使本次结果不可用于能力比较；不把吞掉的上游异常算成正常查无结果。
+      const addedReasons = [
+        ...(report.uncovered.length ? [`世界快照未覆盖 ${report.uncovered.length} 次请求，详见 external-data.json`] : []),
+        ...checks.map((c) => `${c.code}: ${c.message}`),
+      ];
+      if (addedReasons.length) {
+        const reasons = [...addedReasons, ...(finalized.failure?.reasons ?? [])];
+        const stage = report.uncovered.length ? "environment" : finalized.failure?.stage ?? "quality_gate";
+        finalized = { ...finalized,
+          status: report.uncovered.length ? "evaluation_failed" : finalized.failure ? finalized.status : "quality_failed",
+          failure: { stage, reason: reasons.join("；"), reasons },
+        };
+      }
     }
     manifest = upsertAttempt(manifest, finalized);
     await writeAttemptRecord(runsRoot, manifest.run_id, finalized);
@@ -383,8 +442,9 @@ async function runAttempt(input: {
   readonly prompt: EvalPromptInfo;
   readonly context: LiveContext;
   readonly onProgress?: (message: string) => void;
+  readonly frozenWorld?: boolean;
 }): Promise<EvalAttemptRecord> {
-  const registry = createDefaultRegistry({ writeRoot: input.directory, workspace: input.directory });
+  const registry = createDefaultRegistry({ writeRoot: input.directory, workspace: input.directory, allowCommands: !input.frozenWorld });
   const provider = providerFor(input.context, input.systemPrompt);
   const session = new Session();
   session.setTravelMode(true);
@@ -428,6 +488,8 @@ async function runAttempt(input: {
         toolCalls += info.toolCalls;
       },
       onBudgetExhausted: async (current) => {
+        // 固定世界评测测量首次自主完成能力，不自动追加提醒或延长预算救援。
+        if (input.frozenWorld) return false;
         const assessment = await assessToolBudget({
           rootDir: input.directory,
           previousFingerprint,
@@ -486,7 +548,7 @@ async function runAttempt(input: {
     let snapshot = await loadAttemptItinerary(input.directory, input.evalCase);
     itineraryPath = snapshot.path;
     metrics = snapshot.metrics;
-    if (itineraryPath === null && cumulativeBudget.rounds < cumulativeBudget.maxRounds && cumulativeBudget.calls < cumulativeBudget.maxCalls && !cumulativeBudget.costExceeded?.()) {
+    if (!input.frozenWorld && itineraryPath === null && cumulativeBudget.rounds < cumulativeBudget.maxRounds && cumulativeBudget.calls < cumulativeBudget.maxCalls && !cumulativeBudget.costExceeded?.()) {
       input.onProgress?.("  ↻ 首轮未产出行程，追加一次确认后重试");
       completionRetries += 1;
       await runTurn(
@@ -499,6 +561,7 @@ async function runAttempt(input: {
     }
     while (
       metrics !== null &&
+      !input.frozenWorld &&
       metrics.days < input.evalCase.days &&
       completionRetries < MAX_COMPLETENESS_RETRIES && cumulativeBudget.rounds < cumulativeBudget.maxRounds && cumulativeBudget.calls < cumulativeBudget.maxCalls && !cumulativeBudget.costExceeded?.()
     ) {
@@ -572,6 +635,7 @@ async function runAttempt(input: {
     runRoot: input.runRoot,
     startedAt: input.startedAt,
     durationMs,
+    implementationHash: input.context.implementationHash,
     status,
     model: input.context.model,
     prompt: input.prompt,
@@ -608,21 +672,24 @@ function composeAttemptPrompt(
   });
 }
 
-async function loadAttemptItinerary(
+export async function loadAttemptItinerary(
   directory: string,
   evalCase: EvalCase,
 ): Promise<{ readonly path: string | null; readonly metrics: ItineraryEvalMetrics | null }> {
   const path = await findItinerary(directory, evalCase.title, evalCase.days);
   if (path === null) return { path: null, metrics: null };
+  const { plan, evidence } = await loadItineraryQualityInputs(directory, parseItinerary(JSON.parse(await readFile(path, "utf8"))));
   const metrics = computeItineraryMetrics(
-    JSON.parse(await readFile(path, "utf8")) as Parameters<typeof computeItineraryMetrics>[0],
+    bindItineraryEvidence(plan, evidence),
     {
       expectedDays: evalCase.days,
       mustVisit: evalCase.must_visit,
+      requirements: evalCase.requirements,
       ...(evalCase.budget_per_person_yuan === undefined
         ? {}
         : { budgetPerPersonYuan: evalCase.budget_per_person_yuan }),
     },
+    evidence,
   );
   return { path, metrics };
 }
@@ -635,7 +702,7 @@ function completenessRetryPrompt(evalCase: EvalCase, savedDays: number): string 
   );
 }
 
-function failureFor(
+export function failureFor(
   evalCase: EvalCase,
   itineraryPath: string | null,
   metrics: ItineraryEvalMetrics | null,
@@ -662,6 +729,7 @@ function failureFor(
     const codes = metrics.issueCodes.length === 0 ? "" : `（${metrics.issueCodes.join(", ")}）`;
     reasons.push(`P0 ${metrics.issueCounts.P0} / P1 ${metrics.issueCounts.P1}${codes}`);
   }
+  reasons.push(...requirementFailures(metrics));
 
   if (reasons.length === 0) return null;
   return {
@@ -671,7 +739,7 @@ function failureFor(
   };
 }
 
-function statusForFailure(failure: EvalAttemptFailure | null): EvalAttemptStatus {
+export function statusForFailure(failure: EvalAttemptFailure | null): EvalAttemptStatus {
   if (failure === null) return "passed";
   if (failure.stage === "quality_gate") return "quality_failed";
   if (failure.stage === "evaluation") return "evaluation_failed";
@@ -746,7 +814,8 @@ function attemptTelemetry(
   };
 }
 
-function attemptRecord(input: {
+export function attemptRecord(input: {
+  readonly implementationHash: string;
   readonly evalCase: EvalCase;
   readonly attempt: number;
   readonly directory: string;
@@ -765,6 +834,7 @@ function attemptRecord(input: {
 }): EvalAttemptRecord {
   return {
     attempt: input.attempt,
+    implementation_sha256: input.implementationHash,
     case_id: input.evalCase.id,
     status: input.status,
     started_at: input.startedAt,

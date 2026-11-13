@@ -11,6 +11,7 @@ export function isConcreteStayName(name: string): boolean { return !stayLabel(na
 export function compatibleStay(a: ItineraryItem, b: ItineraryItem): boolean {
   const differentIds = a.evidence_id && b.evidence_id && a.evidence_id !== b.evidence_id;
   const x = a.location, y = b.location;
+  if (x?.poi_id && y?.poi_id) return x.poi_id === y.poi_id;
   if (x?.latitude !== undefined && x.longitude !== undefined && y?.latitude !== undefined && y.longitude !== undefined) {
     const p = convertPoint({ latitude: x.latitude, longitude: x.longitude, crs: x.crs ?? (["amap", "amap-resolved"].includes(x.source ?? a.source ?? "") ? "gcj02" : "wgs84") }, "wgs84");
     const q = convertPoint({ latitude: y.latitude, longitude: y.longitude, crs: y.crs ?? (["amap", "amap-resolved"].includes(y.source ?? b.source ?? "") ? "gcj02" : "wgs84") }, "wgs84");
@@ -29,7 +30,7 @@ export function normalizeStayReferences(itinerary: Itinerary, knownNames: readon
   const base = uniqueNames.length === 1 ? uniqueNames[0] : itinerary.constraints?.base_stay_name ?? concrete[0]?.name;
   return { ...itinerary, days: itinerary.days.map((day) => {
     const dayNames = [...new Set(day.items.filter((item) => item.type === "accommodation").map((item) => stayLabel(item.name).name).filter((name) => names.has(name)))];
-    const genericBase = itinerary.constraints?.allow_hotel_changes === true ? dayNames.length === 1 ? dayNames[0] : undefined : base ?? (dayNames.length === 1 ? dayNames[0] : undefined);
+    const genericBase = itinerary.constraints?.allow_hotel_changes === false ? base ?? (dayNames.length === 1 ? dayNames[0] : undefined) : dayNames.length === 1 ? dayNames[0] : undefined;
     const aliases = new Map<string, string>();
     const stays = day.items.map((item) => {
       if (item.type !== "accommodation") return item;

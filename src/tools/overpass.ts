@@ -1,3 +1,4 @@
+import { externalState } from "../core/external-environment.ts";
 type FetchLike = typeof fetch;
 
 /**
@@ -32,15 +33,16 @@ const mirrorCooldownUntil = new Map<string, number>();
 
 /** 没刚失败过的镜像排前面：避免每次都先在同一个坏节点上耗满超时 */
 function mirrorsByHealth(): string[] {
+  const cooldown = externalState("overpass-health", mirrorCooldownUntil, () => new Map<string, number>());
   const now = Date.now();
-  return OVERPASS_URLS.map((url) => ({ url, cooling: (mirrorCooldownUntil.get(url) ?? 0) > now }))
+  return OVERPASS_URLS.map((url) => ({ url, cooling: (cooldown.get(url) ?? 0) > now }))
     .sort((a, b) => Number(a.cooling) - Number(b.cooling))
     .map((entry) => entry.url);
 }
 
 /** 记一次失败（进冷却）并返回给用户看的错误前缀 */
 function noteFailure(url: string, reason: string): string {
-  mirrorCooldownUntil.set(url, Date.now() + MIRROR_COOLDOWN_MS);
+  externalState("overpass-health", mirrorCooldownUntil, () => new Map<string, number>()).set(url, Date.now() + MIRROR_COOLDOWN_MS);
   return `${hostOf(url)}: ${reason}`;
 }
 
@@ -87,7 +89,7 @@ class TtlCache<T> {
   }
 }
 
-const responseCache = new TtlCache<OverpassResponse>(10 * 60_000, 50);
+const liveResponseCache = new TtlCache<OverpassResponse>(10 * 60_000, 50);
 
 /**
  * 执行 Overpass 查询（OpenStreetMap 数据，免费无 Key）。
@@ -103,6 +105,7 @@ export async function overpassQuery(
   fetchFn: FetchLike = fetch,
   signal?: AbortSignal,
 ): Promise<OverpassResponse> {
+  const responseCache = externalState("overpass-cache", liveResponseCache, () => new TtlCache<OverpassResponse>(10 * 60_000, 50));
   signal?.throwIfAborted();
   const cached = responseCache.get(query);
   if (cached !== undefined) {
@@ -157,7 +160,7 @@ export async function overpassQuery(
 
   throw new Error(
     `Overpass 服务暂时不可用（已尝试 ${attempts} 个镜像，最后错误: ${lastError}）。` +
-    "公共服务负载波动，建议稍后重试或先用其他工具（如 get_place_reviews）",
+    "公共服务负载波动，建议稍后重试或先用高德地点搜索工具",
   );
 }
 

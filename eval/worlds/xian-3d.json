@@ -1,0 +1,1148 @@
+{
+  "schema_version": 1,
+  "id": "xian-3d-frozen",
+  "version": "3",
+  "description": "西安三日固定外部数据评测",
+  "provenance": {
+    "kind": "synthetic",
+    "note": "人工构造的测试世界。名称与坐标仅用于实体/空间场景；开放时间、价格、网页正文、天气和OD均为模拟数据，不代表实时事实，不可作为真实出游依据。路线表由一次性模拟规则生成后固定保存。版本3的开放信息通过固定搜索结果与页面链接取得，开放时间及验收事实沿用版本1。"
+  },
+  "now": "2026-11-06T09:00:00+08:00",
+  "time_zone": "Asia/Shanghai",
+  "eval_case": {
+    "id": "xian-3d-frozen",
+    "title": "西安三日固定场景",
+    "days": 3,
+    "must_visit": [
+      "兵马俑",
+      "陕西历史博物馆",
+      "大雁塔"
+    ],
+    "budget_per_person_yuan": 2000,
+    "tags": [
+      "frozen-world",
+      "3d",
+      "alias",
+      "closure",
+      "parent-child"
+    ],
+    "request": "为两位成人安排2026年11月9日至11月11日西安三日游，人均总预算2000元。必去兵马俑、陕西历史博物馆、大雁塔；住同一家酒店，节奏适中，允许晚间游玩，不要未经允许跨日重复景点。请查询行程期间天气、开放时间及交通，按天保存完整行程并复核。"
+  },
+  "travel_dates": [
+    "2026-11-09",
+    "2026-11-10",
+    "2026-11-11"
+  ],
+  "city": {
+    "name": "西安市",
+    "aliases": [
+      "西安",
+      "陕西省西安市"
+    ],
+    "province": "陕西省",
+    "adcode": "610100",
+    "location": "108.9465,34.2600"
+  },
+  "places": [
+    {
+      "id": "terracotta",
+      "name": "秦始皇帝陵博物院",
+      "aliases": [
+        "兵马俑",
+        "兵马俑博物馆",
+        "秦始皇兵马俑博物馆"
+      ],
+      "kind": "museum",
+      "location": "109.2785,34.3845",
+      "rating": 4.8,
+      "cost": 120,
+      "type": "风景名胜;博物馆",
+      "address": "西安市测试场景地址",
+      "hours": {
+        "opens": "08:30",
+        "closes": "17:00",
+        "closed_on": []
+      },
+      "pages": [
+        {
+          "url": "https://xian-world.example/terracotta/index.html",
+          "title": "秦始皇帝陵博物院参观服务",
+          "text": "秦始皇帝陵博物院的参观服务入口，请查看参观指南获取开放时间和闭馆安排。",
+          "links": [
+            "https://xian-world.example/terracotta/guide.html"
+          ]
+        },
+        {
+          "url": "https://xian-world.example/terracotta/guide.html",
+          "title": "秦始皇帝陵博物院参观指南与开放时间",
+          "text": "秦始皇帝陵博物院参观信息。开放时间08:30-17:00。本测试场景无每周固定闭馆日。建议游玩2小时。参考价120元。资料发布日期：2026年11月6日。",
+          "search": false
+        }
+      ]
+    },
+    {
+      "id": "pit-one",
+      "name": "兵马俑一号坑",
+      "aliases": [
+        "一号坑"
+      ],
+      "kind": "attraction",
+      "location": "109.2786,34.3846",
+      "rating": 4.8,
+      "cost": 0,
+      "type": "风景名胜;景区内部推荐",
+      "address": "西安市测试场景地址",
+      "hours": {
+        "opens": "08:30",
+        "closes": "17:00",
+        "closed_on": []
+      },
+      "pages": [
+        {
+          "url": "https://xian-world.example/pit-one/index.html",
+          "title": "兵马俑一号坑参观服务",
+          "text": "兵马俑一号坑的参观服务入口，请查看参观指南获取开放时间和闭馆安排。",
+          "links": [
+            "https://xian-world.example/pit-one/guide.html"
+          ]
+        },
+        {
+          "url": "https://xian-world.example/pit-one/guide.html",
+          "title": "兵马俑一号坑参观指南与开放时间",
+          "text": "兵马俑一号坑参观信息。开放时间08:30-17:00。本测试场景无每周固定闭馆日。建议游玩2小时。参考价0元。资料发布日期：2026年11月6日。",
+          "search": false
+        }
+      ],
+      "parent": "terracotta"
+    },
+    {
+      "id": "shaanxi-history",
+      "name": "陕西历史博物馆",
+      "aliases": [
+        "陕历博",
+        "陕西省历史博物馆"
+      ],
+      "kind": "museum",
+      "location": "108.9555,34.2240",
+      "rating": 4.8,
+      "cost": 0,
+      "type": "科教文化;博物馆",
+      "address": "西安市测试场景地址",
+      "hours": {
+        "opens": "09:00",
+        "closes": "17:30",
+        "closed_on": [
+          1
+        ]
+      },
+      "pages": [
+        {
+          "url": "https://xian-world.example/shaanxi-history/index.html",
+          "title": "陕西历史博物馆参观服务",
+          "text": "陕西历史博物馆的参观服务入口，请查看参观指南获取开放时间和闭馆安排。",
+          "links": [
+            "https://xian-world.example/shaanxi-history/guide.html"
+          ]
+        },
+        {
+          "url": "https://xian-world.example/shaanxi-history/guide.html",
+          "title": "陕西历史博物馆参观指南与开放时间",
+          "text": "陕西历史博物馆参观信息。开放时间09:00-17:30。每周一闭馆，法定节假日是否调整请另行确认。建议游玩2小时。参考价0元。资料发布日期：2026年11月6日。",
+          "search": false
+        }
+      ]
+    },
+    {
+      "id": "big-pagoda",
+      "name": "大雁塔",
+      "aliases": [
+        "大雁塔文化休闲景区",
+        "大慈恩寺"
+      ],
+      "kind": "attraction",
+      "location": "108.9640,34.2185",
+      "rating": 4.7,
+      "cost": 40,
+      "type": "风景名胜;寺庙",
+      "address": "西安市测试场景地址",
+      "hours": {
+        "opens": "08:30",
+        "closes": "17:30",
+        "closed_on": []
+      },
+      "pages": [
+        {
+          "url": "https://xian-world.example/big-pagoda/index.html",
+          "title": "大雁塔参观服务",
+          "text": "大雁塔的参观服务入口，请查看参观指南获取开放时间和闭馆安排。",
+          "links": [
+            "https://xian-world.example/big-pagoda/guide.html"
+          ]
+        },
+        {
+          "url": "https://xian-world.example/big-pagoda/guide.html",
+          "title": "大雁塔参观指南与开放时间",
+          "text": "大雁塔参观信息。开放时间08:30-17:30。本测试场景无每周固定闭馆日。建议游玩2小时。参考价40元。资料发布日期：2026年11月6日。",
+          "search": false
+        }
+      ]
+    },
+    {
+      "id": "city-wall",
+      "name": "西安城墙",
+      "aliases": [
+        "西安城墙景区",
+        "永宁门"
+      ],
+      "kind": "attraction",
+      "location": "108.9470,34.2510",
+      "rating": 4.7,
+      "cost": 54,
+      "type": "风景名胜;历史古迹",
+      "address": "西安市测试场景地址",
+      "hours": {
+        "opens": "08:00",
+        "closes": "20:00",
+        "closed_on": []
+      },
+      "pages": [
+        {
+          "url": "https://xian-world.example/city-wall/index.html",
+          "title": "西安城墙参观服务",
+          "text": "西安城墙的参观服务入口，请查看参观指南获取开放时间和闭馆安排。",
+          "links": [
+            "https://xian-world.example/city-wall/guide.html"
+          ]
+        },
+        {
+          "url": "https://xian-world.example/city-wall/guide.html",
+          "title": "西安城墙参观指南与开放时间",
+          "text": "西安城墙参观信息。开放时间08:00-20:00。本测试场景无每周固定闭馆日。建议游玩2小时。参考价54元。资料发布日期：2026年11月6日。",
+          "search": false
+        }
+      ]
+    },
+    {
+      "id": "beilin",
+      "name": "西安碑林博物馆",
+      "aliases": [
+        "碑林博物馆"
+      ],
+      "kind": "museum",
+      "location": "108.9530,34.2520",
+      "rating": 4.7,
+      "cost": 65,
+      "type": "科教文化;博物馆",
+      "address": "西安市测试场景地址",
+      "hours": {
+        "opens": "09:00",
+        "closes": "17:00",
+        "closed_on": [
+          1
+        ]
+      },
+      "pages": [
+        {
+          "url": "https://xian-world.example/beilin/index.html",
+          "title": "西安碑林博物馆参观服务",
+          "text": "西安碑林博物馆的参观服务入口，请查看参观指南获取开放时间和闭馆安排。",
+          "links": [
+            "https://xian-world.example/beilin/guide.html"
+          ]
+        },
+        {
+          "url": "https://xian-world.example/beilin/guide.html",
+          "title": "西安碑林博物馆参观指南与开放时间",
+          "text": "西安碑林博物馆参观信息。开放时间09:00-17:00。每周一闭馆，法定节假日是否调整请另行确认。建议游玩2小时。参考价65元。资料发布日期：2026年11月6日。",
+          "search": false
+        }
+      ]
+    },
+    {
+      "id": "night-city",
+      "name": "大唐不夜城",
+      "aliases": [
+        "大唐不夜城步行街"
+      ],
+      "kind": "attraction",
+      "location": "108.9640,34.2130",
+      "rating": 4.6,
+      "cost": 0,
+      "type": "风景名胜;步行街",
+      "address": "西安市测试场景地址",
+      "hours": {
+        "opens": "00:00",
+        "closes": "23:59",
+        "closed_on": []
+      },
+      "pages": [
+        {
+          "url": "https://xian-world.example/night-city/index.html",
+          "title": "大唐不夜城参观服务",
+          "text": "大唐不夜城的参观服务入口，请查看参观指南获取开放时间和闭馆安排。",
+          "links": [
+            "https://xian-world.example/night-city/guide.html"
+          ]
+        },
+        {
+          "url": "https://xian-world.example/night-city/guide.html",
+          "title": "大唐不夜城参观指南与开放时间",
+          "text": "大唐不夜城参观信息。开放时间00:00-23:59。本测试场景无每周固定闭馆日。建议游玩2小时。参考价0元。资料发布日期：2026年11月6日。",
+          "search": false
+        }
+      ]
+    },
+    {
+      "id": "muslim-quarter",
+      "name": "回民街",
+      "aliases": [
+        "北院门风情街"
+      ],
+      "kind": "attraction",
+      "location": "108.9390,34.2640",
+      "rating": 4.4,
+      "cost": 0,
+      "type": "风景名胜;步行街",
+      "address": "西安市测试场景地址",
+      "hours": {
+        "opens": "00:00",
+        "closes": "23:59",
+        "closed_on": []
+      },
+      "pages": [
+        {
+          "url": "https://xian-world.example/muslim-quarter/index.html",
+          "title": "回民街参观服务",
+          "text": "回民街的参观服务入口，请查看参观指南获取开放时间和闭馆安排。",
+          "links": [
+            "https://xian-world.example/muslim-quarter/guide.html"
+          ]
+        },
+        {
+          "url": "https://xian-world.example/muslim-quarter/guide.html",
+          "title": "回民街参观指南与开放时间",
+          "text": "回民街参观信息。开放时间00:00-23:59。本测试场景无每周固定闭馆日。建议游玩2小时。参考价0元。资料发布日期：2026年11月6日。",
+          "search": false
+        }
+      ]
+    },
+    {
+      "id": "bell-tower",
+      "name": "西安钟楼",
+      "aliases": [
+        "钟楼"
+      ],
+      "kind": "attraction",
+      "location": "108.9465,34.2600",
+      "rating": 4.5,
+      "cost": 30,
+      "type": "风景名胜;历史古迹",
+      "address": "西安市测试场景地址",
+      "hours": {
+        "opens": "08:30",
+        "closes": "18:00",
+        "closed_on": []
+      },
+      "pages": [
+        {
+          "url": "https://xian-world.example/bell-tower/index.html",
+          "title": "西安钟楼参观服务",
+          "text": "西安钟楼的参观服务入口，请查看参观指南获取开放时间和闭馆安排。",
+          "links": [
+            "https://xian-world.example/bell-tower/guide.html"
+          ]
+        },
+        {
+          "url": "https://xian-world.example/bell-tower/guide.html",
+          "title": "西安钟楼参观指南与开放时间",
+          "text": "西安钟楼参观信息。开放时间08:30-18:00。本测试场景无每周固定闭馆日。建议游玩2小时。参考价30元。资料发布日期：2026年11月6日。",
+          "search": false
+        }
+      ]
+    },
+    {
+      "id": "hotel",
+      "name": "西安场景酒店钟楼店",
+      "aliases": [
+        "场景酒店",
+        "钟楼场景酒店"
+      ],
+      "kind": "stay",
+      "location": "108.9450,34.2570",
+      "rating": 4.6,
+      "cost": 320,
+      "type": "住宿服务;酒店",
+      "address": "西安市测试场景地址",
+      "hours": {
+        "opens": "00:00",
+        "closes": "23:59",
+        "closed_on": []
+      },
+      "pages": [
+        {
+          "url": "https://xian-world.example/hotel/index.html",
+          "title": "西安场景酒店钟楼店参观服务",
+          "text": "西安场景酒店钟楼店的参观服务入口，请查看参观指南获取开放时间和闭馆安排。",
+          "links": [
+            "https://xian-world.example/hotel/guide.html"
+          ]
+        },
+        {
+          "url": "https://xian-world.example/hotel/guide.html",
+          "title": "西安场景酒店钟楼店参观指南与开放时间",
+          "text": "西安场景酒店钟楼店入住14:00后，退房12:00前。参考房价320元/房/晚，双人间。",
+          "search": false
+        }
+      ]
+    },
+    {
+      "id": "food-central",
+      "name": "场景老碗面馆",
+      "aliases": [
+        "老碗面馆"
+      ],
+      "kind": "restaurant",
+      "location": "108.9470,34.2590",
+      "rating": 4.6,
+      "cost": 38,
+      "type": "餐饮服务;中餐厅;陕西面食",
+      "address": "西安市测试场景地址",
+      "hours": {
+        "opens": "09:00",
+        "closes": "22:00",
+        "closed_on": []
+      },
+      "pages": [
+        {
+          "url": "https://xian-world.example/food-central/index.html",
+          "title": "场景老碗面馆参观服务",
+          "text": "场景老碗面馆的参观服务入口，请查看参观指南获取开放时间和闭馆安排。",
+          "links": [
+            "https://xian-world.example/food-central/guide.html"
+          ]
+        },
+        {
+          "url": "https://xian-world.example/food-central/guide.html",
+          "title": "场景老碗面馆参观指南与开放时间",
+          "text": "场景老碗面馆营业时间09:00-22:00，人均38元，评分4.6分，1000条评价，本地陕西特色。",
+          "search": false
+        }
+      ]
+    },
+    {
+      "id": "food-south",
+      "name": "场景长安陕菜馆",
+      "aliases": [
+        "长安陕菜馆"
+      ],
+      "kind": "restaurant",
+      "location": "108.9580,34.2200",
+      "rating": 4.5,
+      "cost": 68,
+      "type": "餐饮服务;中餐厅;陕菜",
+      "address": "西安市测试场景地址",
+      "hours": {
+        "opens": "10:00",
+        "closes": "22:00",
+        "closed_on": []
+      },
+      "pages": [
+        {
+          "url": "https://xian-world.example/food-south/index.html",
+          "title": "场景长安陕菜馆参观服务",
+          "text": "场景长安陕菜馆的参观服务入口，请查看参观指南获取开放时间和闭馆安排。",
+          "links": [
+            "https://xian-world.example/food-south/guide.html"
+          ]
+        },
+        {
+          "url": "https://xian-world.example/food-south/guide.html",
+          "title": "场景长安陕菜馆参观指南与开放时间",
+          "text": "场景长安陕菜馆营业时间10:00-22:00，人均68元，评分4.5分，1000条评价，本地陕西特色。",
+          "search": false
+        }
+      ]
+    },
+    {
+      "id": "food-east",
+      "name": "场景临潼泡馍馆",
+      "aliases": [
+        "临潼泡馍馆"
+      ],
+      "kind": "restaurant",
+      "location": "109.2760,34.3820",
+      "rating": 4.5,
+      "cost": 45,
+      "type": "餐饮服务;中餐厅;羊肉泡馍",
+      "address": "西安市测试场景地址",
+      "hours": {
+        "opens": "09:00",
+        "closes": "21:00",
+        "closed_on": []
+      },
+      "pages": [
+        {
+          "url": "https://xian-world.example/food-east/index.html",
+          "title": "场景临潼泡馍馆参观服务",
+          "text": "场景临潼泡馍馆的参观服务入口，请查看参观指南获取开放时间和闭馆安排。",
+          "links": [
+            "https://xian-world.example/food-east/guide.html"
+          ]
+        },
+        {
+          "url": "https://xian-world.example/food-east/guide.html",
+          "title": "场景临潼泡馍馆参观指南与开放时间",
+          "text": "场景临潼泡馍馆营业时间09:00-21:00，人均45元，评分4.5分，1000条评价，本地陕西特色。",
+          "search": false
+        }
+      ]
+    }
+  ],
+  "routes": [
+    {
+      "to": "shaanxi-history",
+      "distance_m": 48506,
+      "driving_minutes": 81,
+      "transit_minutes": 110,
+      "walking_minutes": 520,
+      "from": "terracotta"
+    },
+    {
+      "to": "big-pagoda",
+      "distance_m": 48024,
+      "driving_minutes": 80,
+      "transit_minutes": 110,
+      "walking_minutes": 515,
+      "from": "terracotta"
+    },
+    {
+      "to": "city-wall",
+      "distance_m": 47470,
+      "driving_minutes": 79,
+      "transit_minutes": 110,
+      "walking_minutes": 509,
+      "from": "terracotta"
+    },
+    {
+      "to": "beilin",
+      "distance_m": 46708,
+      "driving_minutes": 78,
+      "transit_minutes": 110,
+      "walking_minutes": 500,
+      "from": "terracotta"
+    },
+    {
+      "to": "night-city",
+      "distance_m": 48489,
+      "driving_minutes": 81,
+      "transit_minutes": 110,
+      "walking_minutes": 520,
+      "from": "terracotta"
+    },
+    {
+      "to": "muslim-quarter",
+      "distance_m": 47568,
+      "driving_minutes": 79,
+      "transit_minutes": 110,
+      "walking_minutes": 510,
+      "from": "terracotta"
+    },
+    {
+      "to": "bell-tower",
+      "distance_m": 46935,
+      "driving_minutes": 78,
+      "transit_minutes": 110,
+      "walking_minutes": 503,
+      "from": "terracotta"
+    },
+    {
+      "to": "hotel",
+      "distance_m": 47304,
+      "driving_minutes": 79,
+      "transit_minutes": 110,
+      "walking_minutes": 507,
+      "from": "terracotta"
+    },
+    {
+      "to": "food-central",
+      "distance_m": 46940,
+      "driving_minutes": 78,
+      "transit_minutes": 110,
+      "walking_minutes": 503,
+      "from": "terracotta"
+    },
+    {
+      "to": "food-south",
+      "distance_m": 48555,
+      "driving_minutes": 81,
+      "transit_minutes": 110,
+      "walking_minutes": 520,
+      "from": "terracotta"
+    },
+    {
+      "to": "food-east",
+      "distance_m": 505,
+      "driving_minutes": 75,
+      "transit_minutes": 110,
+      "walking_minutes": 5,
+      "from": "terracotta"
+    },
+    {
+      "to": "big-pagoda",
+      "distance_m": 1389,
+      "driving_minutes": 10,
+      "transit_minutes": 17,
+      "walking_minutes": 15,
+      "from": "shaanxi-history"
+    },
+    {
+      "to": "city-wall",
+      "distance_m": 4336,
+      "driving_minutes": 15,
+      "transit_minutes": 23,
+      "walking_minutes": 46,
+      "from": "shaanxi-history"
+    },
+    {
+      "to": "beilin",
+      "distance_m": 4363,
+      "driving_minutes": 15,
+      "transit_minutes": 23,
+      "walking_minutes": 47,
+      "from": "shaanxi-history"
+    },
+    {
+      "to": "night-city",
+      "distance_m": 2030,
+      "driving_minutes": 11,
+      "transit_minutes": 19,
+      "walking_minutes": 22,
+      "from": "shaanxi-history"
+    },
+    {
+      "to": "muslim-quarter",
+      "distance_m": 6569,
+      "driving_minutes": 18,
+      "transit_minutes": 27,
+      "walking_minutes": 70,
+      "from": "shaanxi-history"
+    },
+    {
+      "to": "bell-tower",
+      "distance_m": 5713,
+      "driving_minutes": 17,
+      "transit_minutes": 25,
+      "walking_minutes": 61,
+      "from": "shaanxi-history"
+    },
+    {
+      "to": "hotel",
+      "distance_m": 5304,
+      "driving_minutes": 16,
+      "transit_minutes": 24,
+      "walking_minutes": 57,
+      "from": "shaanxi-history"
+    },
+    {
+      "to": "food-central",
+      "distance_m": 5548,
+      "driving_minutes": 16,
+      "transit_minutes": 25,
+      "walking_minutes": 59,
+      "from": "shaanxi-history"
+    },
+    {
+      "to": "food-south",
+      "distance_m": 700,
+      "driving_minutes": 9,
+      "transit_minutes": 16,
+      "walking_minutes": 8,
+      "from": "shaanxi-history"
+    },
+    {
+      "to": "food-east",
+      "distance_m": 48031,
+      "driving_minutes": 80,
+      "transit_minutes": 110,
+      "walking_minutes": 515,
+      "from": "shaanxi-history"
+    },
+    {
+      "to": "city-wall",
+      "distance_m": 5505,
+      "driving_minutes": 16,
+      "transit_minutes": 25,
+      "walking_minutes": 59,
+      "from": "big-pagoda"
+    },
+    {
+      "to": "beilin",
+      "distance_m": 5395,
+      "driving_minutes": 16,
+      "transit_minutes": 25,
+      "walking_minutes": 58,
+      "from": "big-pagoda"
+    },
+    {
+      "to": "night-city",
+      "distance_m": 855,
+      "driving_minutes": 9,
+      "transit_minutes": 17,
+      "walking_minutes": 9,
+      "from": "big-pagoda"
+    },
+    {
+      "to": "muslim-quarter",
+      "distance_m": 7769,
+      "driving_minutes": 20,
+      "transit_minutes": 29,
+      "walking_minutes": 83,
+      "from": "big-pagoda"
+    },
+    {
+      "to": "bell-tower",
+      "distance_m": 6832,
+      "driving_minutes": 18,
+      "transit_minutes": 27,
+      "walking_minutes": 73,
+      "from": "big-pagoda"
+    },
+    {
+      "to": "hotel",
+      "distance_m": 6464,
+      "driving_minutes": 18,
+      "transit_minutes": 27,
+      "walking_minutes": 69,
+      "from": "big-pagoda"
+    },
+    {
+      "to": "food-central",
+      "distance_m": 6664,
+      "driving_minutes": 18,
+      "transit_minutes": 27,
+      "walking_minutes": 71,
+      "from": "big-pagoda"
+    },
+    {
+      "to": "food-south",
+      "distance_m": 807,
+      "driving_minutes": 9,
+      "transit_minutes": 16,
+      "walking_minutes": 9,
+      "from": "big-pagoda"
+    },
+    {
+      "to": "food-east",
+      "distance_m": 47544,
+      "driving_minutes": 79,
+      "transit_minutes": 110,
+      "walking_minutes": 509,
+      "from": "big-pagoda"
+    },
+    {
+      "to": "beilin",
+      "distance_m": 788,
+      "driving_minutes": 9,
+      "transit_minutes": 16,
+      "walking_minutes": 8,
+      "from": "city-wall"
+    },
+    {
+      "to": "night-city",
+      "distance_m": 6298,
+      "driving_minutes": 17,
+      "transit_minutes": 26,
+      "walking_minutes": 67,
+      "from": "city-wall"
+    },
+    {
+      "to": "muslim-quarter",
+      "distance_m": 2268,
+      "driving_minutes": 11,
+      "transit_minutes": 19,
+      "walking_minutes": 24,
+      "from": "city-wall"
+    },
+    {
+      "to": "bell-tower",
+      "distance_m": 1400,
+      "driving_minutes": 10,
+      "transit_minutes": 18,
+      "walking_minutes": 15,
+      "from": "city-wall"
+    },
+    {
+      "to": "hotel",
+      "distance_m": 967,
+      "driving_minutes": 9,
+      "transit_minutes": 17,
+      "walking_minutes": 10,
+      "from": "city-wall"
+    },
+    {
+      "to": "food-central",
+      "distance_m": 1243,
+      "driving_minutes": 10,
+      "transit_minutes": 17,
+      "walking_minutes": 13,
+      "from": "city-wall"
+    },
+    {
+      "to": "food-south",
+      "distance_m": 5021,
+      "driving_minutes": 16,
+      "transit_minutes": 24,
+      "walking_minutes": 54,
+      "from": "city-wall"
+    },
+    {
+      "to": "food-east",
+      "distance_m": 47012,
+      "driving_minutes": 79,
+      "transit_minutes": 110,
+      "walking_minutes": 504,
+      "from": "city-wall"
+    },
+    {
+      "to": "night-city",
+      "distance_m": 6224,
+      "driving_minutes": 17,
+      "transit_minutes": 26,
+      "walking_minutes": 67,
+      "from": "beilin"
+    },
+    {
+      "to": "muslim-quarter",
+      "distance_m": 2594,
+      "driving_minutes": 12,
+      "transit_minutes": 20,
+      "walking_minutes": 28,
+      "from": "beilin"
+    },
+    {
+      "to": "bell-tower",
+      "distance_m": 1499,
+      "driving_minutes": 10,
+      "transit_minutes": 18,
+      "walking_minutes": 16,
+      "from": "beilin"
+    },
+    {
+      "to": "hotel",
+      "distance_m": 1291,
+      "driving_minutes": 10,
+      "transit_minutes": 17,
+      "walking_minutes": 14,
+      "from": "beilin"
+    },
+    {
+      "to": "food-central",
+      "distance_m": 1334,
+      "driving_minutes": 10,
+      "transit_minutes": 17,
+      "walking_minutes": 14,
+      "from": "beilin"
+    },
+    {
+      "to": "food-south",
+      "distance_m": 5014,
+      "driving_minutes": 16,
+      "transit_minutes": 24,
+      "walking_minutes": 54,
+      "from": "beilin"
+    },
+    {
+      "to": "food-east",
+      "distance_m": 46248,
+      "driving_minutes": 77,
+      "transit_minutes": 110,
+      "walking_minutes": 496,
+      "from": "beilin"
+    },
+    {
+      "to": "muslim-quarter",
+      "distance_m": 8555,
+      "driving_minutes": 21,
+      "transit_minutes": 30,
+      "walking_minutes": 92,
+      "from": "night-city"
+    },
+    {
+      "to": "bell-tower",
+      "distance_m": 7644,
+      "driving_minutes": 19,
+      "transit_minutes": 29,
+      "walking_minutes": 82,
+      "from": "night-city"
+    },
+    {
+      "to": "hotel",
+      "distance_m": 7262,
+      "driving_minutes": 19,
+      "transit_minutes": 28,
+      "walking_minutes": 78,
+      "from": "night-city"
+    },
+    {
+      "to": "food-central",
+      "distance_m": 7476,
+      "driving_minutes": 19,
+      "transit_minutes": 28,
+      "walking_minutes": 80,
+      "from": "night-city"
+    },
+    {
+      "to": "food-south",
+      "distance_m": 1334,
+      "driving_minutes": 10,
+      "transit_minutes": 17,
+      "walking_minutes": 14,
+      "from": "night-city"
+    },
+    {
+      "to": "food-east",
+      "distance_m": 48006,
+      "driving_minutes": 80,
+      "transit_minutes": 110,
+      "walking_minutes": 514,
+      "from": "night-city"
+    },
+    {
+      "to": "bell-tower",
+      "distance_m": 1149,
+      "driving_minutes": 10,
+      "transit_minutes": 17,
+      "walking_minutes": 12,
+      "from": "muslim-quarter"
+    },
+    {
+      "to": "hotel",
+      "distance_m": 1334,
+      "driving_minutes": 10,
+      "transit_minutes": 17,
+      "walking_minutes": 14,
+      "from": "muslim-quarter"
+    },
+    {
+      "to": "food-central",
+      "distance_m": 1291,
+      "driving_minutes": 10,
+      "transit_minutes": 17,
+      "walking_minutes": 14,
+      "from": "muslim-quarter"
+    },
+    {
+      "to": "food-south",
+      "distance_m": 7262,
+      "driving_minutes": 19,
+      "transit_minutes": 28,
+      "walking_minutes": 78,
+      "from": "muslim-quarter"
+    },
+    {
+      "to": "food-east",
+      "distance_m": 47120,
+      "driving_minutes": 79,
+      "transit_minutes": 110,
+      "walking_minutes": 505,
+      "from": "muslim-quarter"
+    },
+    {
+      "to": "hotel",
+      "distance_m": 505,
+      "driving_minutes": 9,
+      "transit_minutes": 16,
+      "walking_minutes": 5,
+      "from": "bell-tower"
+    },
+    {
+      "to": "food-central",
+      "distance_m": 300,
+      "driving_minutes": 8,
+      "transit_minutes": 15,
+      "walking_minutes": 4,
+      "from": "bell-tower"
+    },
+    {
+      "to": "food-south",
+      "distance_m": 6390,
+      "driving_minutes": 18,
+      "transit_minutes": 26,
+      "walking_minutes": 68,
+      "from": "bell-tower"
+    },
+    {
+      "to": "food-east",
+      "distance_m": 46482,
+      "driving_minutes": 78,
+      "transit_minutes": 110,
+      "walking_minutes": 498,
+      "from": "bell-tower"
+    },
+    {
+      "to": "food-central",
+      "distance_m": 404,
+      "driving_minutes": 9,
+      "transit_minutes": 16,
+      "walking_minutes": 4,
+      "from": "hotel"
+    },
+    {
+      "to": "food-south",
+      "distance_m": 5989,
+      "driving_minutes": 17,
+      "transit_minutes": 26,
+      "walking_minutes": 64,
+      "from": "hotel"
+    },
+    {
+      "to": "food-east",
+      "distance_m": 46850,
+      "driving_minutes": 78,
+      "transit_minutes": 110,
+      "walking_minutes": 502,
+      "from": "hotel"
+    },
+    {
+      "to": "food-south",
+      "distance_m": 6224,
+      "driving_minutes": 17,
+      "transit_minutes": 26,
+      "walking_minutes": 67,
+      "from": "food-central"
+    },
+    {
+      "to": "food-east",
+      "distance_m": 46487,
+      "driving_minutes": 78,
+      "transit_minutes": 110,
+      "walking_minutes": 498,
+      "from": "food-central"
+    },
+    {
+      "to": "food-east",
+      "distance_m": 48077,
+      "driving_minutes": 80,
+      "transit_minutes": 110,
+      "walking_minutes": 515,
+      "from": "food-south"
+    }
+  ],
+  "weather": [
+    {
+      "date": "2026-11-06",
+      "code": 1,
+      "min": 7,
+      "max": 18,
+      "rain_mm": 0
+    },
+    {
+      "date": "2026-11-07",
+      "code": 1,
+      "min": 7,
+      "max": 18,
+      "rain_mm": 0
+    },
+    {
+      "date": "2026-11-08",
+      "code": 1,
+      "min": 7,
+      "max": 18,
+      "rain_mm": 0
+    },
+    {
+      "date": "2026-11-09",
+      "code": 1,
+      "min": 7,
+      "max": 18,
+      "rain_mm": 0
+    },
+    {
+      "date": "2026-11-10",
+      "code": 3,
+      "min": 7,
+      "max": 18,
+      "rain_mm": 0
+    },
+    {
+      "date": "2026-11-11",
+      "code": 1,
+      "min": 7,
+      "max": 18,
+      "rain_mm": 0
+    },
+    {
+      "date": "2026-11-12",
+      "code": 1,
+      "min": 7,
+      "max": 18,
+      "rain_mm": 0
+    },
+    {
+      "date": "2026-11-13",
+      "code": 1,
+      "min": 7,
+      "max": 18,
+      "rain_mm": 0
+    },
+    {
+      "date": "2026-11-14",
+      "code": 1,
+      "min": 7,
+      "max": 18,
+      "rain_mm": 0
+    },
+    {
+      "date": "2026-11-15",
+      "code": 1,
+      "min": 7,
+      "max": 18,
+      "rain_mm": 0
+    },
+    {
+      "date": "2026-11-16",
+      "code": 1,
+      "min": 7,
+      "max": 18,
+      "rain_mm": 0
+    },
+    {
+      "date": "2026-11-17",
+      "code": 1,
+      "min": 7,
+      "max": 18,
+      "rain_mm": 0
+    },
+    {
+      "date": "2026-11-18",
+      "code": 1,
+      "min": 7,
+      "max": 18,
+      "rain_mm": 0
+    },
+    {
+      "date": "2026-11-19",
+      "code": 1,
+      "min": 7,
+      "max": 18,
+      "rain_mm": 0
+    },
+    {
+      "date": "2026-11-20",
+      "code": 1,
+      "min": 7,
+      "max": 18,
+      "rain_mm": 0
+    },
+    {
+      "date": "2026-11-21",
+      "code": 1,
+      "min": 7,
+      "max": 18,
+      "rain_mm": 0
+    }
+  ],
+  "known_empty_queries": [
+    "场景不存在的景点"
+  ]
+}

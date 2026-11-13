@@ -1,12 +1,16 @@
+import { loadBriefForTitle } from "../tools/brief.ts";
+import { activeDayTask, taskDates, setDayTaskDraft, selectDayTask, blockDayTask, recordDayTaskRound, dayTaskScope, dayTaskHistory, dayTaskDefinitions, dayTaskCallIssue, isExplicitPlanEdit, dayTaskRounds, dayTaskCalls } from "../core/day-tasks.ts";
 import { evidenceId } from "../tools/travel-evidence.ts";
+import { executionStateOf, type ToolExecutionState } from "../core/execution-state.ts";
+import { recoverInterruptedToolCalls } from "./tool-recovery.ts";
 import { repeatVisitAllowed } from "../tools/repeat-visit-policy.ts";
-import { normalizeReviewArgs, queryKeyArgs } from "../tools/travel-query.ts";
+import { normalizeVisitInfoArgs, normalizeReviewArgs, queryKeyArgs } from "../tools/travel-query.ts";
 import { ToolDiagnostics, type ToolErrorCategory } from "../core/tool-diagnostics.ts";
 import { ToolValidationError, toolErrorOutput, toolErrorPayload, type ToolValidationIssue } from "../core/tool-error.ts";
-import { mkdir } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { renderReadProgress, artifactReadStatus, undoReadDelivery } from "../tools/read-progress.ts";
-import { atomicWrite } from "../tools/plan-files.ts";
+import { atomicWrite, planFileFor } from "../tools/plan-files.ts";
 import { createExecutionBudget, type CumulativeToolBudget } from "../core/execution-budget.ts";
 export type { CumulativeToolBudget } from "../core/execution-budget.ts";
 import { summarizeContext } from "../context/summarize.ts";
@@ -14,9 +18,10 @@ import { ContextEpochManager } from "../context/epoch.ts";
 import { measureRequestContext, ContextInputLimitError, DEFAULT_MAX_INPUT_TOKENS, type RequestContextMetrics } from "../context/request.ts";
 import { travelFocusDay, renderFocusedTravelState } from "../core/travel-context.ts";
 import type { Session } from "../core/session.ts";
-import type { ChatProvider } from "../llm/provider.ts";
+import type { ChatProvider, LLMResult } from "../llm/provider.ts";
 import { isCompactedToolArguments, type PromptMessage, type ToolCall } from "../core/message.ts";
-import { renderMarkdown } from "../tools/itinerary.ts";
+import { parseItinerary } from "../tools/itinerary-schema.ts";
+import { applyBriefRequirements, inspectItinerary, renderMarkdown } from "../tools/itinerary.ts";
 import { renderQualityReport } from "../tools/itinerary-validator.ts";
 import type { ItinerarySnapshot, ToolContext, ToolRegistry } from "../tools/tool.ts";
 import { debugLog } from "../util/logger.ts";
@@ -39,7 +44,8 @@ import {
   updateTravelStateFromSnapshot,
 } from "../core/travel-state.ts";
 import { compactToolResults, type ToolResultForContext } from "./tool-output.ts";
-import { recordDeliveryProgress, deliveryGuidance, DEFER_OPTIONAL_EVIDENCE_AFTER, MAX_DELIVERY_STAGNATION, isDeferredEvidenceCall, focusedEvidenceDefinitions, essentialReviewDefinitions, repairOnlyDefinitions, MAX_REDUNDANT_CALLS_BEFORE_REPAIR, MAX_REDUNDANT_ROUNDS, REPAIR_TOOL_NAMES, planningGuidance, planningDefinitions, recoverCoverage } from "./travel-progress.ts";
+import { nextRouteFollowUp, pendingRouteRepairs } from "./travel-finalization.ts";
+import { recordDeliveryProgress, deliveryGuidance, DEFER_OPTIONAL_EVIDENCE_AFTER, MAX_DELIVERY_STAGNATION, isDeferredEvidenceCall, focusedEvidenceDefinitions, essentialVisitInfoDefinitions, repairOnlyDefinitions, MAX_REDUNDANT_CALLS_BEFORE_REPAIR, MAX_REDUNDANT_ROUNDS, REPAIR_TOOL_NAMES, planningGuidance, planningProgress, planningDefinitions, recoverCoverage, basicLayerActive, basicLayerCallIssue, basicLayerDefinitions } from "./travel-progress.ts";
 
 function safeEmit(callback:()=>void):void{
   try{
@@ -55,7 +61,8 @@ export interface AgentEvent {
   readonly arguments?: string;
   readonly output?: string;
   readonly error?: string;
-  readonly error_type?: "validation";
+  readonly error_type?: "validation" | "execution";
+  readonly execution_state?: ToolExecutionState;
   readonly code?: string;
   readonly issues?: readonly ToolValidationIssue[];
 }
@@ -157,6 +164,7 @@ export class ChatAgent {
   /** 本次 run 是否已经保存过需求单；用于阻断同一请求内换标题重复落盘 */
   private briefSavedThisRun = false;
   private committedSnapshot?: ItinerarySnapshot;
+  private get itinerarySnapshot(): ItinerarySnapshot | undefined { return this.committedSnapshot; }
   private savedThisRun = false;
   /** 当前执行轮的中断控制器（/stop 用） */
   private currentController: AbortController | undefined;
@@ -247,9 +255,11 @@ export class ChatAgent {
     this.briefSavedThisRun = false;
     this.committedSnapshot = undefined;
     this.savedThisRun = false;
+    await recoverInterruptedToolCalls(this.sessionValue, this.tools, this.workspace);
     const cumulative = options.cumulativeBudget ?? createExecutionBudget(this.sessionValue);
     cumulative.diagnostics ??= new ToolDiagnostics();
-    cumulative.allowAdvisoryReviews ||= /口碑|评价|点评|排队|招牌|人均价格|游[玩览]时长|重新核实|重查|刷新|重新查询/.test(trimmed);
+    cumulative.allowAdvisoryReviews ||= /口碑|评价|点评|排队|招牌|人均价格/.test(trimmed);
+    cumulative.allowVisitInfoQueries ||= /游[玩览]时长|开放时间|闭馆|停止入园|最后入场|场次|公告|重新核实|重查|刷新|重新查询/.test(trimmed);
     let accountedTokens = this.sessionValue.usage.totalTokens;
     const syncUsage = () => { cumulative.tokens += Math.max(0, this.sessionValue.usage.totalTokens - accountedTokens); accountedTokens = this.sessionValue.usage.totalTokens; };
     const exhausted = () => cumulative.rounds >= cumulative.maxRounds || cumulative.calls >= cumulative.maxCalls || (cumulative.maxTokens !== undefined && cumulative.tokens >= cumulative.maxTokens) || cumulative.costExceeded?.() === true;
@@ -292,8 +302,76 @@ export class ChatAgent {
       let failureKey = "";
       let failureCount = 0;
       let circuitOpen = false;
+      let earlyFinalizations = 0;
+      let routesQueried = false;
+      const attemptedRouteCommits = new Set<string>();
+      const routineVisitQueries = new Set<string>();
+      const queriedRouteLegs = new Set<string>();
+      const savedRouteDates = new Set<string>();
+      const supportsRouteQueries = tools.get("plan_day_routes")?.supportsRoutineRouteQuery === true;
+      let dayPlanning = false;
+      let dayHistoryBoundary = "";
+      let dayScopeKey = "";
+      let basicScopeKey = "";
+      cumulative.basicDiscoveryCalls ??= new Map();
+      const basicQueries = () => cumulative.basicDiscoveryCalls!.get(this.sessionValue.travelState?.brief?.title ?? "") ?? 0;
+      const researchOnly = /(?:核实|查询|重查|刷新|查一下|看看).*(?:开放|闭馆|天气|资料|时长)|(?:检查|查看|读取|加载|展示).*(?:当前|已有|已保存)?行程/.test(trimmed) && !/规划|补齐|生成|(?<!已)保存|重排|调整行程/.test(trimmed);
+      let dailyEnabled = !isExplicitPlanEdit(trimmed) && !researchOnly;
+      const planningRequested = /规划|行程|补齐|续跑|接着|继续|旅游|旅行|保存|(?:玩|去).{0,20}[一二三四五六七八九十\d]+(?:天|日)/.test(trimmed);
+      const resumingDates = /继续|补齐|续跑|接着|还缺|缺失|未完成|剩余|后[面续].*(?:天|行程)/.test(trimmed);
+      if (!dailyEnabled) {
+        const active = activeDayTask(this.sessionValue.travelState);
+        if (active) this.sessionValue.setTravelState(blockDayTask(this.sessionValue.travelState!, active.date, "用户指定修订，暂停该日期补天任务"));
+      }
+      const resetDayLoop = () => {
+        cumulative.stagnantRounds = 0; cumulative.deliveryStagnantRounds = 0; cumulative.redundantCalls = 0; cumulative.redundantRounds = 0;
+        if (cumulative.blockedKind !== "dependency") { cumulative.blockedReason = undefined; cumulative.blockedKind = undefined; }
+        stagnantRounds = 0; failureKey = ""; failureCount = 0; earlyFinalizations = 0; circuitOpen = false; failureGuidance = undefined;
+      };
+      const nextDateTask = () => {
+        const state = this.sessionValue.travelState;
+        if (!state?.brief || !state.itinerary || !dailyEnabled) return;
+        if (!dayPlanning && (!this.savedThisRun && !resumingDates || state.brief.title !== state.itinerary.title)) return;
+        const p = planningProgress(state);
+        const layers = state.itinerary.planningLayers;
+        if (layers?.basic_complete && layers.checked_days === layers.expected_days && layers.ready_days === layers.expected_days && !cumulative.allowVisitInfoQueries) dayPlanning = true;
+        if (!p.outlineReady && state.itinerary.dayCount === 0) {
+          const active = activeDayTask(state); if (active) this.sessionValue.setTravelState(blockDayTask(state, active.date, "基础安排变更，先恢复基础层"));
+          dayPlanning = false; return;
+        }
+        const budgetPending = layers?.days.some((day) => day.budget_gaps?.length) === true;
+        if (!dayPlanning && !budgetPending && !((layers ? layers.missing_required.length > 0 || layers.days.some((day) => day.feasibility !== "checked" || day.schedule !== "ready") : p.remaining > 0) && (p.outlineReady || state.itinerary.dayCount > 0 && taskDates(state).length === p.expected) && (p.expected ?? 0) > 1)) return;
+        dayPlanning = true;
+        const selected = selectDayTask(state, cumulative);
+        this.sessionValue.setTravelState(selected.state);
+        if (selected.task) {
+          const key = `${state.itinerary.itineraryId ?? state.itinerary.title}:${selected.task.date}:${selected.task.layer ?? "legacy"}:${selected.task.goal_id ?? ""}:${selected.task.requirement_version ?? ""}:${selected.task.attempts}`;
+          if (key !== dayScopeKey) {
+            dayScopeKey = key; resetDayLoop();
+            dayHistoryBoundary = `【日期任务上下文边界】${key}:${this.sessionValue.history.length}`;
+            this.sessionValue.add("system", dayHistoryBoundary);
+          }
+        }
+        return selected.task;
+      };
       let stagnantRounds = cumulative.stagnantRounds ?? 0;
       await tools.evidence.load();
+      const previousPlan = this.sessionValue.travelState?.itinerary;
+      const briefRoot = tools.get("save_travel_brief")?.operationRoot ?? tools.get("save_itinerary")?.operationRoot ?? this.workspace;
+      const briefTitle = this.sessionValue.travelState?.brief?.title ?? (resumingDates ? previousPlan?.title : undefined);
+      if (briefTitle) {
+        const brief = await loadBriefForTitle(briefRoot, briefTitle);
+        if (brief) this.sessionValue.setTravelState(updateTravelStateFromBrief(this.sessionValue.travelState, { ...brief }));
+      }
+      if (resumingDates && previousPlan) {
+        const planRoot = tools.get("save_itinerary")?.operationRoot ?? this.workspace;
+        const file = planFileFor(planRoot, "plans", previousPlan.title, "json");
+        try {
+          const saved = parseItinerary(JSON.parse(await readFile(file, "utf8")));
+          this.committedSnapshot = { file, ...inspectItinerary(applyBriefRequirements(saved, this.sessionValue.travelState?.brief), tools.evidence) };
+          this.sessionValue.setTravelState(updateTravelStateFromSnapshot(this.sessionValue.travelState, this.committedSnapshot));
+        } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      }
       const targets = () => [...(this.sessionValue.travelState?.brief?.mustVisit ?? []), ...(this.sessionValue.travelState?.itinerary?.assignments?.map((v) => v.name) ?? []), ...(this.sessionValue.travelState?.places.filter((p) => p.kind === "visit" || p.kind === "accommodation").map((p) => p.name) ?? [])];
       const facts = () => tools.evidence.usableEvidenceKeys(targets(), this.sessionValue.travelState?.brief?.destination);
       cumulative.observedEvidence ??= new Set(facts());
@@ -301,18 +379,62 @@ export class ChatAgent {
       cumulative.readVersions ??= new Map();
       cumulative.queryStats ??= { executed: 0, cacheHits: 0, blocked: 0 };
       const strictMeals = () => this.committedSnapshot?.itinerary.constraints?.recommendation_mode === "strict" || this.sessionValue.travelState?.itinerary?.recommendationMode === "strict";
-      const repairOnly = () => this.sessionValue.travelState?.brief !== undefined && (cumulative.redundantCalls ?? 0) >= MAX_REDUNDANT_CALLS_BEFORE_REPAIR;
-      const pendingReviews = () => {
+      const repairOnly = () => !dayPlanning && this.sessionValue.travelState?.brief !== undefined && (cumulative.redundantCalls ?? 0) >= MAX_REDUNDANT_CALLS_BEFORE_REPAIR;
+      const allowReviews = () => !this.sessionValue.travelState?.brief || cumulative.allowAdvisoryReviews === true || strictMeals();
+      const pendingVisitInfo = () => {
         const state = this.sessionValue.travelState;
-        if (!state?.brief || cumulative.allowAdvisoryReviews || strictMeals()) return undefined;
-        const focus = travelFocusDay(state, trimmed), slot = state.itinerary?.outline?.[focus - 1];
+        if (!state?.brief || cumulative.allowAdvisoryReviews || cumulative.allowVisitInfoQueries || strictMeals()) return undefined;
+        const active = activeDayTask(state);
+        const focus = travelFocusDay(state, trimmed);
+        const slot = active ? state.itinerary?.outline?.find((day) => day.date === active.date) : state.itinerary?.outline?.[focus - 1];
         const names = [...slot?.visits.map((v) => v.name) ?? [], ...state.places.filter((p) => p.kind === "visit" && (slot?.date ? p.date === slot.date : p.day === focus)).map((p) => p.name), ...state.brief.mustVisit];
-        return tools.evidence.pendingReviewPlaces(names, state.brief.destination, cumulative.queryAttempts).slice(0, 12);
+        return tools.evidence.pendingVisitInfoPlaces(names, state.brief.destination, cumulative.queryAttempts).slice(0, 12);
       };
       if (cumulative.deliveryProgress === undefined) recordDeliveryProgress(this.sessionValue.travelState, cumulative);
       for (;;) {
         if (exhausted()) { budgetGuidance = "已达到本次任务累计轮次、调用、token 或费用上限；自动续跑不会重置预算。"; break; }
-        if (cumulative.blockedReason !== undefined || (cumulative.deliveryStagnantRounds ?? 0) >= MAX_DELIVERY_STAGNATION || (cumulative.stagnantRounds ?? 0) >= 12) {
+        const snapshotBeforeRound = this.itinerarySnapshot;
+        if (snapshotBeforeRound) {
+          const itinerary = applyBriefRequirements(snapshotBeforeRound.itinerary, this.sessionValue.travelState?.brief);
+          this.committedSnapshot = { ...snapshotBeforeRound, ...inspectItinerary(itinerary, tools.evidence) };
+          this.sessionValue.setTravelState(updateTravelStateFromSnapshot(this.sessionValue.travelState, this.committedSnapshot));
+        }
+        const flowEnabled = dailyEnabled && (planningRequested || this.briefSavedThisRun || this.savedThisRun || resumingDates);
+        const basicStage = flowEnabled && basicLayerActive(this.sessionValue.travelState);
+        if (basicStage && basicScopeKey !== this.sessionValue.travelState?.brief?.title) {
+          basicScopeKey = this.sessionValue.travelState!.brief!.title; resetDayLoop();
+          dayHistoryBoundary = `【日期任务上下文边界】基础安排:${basicScopeKey}:${this.sessionValue.history.length}`;
+          this.sessionValue.add("system", dayHistoryBoundary);
+        }
+        let dateTask = nextDateTask();
+        if (dateTask && (dateTask.attempt_rounds >= dayTaskRounds(dateTask) || dateTask.attempt_calls >= dayTaskCalls(dateTask))) {
+          this.sessionValue.setTravelState(blockDayTask(this.sessionValue.travelState!, dateTask.date, "该日期达到单次软额度，先处理其他日期，再按独立额度重试"));
+          dateTask = nextDateTask();
+          await this.checkpoint(options);
+          if (!dateTask) continue;
+        }
+        if (cumulative.blockedKind === "dependency") { circuitOpen = true; failureGuidance = cumulative.blockedReason; break; }
+        if (dateTask && (cumulative.blockedReason !== undefined || (cumulative.deliveryStagnantRounds ?? 0) >= MAX_DELIVERY_STAGNATION || (cumulative.stagnantRounds ?? 0) >= 12)) {
+          this.sessionValue.setTravelState(blockDayTask(this.sessionValue.travelState!, dateTask.date, cumulative.blockedReason ?? "该日期局部停滞，转向其他日期"));
+          await this.checkpoint(options); nextDateTask(); continue;
+        }
+        const saved = this.itinerarySnapshot;
+        const routeCallSlots = Math.min(cumulative.maxCalls - cumulative.calls, dateTask ? dayTaskCalls(dateTask) - dateTask.attempt_calls : Infinity);
+        // 日期软额度用尽后，已保存版本的路线仍可在累计预算内补查与提交。
+        const routeDates = dateTask ? new Set([dateTask.date]) : dailyEnabled ? undefined : savedRouteDates;
+        let routeFollowUp = saved && !basicStage && tools.get("save_itinerary") && (!dateTask || dateTask.layer === "schedule")
+          && (dayPlanning || supportsRouteQueries && (this.savedThisRun || dailyEnabled && resumingDates))
+          ? nextRouteFollowUp(saved, tools.evidence, {
+            dates: routeDates, maxQueries: supportsRouteQueries ? Math.min(4, routeCallSlots - 1) : 0,
+            queriedLegs: queriedRouteLegs, attemptedRepairs: attemptedRouteCommits,
+          }) : undefined;
+        if (dayPlanning && !dateTask && !routeFollowUp) {
+          circuitOpen = true;
+          const tasks = this.sessionValue.travelState?.itinerary?.dayTasks ?? [];
+          failureGuidance = tasks.some((task) => task.status !== "saved") ? "各日期已按独立额度尝试；以下日期仍待处理：" + tasks.filter((task) => task.status !== "saved").map((task) => `${task.date}/${task.layer ?? "时间路线"}（${task.attempts}次：${task.last_error ?? "缺少有效安排"}）`).join("；") : "各层已完成可完成的核验与细排；基础安排保留全部日期，整体质量与待确认事项如下。";
+          break;
+        }
+        if (!dayPlanning && !routeFollowUp && (cumulative.blockedReason !== undefined || (cumulative.deliveryStagnantRounds ?? 0) >= MAX_DELIVERY_STAGNATION || (cumulative.stagnantRounds ?? 0) >= 12)) {
           const recovery = recoverCoverage(this.sessionValue.travelState, cumulative);
           if (recovery) { failureGuidance = recovery; stagnantRounds = 0; circuitOpen = false; }
           else { circuitOpen = true; failureGuidance = cumulative.blockedReason ?? ((cumulative.deliveryStagnantRounds ?? 0) >= MAX_DELIVERY_STAGNATION ? "连续 20 轮未推进交付，本阶段已停滞；不是预算耗尽。保留已保存版本及待修问题。" : "连续 12 轮无实际进展，本阶段已停滞；不是预算耗尽。保留已保存版本及待修问题。"); break; }
@@ -336,27 +458,37 @@ export class ChatAgent {
         const steered = options.takeSteeredMessages?.() ?? [];
         for (const message of steered) {
           this.sessionValue.add("user", message);
-          cumulative.allowAdvisoryReviews ||= /口碑|评价|点评|排队|招牌|人均价格|游[玩览]时长|重新核实|重查|刷新|重新查询/.test(message);
+          cumulative.allowAdvisoryReviews ||= /口碑|评价|点评|排队|招牌|人均价格/.test(message);
+          cumulative.allowVisitInfoQueries ||= /游[玩览]时长|开放时间|闭馆|停止入园|最后入场|场次|公告|重新核实|重查|刷新|重新查询/.test(message);
           cumulative.redundantCalls = 0; cumulative.redundantRounds = 0;
+          if (isExplicitPlanEdit(message)) {
+            const active = activeDayTask(this.sessionValue.travelState);
+            if (active) this.sessionValue.setTravelState(blockDayTask(this.sessionValue.travelState!, active.date, "用户指定修订，暂停补天"));
+            dailyEnabled = false; dayPlanning = false; dateTask = undefined;
+            routeFollowUp = undefined;
+          }
         }
 
         // 剩余轮数不足时注入收尾提醒（仅本次请求可见，不进入会话历史，避免污染后续轮次）
         const remaining = limit - executed - 1;
+        const roundTaskDate = dateTask?.date;
+        const roundTaskLayer = dateTask?.layer ?? "legacy";
+        const roundTaskGoal = dateTask?.goal_id;
         const buildRequest = (dynamicChars: number) => {
           const loadingGuide = toolLoadingGuide(tools, this.sessionValue);
           const artifactGuide = renderArtifactGuide(this.sessionValue, this.workspace, this.sessionValue.travelMode ? cumulative.readVersions : undefined);
           const readGuide = this.sessionValue.travelMode ? renderReadProgress(cumulative.readVersions) : undefined;
-          const phaseGuide = planningGuidance(this.sessionValue.travelState);
+          const phaseGuide = flowEnabled ? planningGuidance(this.sessionValue.travelState) : "【用户指定任务】按本次用户需求处理；暂停自动推进完整行程，完成后如实报告结果。";
           const focusInput = [...this.sessionValue.history].reverse().find((message) => message.role === "user")?.content ?? trimmed;
-          const focusDay = travelFocusDay(this.sessionValue.travelState, focusInput);
+          const focusDay = roundTaskDate ? Math.max(1, taskDates(this.sessionValue.travelState!).indexOf(roundTaskDate) + 1) : travelFocusDay(this.sessionValue.travelState, focusInput);
           const travelState = renderFocusedTravelState(this.sessionValue.travelState, focusDay, Math.floor(dynamicChars * 0.5));
           const draftGate = shouldForceDraft(this.sessionValue.travelState, executed);
-          const travelProgress = travelProgressGuidance(draftGate);
-          const focusDate = this.sessionValue.travelState?.itinerary?.outline?.[focusDay - 1]?.date ?? this.sessionValue.travelState?.itinerary?.daySummaries?.find((day) => day.day === focusDay)?.date;
+          const travelProgress = flowEnabled ? travelProgressGuidance(draftGate) : undefined;
+          const focusDate = roundTaskDate ?? this.sessionValue.travelState?.itinerary?.outline?.[focusDay - 1]?.date ?? this.sessionValue.travelState?.itinerary?.daySummaries?.find((day) => day.day === focusDay)?.date;
           const focusNames = [...(this.sessionValue.travelState?.places.filter((place) => focusDate ? place.date === focusDate : place.day === focusDay).map((place) => place.name) ?? []), ...(this.sessionValue.travelState?.itinerary?.outline?.find((slot) => slot.date === focusDate)?.visits.map((v) => v.name) ?? []), ...recentEvidenceNames(this.sessionValue)];
           const repeatPolicy = { constraints: { destination: this.sessionValue.travelState?.brief?.destination, repeat_visit_permissions: this.sessionValue.travelState?.itinerary?.repeatVisitPermissions } };
           const unavailableVisits = [...(this.sessionValue.travelState?.itinerary?.assignments?.filter((v) => v.date !== focusDate && !repeatVisitAllowed(repeatPolicy, v)).flatMap((v) => [v.name, ...(v.parent_visit ? [v.parent_visit.name] : [])]) ?? []), ...(this.sessionValue.travelState?.itinerary?.excludedVisits?.map((v) => v.name) ?? [])];
-          const evidence = this.sessionValue.travelState?.brief === undefined ? "" : tools.evidence.summary(this.sessionValue.travelState.brief.destination, [...focusNames, ...this.sessionValue.travelState.brief.mustVisit], Math.floor(dynamicChars * 0.3), unavailableVisits);
+          const evidence = this.sessionValue.travelState?.brief === undefined ? "" : basicStage ? tools.evidence.basicCandidates(this.sessionValue.travelState.brief.destination) : tools.evidence.summary(this.sessionValue.travelState.brief.destination, [...focusNames, ...this.sessionValue.travelState.brief.mustVisit], Math.floor(dynamicChars * 0.3), unavailableVisits);
           const queryIndex = tools.evidence.queryContext([...focusNames, ...(this.sessionValue.travelState?.brief?.mustVisit ?? [])], Math.min(1600, Math.floor(dynamicChars * 0.2)));
           const deliveryHint = deliveryGuidance(cumulative);
           const transientMessages = [
@@ -386,52 +518,85 @@ export class ChatAgent {
               : [{ role: "system" as const, content: budgetGuidance } satisfies PromptMessage]),
             ...(remaining < WRAP_UP_HINT_ROUNDS ? [wrapUpHint(remaining)] : []),
           ];
-          const history = this.sessionValue.toPrompt();
+          const allHistory = this.sessionValue.toPrompt();
+          const rawRequests = allHistory.filter((message) => message.role === "user");
+          const history = dayPlanning || basicStage ? dayTaskHistory(allHistory, dayHistoryBoundary, rawRequests) : allHistory;
           const requestHistory = transientMessages.length === 0
             ? history
             : [...history, ...transientMessages];
           // 记录真实请求字符量（含 tool_calls 参数与临时提示），响应后校准估算系数
-          const definitions = repairOnlyDefinitions(essentialReviewDefinitions(this.requestToolDefinitions(tools), pendingReviews()), repairOnly());
-          const requestTools = (cumulative.deliveryStagnantRounds ?? 0) < DEFER_OPTIONAL_EVIDENCE_AFTER ? definitions : focusedEvidenceDefinitions(definitions, strictMeals());
+          const available = this.requestToolDefinitions(tools).filter((tool) => tool.name !== "load_travel_brief" || !this.sessionValue.travelState?.brief?.requirementVersion);
+          const definitions = repairOnlyDefinitions(essentialVisitInfoDefinitions(available, pendingVisitInfo(), allowReviews()), repairOnly());
+          const requestTools = basicStage ? basicLayerDefinitions(definitions, basicQueries()) : dayPlanning && roundTaskDate ? dayTaskDefinitions(definitions, dayTaskScope(this.sessionValue.travelState, roundTaskDate)!) : (cumulative.deliveryStagnantRounds ?? 0) < DEFER_OPTIONAL_EVIDENCE_AFTER ? definitions : focusedEvidenceDefinitions(definitions, strictMeals(), cumulative.allowAdvisoryReviews);
           const metrics = measureRequestContext(this.sessionValue, this.provider.systemPrompt, history, transientMessages, requestTools, options.maxPromptTokens);
           return { requestHistory, requestTools, metrics };
         };
-        let request = buildRequest(10_000);
-        if (request.metrics.estimatedInputTokens > request.metrics.inputLimit) {
-          await this.compactContext(request.metrics.estimatedInputTokens, options);
-          request = buildRequest(10_000);
-        }
-        if (request.metrics.estimatedInputTokens > request.metrics.inputLimit) {
-          this.sessionValue.compactCompletedToolCalls(undefined, 1);
-          request = buildRequest(2_000);
-        }
-        syncUsage();
-        if (exhausted()) break;
-        this.sessionValue.recordRequestContext(request.metrics);
-        options.onRequestContext?.(request.metrics);
-        debugLog("context", JSON.stringify(request.metrics));
-        if (request.metrics.estimatedInputTokens > request.metrics.inputLimit) throw new ContextInputLimitError(request.metrics);
-        const { requestHistory, requestTools } = request;
-        const requestChars = request.metrics.totalChars;
-
-        // 优先流式（最终回答逐字输出），Provider 不支持时降级
-        let result;
-        try {
-          if (streamWithTools !== undefined) {
-            result = await streamWithTools.call(
-              this.provider,
-              requestHistory,
-              requestTools,
-              this.sessionValue.travelState?.brief === undefined && !this.savedThisRun ? options.onTextDelta ?? (() => {}) : () => {},
-              controller.signal,
-            );
-          } else {
-            result = await chatWithTools.call(this.provider, requestHistory, requestTools, controller.signal);
+        const state = this.sessionValue.travelState;
+        const city = state?.brief?.destination;
+        const routineCalls = dateTask?.layer === "feasibility" && city && tools.get("get_place_visit_info")?.supportsRoutineVisitInfo
+          ? (state?.itinerary?.planningLayers?.days.find((day) => day.date === roundTaskDate)?.visits ?? [])
+            .filter((visit) => visit.identity_verified)
+            .flatMap((visit): ToolCall[] => {
+              const place = tools.evidence.canonicalPlaceName(visit.name, city);
+              if (!tools.evidence.pendingVisitInfoPlaces([place], city, cumulative.queryAttempts, roundTaskDate).length) return [];
+              const fields = tools.evidence.missingOpeningFields(city, place, undefined, roundTaskDate);
+              const key = evidenceId([city, place, fields, roundTaskDate]);
+              return routineVisitQueries.has(key) ? [] : [{ id: `opening-${key}`, name: "get_place_visit_info", arguments: JSON.stringify({ place, city, fields, visit_date: roundTaskDate }) }];
+            }).filter((call, index, calls) => calls.findIndex((entry) => entry.id === call.id) === index)
+            .slice(0, Math.min(4, dayTaskCalls(dateTask) - dateTask.attempt_calls, cumulative.maxCalls - cumulative.calls))
+          : [];
+        let requestChars = 0;
+        let result: LLMResult;
+        if (routeFollowUp && "repair" in routeFollowUp && saved) {
+          const { repair } = routeFollowUp;
+          attemptedRouteCommits.add(repair.key);
+          result = { type: "tool_calls", toolCalls: [{ id: `schedule-route-${repair.key}`, name: "save_itinerary",
+            arguments: JSON.stringify({ title: saved.itinerary.title, expected_revision: saved.itinerary.revision, repair_routes: [repair.date] }) }] };
+        } else if (routeFollowUp && "requests" in routeFollowUp) {
+          result = { type: "tool_calls", toolCalls: routeFollowUp.requests.map(({ key, args, legKeys }) => {
+            for (const leg of legKeys) queriedRouteLegs.add(leg);
+            return { id: `route-${key}`, name: "plan_day_routes", arguments: JSON.stringify(args) };
+          }) };
+        } else if (routineCalls.length) {
+          for (const call of routineCalls) routineVisitQueries.add(call.id.slice("opening-".length));
+          result = { type: "tool_calls", toolCalls: routineCalls };
+        } else {
+          let request = buildRequest(10_000);
+          if (request.metrics.estimatedInputTokens > request.metrics.inputLimit) {
+            await this.compactContext(request.metrics.estimatedInputTokens, options);
+            request = buildRequest(10_000);
           }
-        } catch (error) {
-          // 中断信号导致的任何失败统一转为 TurnAbortedError
-          if (controller.signal.aborted) throw new TurnAbortedError();
-          throw error;
+          if (request.metrics.estimatedInputTokens > request.metrics.inputLimit) {
+            this.sessionValue.compactCompletedToolCalls(undefined, 1);
+            request = buildRequest(2_000);
+          }
+          syncUsage();
+          if (exhausted()) break;
+          this.sessionValue.recordRequestContext(request.metrics);
+          options.onRequestContext?.(request.metrics);
+          debugLog("context", JSON.stringify(request.metrics));
+          if (request.metrics.estimatedInputTokens > request.metrics.inputLimit) throw new ContextInputLimitError(request.metrics);
+          const { requestHistory, requestTools } = request;
+          requestChars = request.metrics.totalChars;
+
+          // 优先流式（最终回答逐字输出），Provider 不支持时降级
+          try {
+            if (streamWithTools !== undefined) {
+              result = await streamWithTools.call(
+                this.provider,
+                requestHistory,
+                requestTools,
+                this.sessionValue.travelState?.brief === undefined && !this.savedThisRun ? options.onTextDelta ?? (() => {}) : () => {},
+                controller.signal,
+              );
+            } else {
+              result = await chatWithTools.call(this.provider, requestHistory, requestTools, controller.signal);
+            }
+          } catch (error) {
+            // 中断信号导致的任何失败统一转为 TurnAbortedError
+            if (controller.signal.aborted) throw new TurnAbortedError();
+            throw error;
+          }
         }
 
         if (result.usage !== undefined) {
@@ -444,47 +609,105 @@ export class ChatAgent {
           }
         }
 
+        if (result.type === "text" && dayPlanning && roundTaskDate) {
+          this.sessionValue.setTravelState(recordDayTaskRound(this.sessionValue.travelState!, roundTaskDate, 0, "模型仅文字收尾，尚未完成当前层", roundTaskLayer));
+          this.sessionValue.setTravelState(blockDayTask(this.sessionValue.travelState!, roundTaskDate, "模型仅文字收尾，转向其他日期后再重试"));
+          executed += 1; cumulative.rounds += 1;
+          await this.checkpoint(options); nextDateTask(); continue;
+        }
         if (result.type === "text") {
-          const reply = this.canonicalReply() ?? result.content;
+          const progress = planningProgress(this.sessionValue.travelState);
+          const snapshot = this.itinerarySnapshot;
+          const activePlanning = this.savedThisRun || (routesQueried && /规划|安排行程|继续|修[复订改]|调整|重排|补齐/.test(trimmed));
+          if (activePlanning && snapshot && (this.sessionValue.travelState?.brief || snapshot.itinerary.constraints?.require_routes)) {
+            if (exhausted()) { budgetGuidance = "累计预算已用尽，保留已保存版本及尚未修复的问题。"; break; }
+            const pending = tools.get("save_itinerary") ? pendingRouteRepairs(snapshot, tools.evidence).find((entry) =>
+              (dailyEnabled || savedRouteDates.has(entry.date)) && !attemptedRouteCommits.has(entry.key)) : undefined;
+            if (pending) {
+              attemptedRouteCommits.add(pending.key);
+              // 进入与模型工具调用相同的权限、预算、诊断及检查点路径，成功后再读新快照。
+              result = { type: "tool_calls", toolCalls: [{ id: `finalize-route-${pending.key}`, name: "save_itinerary",
+                arguments: JSON.stringify({ title: snapshot.itinerary.title, expected_revision: snapshot.itinerary.revision, repair_routes: [pending.date] }) }] };
+            } else if (progress.remaining > 0 || this.sessionValue.travelState?.itinerary?.complete === false || snapshot.report.issue_count.P0 > 0 || snapshot.report.issue_count.P1 > 0) {
+              if (earlyFinalizations >= 2) { failureGuidance = "连续多次尝试文字收尾仍未推进修复，已停止空转；以下为已保存待修订版本。"; break; }
+              earlyFinalizations += 1;
+              executed += 1; cumulative.rounds += 1;
+              failureGuidance = `【交付检查未通过】有效${progress.count}/${progress.expected ?? "待确认"}天，P0=${snapshot.report.issue_count.P0}、P1=${snapshot.report.issue_count.P1}。请继续工具修订并保存，不能只给文字总结。${planningGuidance(this.sessionValue.travelState) ?? ""}\n` +
+                snapshot.report.issues.filter((issue) => issue.level !== "P2").slice(0, 6).map((issue) => `[${issue.code}] ${issue.message}`).join("\n");
+              await this.checkpoint(options);
+              continue;
+            }
+          }
+        }
+        if (result.type === "text") {
+          const progress = planningProgress(this.sessionValue.travelState);
+          const incomplete = this.sessionValue.travelState?.itinerary !== undefined && (progress.remaining > 0 || this.sessionValue.travelState.itinerary.complete === false);
+          const reply = (incomplete ? this.canonicalReply(false) ?? `当前有效安排${progress.count}/${progress.expected ?? "待确认"}天，行程尚未完成；${progress.missing.length ? `缺失日期：${progress.missing.join("、")}。` : "请按独立进度卡补齐有效日期。"}` : this.canonicalReply()) ?? result.content;
           if (this.sessionValue.travelState?.brief !== undefined || this.canonicalReply() !== undefined) options.onTextDelta?.(reply);
           this.sessionValue.add("assistant", reply);
           await this.checkpoint(options);
           return reply;
         }
 
-        // 模型请求调用工具：先记录请求，再逐个执行并回传结果
-        this.sessionValue.add("assistant", "", { toolCalls: result.toolCalls });
+        // 模型和宿主工具调用共用同一执行、权限和诊断路径。
+        const callBatch = this.sessionValue.add("assistant", "", { toolCalls: result.toolCalls });
+        // 先持久化调用意图。崩溃后根据批次 ID 核对账本，不自动重放副作用。
+        await this.checkpoint(options);
 
         const diagnosticStart = cumulative.diagnostics.records.length;
         const pendingResults: ToolResultForContext[] = [];
+        let uncertainEffect = false;
+        let dayCallsThisRound = 0;
         for (const call of result.toolCalls) {
           if (controller.signal.aborted) throw new TurnAbortedError();
+          if (uncertainEffect) {
+            cumulative.diagnostics.skip(call, cumulative.rounds + 1, "blocked");
+            pendingResults.push({ callId: call.id, toolName: call.name, output: "前序工具提交结果或导出需要核对，本批后续调用未执行；请先检查实际状态。" });
+            continue;
+          }
+          const effectiveBasicStage = dailyEnabled && (planningRequested || this.briefSavedThisRun || this.savedThisRun || resumingDates) && basicLayerActive(this.sessionValue.travelState);
+          if (effectiveBasicStage) {
+            const issue = basicLayerCallIssue(call.name, basicQueries());
+            if (issue) { cumulative.diagnostics.skip(call, cumulative.rounds + 1, "blocked"); pendingResults.push({ callId: call.id, toolName: call.name, output: issue }); continue; }
+          }
+          const scope = dayPlanning ? dayTaskScope(this.sessionValue.travelState, roundTaskDate) : undefined;
+          if (scope) {
+            let issue: string | undefined;
+            try { issue = dayTaskCallIssue(call.name, JSON.parse(call.arguments), scope); } catch { /* 参数错误交由正常执行处理。 */ }
+            if (activeDayTask(this.sessionValue.travelState)?.date !== roundTaskDate) issue = "本批任务状态已变化；程序将在下一轮重新评估日期与层级，本调用未执行。";
+            if (issue) {
+              cumulative.diagnostics.skip(call, cumulative.rounds + 1, "blocked");
+              pendingResults.push({ callId: call.id, toolName: call.name, output: issue }); continue;
+            }
+          }
           if (repairOnly() && !REPAIR_TOOL_NAMES.has(call.name)) {
             cumulative.diagnostics.skip(call, cumulative.rounds + 1, "blocked"); cumulative.queryStats.blocked++;
             pendingResults.push({ callId: call.id, toolName: call.name, output: "当前已有多次重复请求，仅开放保存、读取受影响条目和路线修订。直接补齐日期或修改具体问题；未知规则保留待确认。实质交付改进后自动恢复取证。" });
             continue;
           }
-          const pendingReviewNames = pendingReviews();
-          if (call.name === "get_place_reviews" && pendingReviewNames !== undefined) {
+          const pendingVisitNames = pendingVisitInfo();
+          if (["get_place_visit_info", "get_place_reviews"].includes(call.name) && (pendingVisitNames !== undefined || call.name === "get_place_reviews" && !allowReviews())) {
             let redundant = false;
             let blockedKey: string | undefined;
             try {
               const raw = JSON.parse(call.arguments);
               if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("参数必须是对象");
-              const args = normalizeReviewArgs(raw), topic = String(args.aspect);
+              const args = call.name === "get_place_visit_info" ? normalizeVisitInfoArgs(raw) : normalizeReviewArgs(raw);
               if (typeof args.place !== "string" || args.place.trim() === "") throw new Error("缺少place");
               const name = tools.evidence.canonicalPlaceName(String(args.place ?? ""), this.sessionValue.travelState!.brief!.destination);
-              blockedKey = evidenceId(["get_place_reviews", queryKeyArgs("get_place_reviews", { ...args, place: name, city: this.sessionValue.travelState!.brief!.destination })]);
-              redundant = !["开放时间", "闭馆时间", "闭馆日"].includes(topic) || !pendingReviewNames.includes(name);
+              blockedKey = evidenceId([call.name, queryKeyArgs(call.name, { ...args, place: name, city: this.sessionValue.travelState!.brief!.destination })]);
+              redundant = call.name === "get_place_reviews" || !pendingVisitNames?.includes(name);
             } catch { /* 参数错误仍由正常执行路径返回。 */ }
             if (redundant) {
               const observation = cumulative.diagnostics.skip(call, cumulative.rounds + 1, "blocked"); observation.query_key = blockedKey;
               cumulative.queryStats.blocked++;
-              pendingResults.push({ callId: call.id, toolName: call.name, output: "该事项已有结论或不是本次尚缺的关键开放资料，本次未联网。复用状态卡与证据索引；查不到的闭馆规则保持待确认，不要换词或换aspect重搜。请直接保存缺失日期或修订明确问题。" });
+              pendingResults.push({ callId: call.id, toolName: call.name, output: call.name === "get_place_reviews" ? "默认规划暂不追加一般口碑查询，本次未联网。复用候选评分；参观资料缺口使用get_place_visit_info。用户明确需要体验信息或严格餐饮时才查询口碑。" : "该事项已有结论或不是本次尚缺的参观资料，本次未联网。复用状态卡与证据索引；未知保持待确认，不要换词、字段或工具重搜。请直接保存缺失日期或修订明确问题。" });
               continue;
             }
           }
-          if ((cumulative.deliveryStagnantRounds ?? 0) >= DEFER_OPTIONAL_EVIDENCE_AFTER && isDeferredEvidenceCall(call.name, call.arguments, strictMeals())) {
+          if ((cumulative.deliveryStagnantRounds ?? 0) >= DEFER_OPTIONAL_EVIDENCE_AFTER
+            && !(roundTaskLayer === "budget" && call.name === "search_restaurants")
+            && isDeferredEvidenceCall(call.name, call.arguments, strictMeals(), cumulative.allowAdvisoryReviews)) {
             cumulative.diagnostics.skip(call, cumulative.rounds + 1, "blocked");
             cumulative.queryStats.blocked++;
             pendingResults.push({ callId: call.id, toolName: call.name, output: deliveryGuidance(cumulative)! });
@@ -508,6 +731,10 @@ export class ChatAgent {
             if (!circuitOpen) failureGuidance = undefined;
             continue;
           }
+          if (scope && (activeDayTask(this.sessionValue.travelState)?.attempt_calls ?? 0) + dayCallsThisRound >= dayTaskCalls(activeDayTask(this.sessionValue.travelState)!)) {
+            cumulative.diagnostics.skip(call, cumulative.rounds + 1, "blocked");
+            pendingResults.push({ callId: call.id, toolName: call.name, output: "该日期本次工具额度已用完，本调用未执行；程序将切换到其他日期。" }); continue;
+          }
           if (cumulative.calls >= cumulative.maxCalls || cumulative.costExceeded?.() === true || (cumulative.maxTokens !== undefined && cumulative.tokens >= cumulative.maxTokens)) {
             cumulative.diagnostics.skip(call, cumulative.rounds + 1, "blocked");
             pendingResults.push({ callId: call.id, toolName: call.name, output: "已达到累计工具或费用上限，本次调用未执行。" });
@@ -526,30 +753,67 @@ export class ChatAgent {
           }
 
           let snapshotReceived = false;
+          let preparedArgs: Record<string, unknown> | undefined;
+          let argumentCorrections: readonly string[] = [];
           cumulative.calls += 1;
+          if (scope) dayCallsThisRound += 1;
+          if (effectiveBasicStage && call.name === "search_attractions") cumulative.basicDiscoveryCalls!.set(this.sessionValue.travelState!.brief!.title, basicQueries() + 1);
           const execution = await cumulative.diagnostics.run(call, cumulative.rounds + 1, () => this.executeTool(
             call,
             tools,
-            { workspace: this.workspace, signal: controller.signal, readVersions: this.sessionValue.travelMode ? cumulative.readVersions : undefined, readCallId: call.id, queryAttempts: cumulative.queryAttempts, queryStats: cumulative.queryStats,
+            { workspace: this.workspace, operationId: `${this.sessionValue.id}:${callBatch.id}:${call.id}`, signal: controller.signal, readVersions: this.sessionValue.travelMode ? cumulative.readVersions : undefined, readCallId: call.id, queryAttempts: cumulative.queryAttempts, queryStats: cumulative.queryStats,
+              basicPlanning: effectiveBasicStage,
+              dayPlanningScope: scope,
               destination: this.sessionValue.travelState?.brief?.destination,
               travelMode: this.sessionValue.travelMode,
+              onArgumentsPrepared: (args, corrections) => { preparedArgs = args; argumentCorrections = corrections; },
               brief: this.sessionValue.travelState?.brief,
               // 当前请求产生新授权；之前已确认的授权随对应行程持久化，不挪用其他任务的旧消息。
               userRequests: this.sessionValue.history.filter((message) => message.role === "user").slice(-1).map(({ id, content }) => ({ id, content })),
+              onBrief: (brief) => {
+                snapshotReceived = true;
+                this.sessionValue.setTravelState(updateTravelStateFromBrief(this.sessionValue.travelState, { ...brief }));
+              },
               onItinerary: (snapshot) => {
                 snapshotReceived = true;
                 this.committedSnapshot = snapshot;
-                if (call.name === "save_itinerary") this.savedThisRun = true;
+                if (call.name === "save_itinerary") {
+                  this.savedThisRun = true;
+                  for (const dayNumber of snapshot.report.changed_days ?? []) {
+                    const date = snapshot.itinerary.days[dayNumber - 1]?.date;
+                    if (date) savedRouteDates.add(date);
+                  }
+                }
                 this.sessionValue.setTravelState(updateTravelStateFromSnapshot(this.sessionValue.travelState, snapshot));
               },
             },
             onEvent,
           ));
-          let output = execution.output;
+          let output = (argumentCorrections.length ? `参数按兼容规则规范化：${argumentCorrections.join("；")}。\n` : "") + execution.output;
+          if (dayPlanning && roundTaskDate && call.name === "save_itinerary" && execution.error && execution.executionState?.effect_status !== "committed" && execution.executionState?.effect_status !== "unknown") {
+            const args = safeArguments(call.arguments);
+            if (args && Array.isArray(args.days) && args.days.every((day) => day && typeof day === "object" && day.date === roundTaskDate)) {
+              const path = join(this.workspace, ".minicode", "day-tasks", evidenceId([scope?.title, roundTaskDate, scope?.layer]), "rejected-draft.json");
+              await mkdir(resolve(path, ".."), { recursive: true });
+              await atomicWrite(path, JSON.stringify({ task_date: roundTaskDate, status: "rejected", args, error: execution.error }, null, 2));
+              this.sessionValue.setTravelState(setDayTaskDraft(this.sessionValue.travelState!, roundTaskDate, path));
+            }
+          }
+          if (execution.executionState?.code === "RESOURCE_RECOVERY_REQUIRED" || execution.executionState?.exports_pending || (execution.executionState?.execution_status !== "succeeded" && ["committed", "unknown", "partial"].includes(execution.executionState?.effect_status ?? ""))) {
+            uncertainEffect = true; circuitOpen = true;
+            cumulative.operationRecovery = execution.executionState;
+            cumulative.blockedKind = "dependency";
+            cumulative.blockedReason = execution.executionState?.code === "RESOURCE_RECOVERY_REQUIRED" ? `前次操作 ${execution.executionState.blocked_by_operation_id} 尚待核对或恢复，本次修改未执行；请先处理该操作。`
+              : execution.executionState?.exports_pending ? "主文件已提交，部分导出尚未完成；已停止本批后续调用，请先重建导出，不要重复保存。"
+              : execution.executionState?.effect_status === "committed" ? "主文件已提交，但工具后续处理失败；已停止本批后续调用，请先读取当前版本，不要原样重放。"
+              : "工具副作用结果未知或部分提交；已停止本批后续调用，不自动重放。请先核对实际状态。";
+            failureGuidance = cumulative.blockedReason;
+          }
           if (execution.error === undefined) {
+            if (call.name === "plan_day_routes") routesQueried = true;
             failureKey = "";
             failureCount = 0;
-            failureGuidance = undefined;
+            failureGuidance = cumulative.operationRecovery ? cumulative.blockedReason : undefined;
           } else {
             const key = toolFailureKey(call.name, execution.error);
             failureCount = key === failureKey ? failureCount + 1 : 1;
@@ -566,11 +830,12 @@ export class ChatAgent {
               cumulative.blockedKind = "dependency";
             }
           }
-          if (!snapshotReceived) recordTravelToolResult(this.sessionValue, call, output, execution.error);
+          if (!snapshotReceived) recordTravelToolResult(this.sessionValue, preparedArgs ? { ...call, arguments: JSON.stringify(preparedArgs) } : call, output, execution.error);
           pendingResults.push({
             callId: call.id,
             toolName: call.name,
             output,
+            ...(execution.executionState ? { executionState: execution.executionState } : {}),
             ...(execution.error === undefined ? {} : { error: execution.error }),
             ...(tools.get(call.name)?.outputKind === undefined
               ? {}
@@ -586,6 +851,7 @@ export class ChatAgent {
           this.sessionValue.add("tool", item.text, {
             toolCallId: item.callId,
             toolName: pendingResults.find((result) => result.callId === item.callId)?.toolName,
+            toolExecution: pendingResults.find((result) => result.callId === item.callId)?.executionState,
           });
         }
         // 工具结果已回填，调用参数不再需要完整重复发送。长行程会在同一用户轮次里
@@ -597,6 +863,7 @@ export class ChatAgent {
         cumulative.rounds += 1;
         if (this.sessionValue.travelState?.brief !== undefined) {
           const improved = recordDeliveryProgress(this.sessionValue.travelState, cumulative);
+          if (improved) earlyFinalizations = 0;
           if (improved) cumulative.redundantCalls = 0;
           const currentFacts = facts();
           const newFact = currentFacts.some((key) => !cumulative.observedEvidence!.has(key));
@@ -615,7 +882,25 @@ export class ChatAgent {
         cumulative.redundantRounds = onlyReuse ? (cumulative.redundantRounds ?? 0) + 1 : 0;
         if (cumulative.redundantRounds > 0) failureGuidance = "本轮只有缓存复用或重复拦截，没有新增资料；不要再读同一版本或换词重搜。直接保存缺失日期、修订已知错误，或汇报确实缺少的依据。";
         if (cumulative.redundantRounds >= MAX_REDUNDANT_ROUNDS) { circuitOpen = true; failureGuidance = "连续3轮只有重复调用、无新资料或修改，已停止重复循环；未通过的条件仍须如实列出。"; cumulative.blockedReason = failureGuidance; cumulative.blockedKind = "no_progress"; }
-        if (circuitOpen && cumulative.blockedKind !== "dependency") {
+        if (dayPlanning && roundTaskDate) {
+          const calls = observations.filter((r) => r.execution !== "blocked" && r.execution !== "denied").length;
+          const lastError = [...pendingResults].reverse().find((item) => item.error)?.error;
+          this.sessionValue.setTravelState(recordDayTaskRound(this.sessionValue.travelState!, roundTaskDate, calls, lastError, roundTaskLayer, roundTaskGoal));
+          const beforeLayerDay = snapshotBeforeRound?.itinerary.planning_layers?.days.find((day) => day.date === roundTaskDate);
+          const currentLayers = this.sessionValue.travelState?.itinerary?.planningLayers;
+          const currentLayerDay = currentLayers?.days.find((day) => day.date === roundTaskDate);
+          if (roundTaskLayer === "schedule" && beforeLayerDay?.schedule === "missing" && currentLayerDay?.schedule === "draft" && currentLayers?.days.some((day) => day.date !== roundTaskDate && day.schedule === "missing")) {
+            this.sessionValue.setTravelState(blockDayTask(this.sessionValue.travelState!, roundTaskDate, "已保存时间草稿；先补齐其他日期，再完善本日质量问题"));
+            nextDateTask();
+          }
+          if (circuitOpen && cumulative.blockedKind !== "dependency") {
+            this.sessionValue.setTravelState(blockDayTask(this.sessionValue.travelState!, roundTaskDate, failureGuidance ?? lastError ?? "该日期重复调用停滞"));
+            circuitOpen = false; nextDateTask();
+          }
+          await this.checkpoint(options);
+        }
+        if (routeFollowUp && cumulative.blockedKind !== "dependency") circuitOpen = false;
+        if (!dayPlanning && circuitOpen && cumulative.blockedKind !== "dependency") {
           const recovery = recoverCoverage(this.sessionValue.travelState, cumulative);
           if (recovery) { circuitOpen = false; failureGuidance = recovery; stagnantRounds = 0; }
           else { cumulative.blockedKind = "no_progress"; cumulative.blockedReason = failureGuidance ?? "局部修订停滞，保留未完成版本"; }
@@ -623,10 +908,15 @@ export class ChatAgent {
         options.onToolRound?.({ round: executed, limit, toolCalls: result.toolCalls.length });
         if (circuitOpen) break;
       }
+      if (dayPlanning) {
+        const unfinished = activeDayTask(this.sessionValue.travelState);
+        if (unfinished) this.sessionValue.setTravelState(blockDayTask(this.sessionValue.travelState!, unfinished.date, failureGuidance ?? budgetGuidance ?? "任务预算达到上限，保留该日期进度待续接"));
+      }
       // 轮次用尽：再做一次"禁用工具"的收尾请求，保证用户拿到最终产出而不是硬报错
       const canonical = this.canonicalReply(false);
-      if (canonical !== undefined || exhausted() || stagnantRounds >= 12 || (circuitOpen && this.sessionValue.travelState?.brief !== undefined)) {
-        const reply = [failureGuidance, canonical ?? (circuitOpen ? this.sessionValue.travelState?.itinerary !== undefined ? `本次规划未完成，保留已保存「${this.sessionValue.travelState.itinerary.title}」${this.sessionValue.travelState.itinerary.dayCount}天版本，仍需按质量报告处理未通过条件。` : "本次规划未完成，尚未保存可交付的行程。" : "本次规划尚未保存可交付的行程，累计预算已用尽。")].filter(Boolean).join("\n\n");
+      if (canonical !== undefined || exhausted() || stagnantRounds >= 12 || cumulative.operationRecovery !== undefined || (circuitOpen && this.sessionValue.travelState?.brief !== undefined)) {
+        const recoveryNote = cumulative.operationRecovery ? `操作 ${cumulative.operationRecovery.operation_id ?? "当前调用"}：${cumulative.operationRecovery.effect_status}。请先核对状态，未自动重放。` : undefined;
+        const reply = [budgetGuidance, failureGuidance, canonical ?? recoveryNote ?? (circuitOpen ? this.sessionValue.travelState?.itinerary !== undefined ? `本次规划未完成，保留已保存「${this.sessionValue.travelState.itinerary.title}」${this.sessionValue.travelState.itinerary.dayCount}天版本，仍需按质量报告处理未通过条件。` : "本次规划未完成，尚未保存可交付的行程。" : "本次规划尚未保存可交付的行程，累计预算已用尽。")].filter(Boolean).join("\n\n");
         options.onTextDelta?.(reply);
         this.sessionValue.add("assistant", reply);
         await this.checkpoint(options);
@@ -680,12 +970,14 @@ export class ChatAgent {
   private canonicalReply(requireSave = true): string | undefined {
     if ((requireSave && !this.savedThisRun) || this.committedSnapshot === undefined) return undefined;
     const { itinerary, report, file } = this.committedSnapshot;
-    const passed = report.issue_count.P0 === 0 && report.issue_count.P1 === 0;
+    const progress = planningProgress(this.sessionValue.travelState);
+    const passed = report.issue_count.P0 === 0 && report.issue_count.P1 === 0 && progress.remaining === 0 && this.sessionValue.travelState?.itinerary?.complete !== false;
     return [
       `已保存「${itinerary.title}」v${itinerary.revision ?? 1}，${itinerary.days.length} 天 / ${itinerary.days.reduce((sum, day) => sum + day.items.length, 0)} 项。strict ${passed ? "通过" : "未通过，当前版本尚未通过 strict 校验，以下为待修订版本"}。`,
+      ...(progress.expected === undefined ? [] : [`完整性: 有效${progress.count}/${progress.expected}天${progress.remaining > 0 ? `，尚未完成${progress.missing.length ? `；缺失日期：${progress.missing.join("、")}` : ""}` : ""}`]),
       `[行程文件](${file}) · [质量报告](${file.slice(0, -5)}.quality.md)`,
-      renderMarkdown(itinerary),
-      ...(passed ? [] : [renderQualityReport(report)]),
+      renderMarkdown(itinerary, report.budget),
+      ...(passed && report.issues.length === 0 ? [] : [renderQualityReport(report)]),
     ].join("\n\n");
   }
 
@@ -776,28 +1068,33 @@ export class ChatAgent {
     tools: ToolRegistry,
     ctx: ToolContext,
     onEvent?: (event: AgentEvent) => void,
-  ): Promise<{ readonly output: string; readonly error?: string; readonly errorCode?: string; readonly errorCategory?: ToolErrorCategory }> {
+  ): Promise<{ readonly output: string; readonly error?: string; readonly errorCode?: string; readonly errorCategory?: ToolErrorCategory; readonly executionState?: ToolExecutionState }> {
     safeEmit(()=>{
     onEvent?.({ type: "tool_start", name: call.name, arguments: call.arguments });
     });
     try {
-      const output = isActivationTool(call.name)
-        ? executeToolCatalog(
+      const execution = isActivationTool(call.name)
+        ? { output: executeToolCatalog(
             call.name,
             parseToolArguments(call.arguments),
             tools,
             this.sessionValue,
-          )
+          ) }
         : await this.executeRegisteredTool(call, tools, ctx);
+      const { output, error, executionState } = execution;
+      if (error) {
+        safeEmit(() => onEvent?.({ type: "tool_error", name: call.name, error, code: executionState?.code, error_type: "execution", execution_state: executionState }));
+        return { ...execution, output: JSON.stringify({ error, execution_state: executionState, output }), errorCode: executionState?.code };
+      }
       safeEmit(()=>{
       onEvent?.({ type: "tool_end", name: call.name, output });
       });
-      return { output };
+      return execution;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      onEvent?.({ type: "tool_error", name: call.name, ...toolErrorPayload(error) });
+      safeEmit(() => onEvent?.({ type: "tool_error", name: call.name, ...toolErrorPayload(error) }));
       // 错误也回传给模型，让它有机会自行调整参数重试
-      return { output: toolErrorOutput(error), error: message, ...(error instanceof ToolValidationError ? { errorCode: error.code, errorCategory: "validation" as const } : {}) };
+      return { output: toolErrorOutput(error), error: message, executionState: executionStateOf(error), ...(error instanceof ToolValidationError ? { errorCode: error.code, errorCategory: "validation" as const } : {}) };
     }
   }
 
@@ -816,7 +1113,7 @@ export class ChatAgent {
     call: ToolCall,
     tools: ToolRegistry,
     ctx: ToolContext,
-  ): Promise<string> {
+  ): Promise<{ output: string; error?: string; executionState?: ToolExecutionState }> {
     const tool = tools.get(call.name);
     if (
       tool !== undefined &&
@@ -831,7 +1128,7 @@ export class ChatAgent {
         );
       }
     }
-    const output = await tools.execute(call.name, call.arguments, ctx);
+    const output = await tools.executeDetailed(call.name, call.arguments, ctx);
     if (call.name === "save_travel_brief") this.briefSavedThisRun = true;
     return output;
   }

@@ -1,6 +1,7 @@
 import type { ToolDefinition } from "../llm/provider.ts";
 import type { Session } from "../core/session.ts";
 import type { Tool, ToolCategory, ToolRegistry } from "./tool.ts";
+import { validateToolArguments } from "./tool-contract.ts";
 
 export const TOOL_SEARCH_NAME = "find_tools";
 export const TOOL_ACTIVATE_NAME = "activate_tools";
@@ -14,6 +15,7 @@ export const TOOL_ACTIVATION_DEFINITIONS: readonly ToolDefinition[] = [
       "按任务、关键词或分类查找尚未加载的工具。工具采用按需加载，先查目录再用 activate_tools 激活；返回名称、分类和用途。",
     parameters: {
       type: "object",
+      additionalProperties: false,
       properties: {
         query: { type: "string", description: "任务或关键词，例如：景点口碑、路线、保存行程、文件编辑。可选" },
         category: {
@@ -31,6 +33,7 @@ export const TOOL_ACTIVATION_DEFINITIONS: readonly ToolDefinition[] = [
       "激活本次任务需要的工具，激活后下一轮模型请求会收到完整参数定义。优先按分类激活；每会话最多 12 个可选工具。",
     parameters: {
       type: "object",
+      additionalProperties: false,
       properties: {
         tools: {
           type: "array",
@@ -57,6 +60,7 @@ export const TOOL_ACTIVATION_DEFINITIONS: readonly ToolDefinition[] = [
     description: "卸载不再需要的可选工具以缩小上下文。常驻工具和第三方未分类工具不能卸载。",
     parameters: {
       type: "object",
+      additionalProperties: false,
       properties: {
         tools: {
           type: "array",
@@ -116,6 +120,8 @@ export function executeToolCatalog(
   registry: ToolRegistry,
   session: Session,
 ): string {
+  const definition = TOOL_ACTIVATION_DEFINITIONS.find((tool) => tool.name === name);
+  if (definition) validateToolArguments(definition.parameters, args);
   if (name === TOOL_SEARCH_NAME) return findTools(args, registry, session);
   if (name === TOOL_ACTIVATE_NAME) return activateTools(args, registry, session);
   return deactivateTools(args, registry, session);

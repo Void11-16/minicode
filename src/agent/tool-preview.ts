@@ -1,7 +1,9 @@
 import type { ToolOutputKind } from "../tools/tool.ts";
+import { renderItineraryOverview } from "../tools/itinerary-overview.ts";
+import { parseItinerary } from "../tools/itinerary-schema.ts";
 
 type Row = Record<string, unknown>;
-const PLACE_KEYS = ["recommended_spots", "parent_visit", "name", "id", "evidence_id", "type", "location", "latitude", "longitude", "lat", "lng", "lon", "crs", "rating", "cost_per_person", "price", "price_unit", "opening_hours", "source", "evidence_verified"];
+const PLACE_KEYS = ["recommended_spots", "parent_visit", "area_group", "name", "id", "evidence_id", "type", "location", "latitude", "longitude", "lat", "lng", "lon", "crs", "rating", "cost_per_person", "price", "price_unit", "opening_hours", "source", "evidence_verified"];
 const ROUTE_KEYS = ["from", "to", "id", "route_evidence_id", "mode", "transport_mode", "duration_min", "durationSec", "duration_sec", "distance_km", "distanceM", "distance_m", "estimated", "route_verified", "route_binding_error", "source"];
 const ITEM_KEYS = ["activity", ...PLACE_KEYS, ...ROUTE_KEYS, "time", "end_time", "time_locked", "subtype", "planned_duration_min", "reservation_required", "opening_evidence_ids", "opening_sessions", "closed_dates"];
 const ISSUE_KEYS = ["level", "kind", "code", "day", "item_id", "related_days", "related_codes", "message"];
@@ -21,7 +23,7 @@ function project(value: Row, keys: readonly string[]): Row {
       if (field.length > limit) return [[key, field.slice(0, limit - 1) + "…"]];
     }
     if (key === "location" && row(field)) return [[key, project(row(field)!, ["latitude", "longitude", "lat", "lng", "lon", "crs", "source"])]];
-    if (key === "parent_visit" && row(field)) return [[key, project(row(field)!, ["name", "evidence_id"])]];
+    if ((key === "parent_visit" || key === "area_group") && row(field)) return [[key, project(row(field)!, ["name", "evidence_id"])]];
     if (key === "opening_hours" && row(field)) return [[key, project(row(field)!, ["opens", "closes", "intervals", "last_admission", "closed_weekdays", "source"])]];
     if (key === "issue_count" && row(field)) return [[key, project(row(field)!, ["P0", "P1", "P2"])]];
     if (typeof field === "string" || typeof field === "number" || typeof field === "boolean" || field === null || Array.isArray(field)) return [[key, field]];
@@ -70,6 +72,8 @@ function jsonPreview(kind: ToolOutputKind | "error", value: unknown, budget: num
     return fit(meta, issues.map((v) => JSON.stringify(project(v, ISSUE_KEYS))), budget);
   }
   if (kind === "itinerary" && Array.isArray(root.days)) {
+    // 多日结果只做全日期概览，不让前几天的餐厅条目耗尽预览预算。
+    if (root.days.length > 1) return renderItineraryOverview(parseItinerary(root), undefined, budget);
     const records: string[] = [];
     if (row(root.constraints)) records.push(`constraints=${JSON.stringify(root.constraints)}`);
     root.days.forEach((value, index) => {
@@ -101,7 +105,7 @@ function textPreview(kind: ToolOutputKind, text: string, budget: number): string
       if (!m) return [];
       const fields = m[2]!.split("|").map((field) => field.trim());
       const name = m[1]!;
-      const kept = fields.filter((field, index) => (index === 0 && field.length < 120) || /坐标|crs|评分|人均|参考价|开放|闭馆|类型|来源|内部推荐|所属主景区|source|evidence_id/.test(field));
+      const kept = fields.filter((field, index) => (index === 0 && field.length < 120) || /坐标|crs|评分|人均|参考价|开放|闭馆|类型|来源|内部推荐|所属主景区|区域内地点|所属区域|source|evidence_id/.test(field));
       const matches = ids.get(name) ?? ids.get(name.replace(/ 综合 [\d.]+$/, ""));
       const id = matches?.size === 1 ? [...matches][0] : undefined;
       return [[name, ...kept, ...(id ? [`evidence_id=${id}`] : [])].join(" | ")];
@@ -142,6 +146,7 @@ function textPreview(kind: ToolOutputKind, text: string, budget: number): string
 
 /** 优先使用工具类型的确定性字段投影；未知格式交还通用预览，不调用额外模型。 */
 export function structuredToolPreview(kind: ToolOutputKind | "error", text: string, budget: number): string | undefined {
+  if (kind === "itinerary" && text.startsWith("【行程全局概览】")) return text.length <= budget ? text : undefined;
   if (kind === "generic" || kind === "file" || kind === "command") return undefined;
   const first = text[text.search(/\S/)];
   if (text.length <= 2_000_000 && (first === "[" || first === "{")) {

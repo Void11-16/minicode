@@ -1,3 +1,8 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createSaveTravelBriefTool } from "../src/tools/brief.ts";
+import { createSaveItineraryTool } from "../src/tools/itinerary.ts";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { Session } from "../src/core/session.ts";
@@ -158,87 +163,33 @@ test("Agent: 同一用户请求只保存一次需求单，换标题重试会被�
   assert.equal(agent.history.find((message) => message.toolCallId === "brief-2")?.content.includes("重复保存已忽略"), true);
 });
 
-test("Agent: 落盘提醒保留检索能力，不再把必要证据请求封锁成循环", async () => {
-  const search = (round: number): LLMResult => ({
-    type: "tool_calls",
-    toolCalls: [{
-      id: `search-${round}`,
-      name: "search_attractions",
-      arguments: JSON.stringify({ city: "北京", location: `候选-${round}` }),
-    }],
-  });
+test("Agent: 基础层限制候选检索，全部日期分配后恢复本日必要检索", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "agent-layer-gate-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const search = (round: number): LLMResult => ({ type: "tool_calls", toolCalls: [{
+    id: `search-${round}`, name: "search_attractions", arguments: JSON.stringify({ city: "北京", location: `候选-${round}` }),
+  }] });
   const provider = new ScriptedProvider([
-    {
-      type: "tool_calls",
-      toolCalls: [{
-        id: "brief",
-        name: "save_travel_brief",
-        arguments: '{"title":"北京三日游","destination":"北京","pace":"适中"}',
-      }],
-    },
-    ...[1, 2, 3, 4, 5, 6, 7].map(search),
-    search(8),
-    {
-      type: "tool_calls",
-      toolCalls: [{
-        id: "save-day-1",
-        name: "save_itinerary",
-        arguments: JSON.stringify({
-          title: "北京三日游",
-          days: [{
-            date: "2026-10-27",
-            items: [{
-              name: "故宫",
-              type: "visit",
-              location: { latitude: 39.9163, longitude: 116.3972 },
-            }],
-          }],
-        }),
-      }],
-    },
-    { type: "text", content: "第 1 天已保存，继续完善。" },
+    { type: "tool_calls", toolCalls: [{ id: "brief", name: "save_travel_brief", arguments: JSON.stringify({ title: "北京三日游", destination: "北京", startDate: "2026-10-27", endDate: "2026-10-29", requireAccommodation: false }) }] },
+    ...[1, 2, 3, 4].map(search),
+    { type: "tool_calls", toolCalls: [{ id: "outline", name: "save_itinerary", arguments: JSON.stringify({ title: "北京三日游", outline: ["故宫", "天坛", "颐和园"].map((name, i) => ({ date: `2026-10-${27 + i}`, visits: [{ name }] })) }) }] },
+    search(5),
   ]);
-  const registry = new ToolRegistry();
   let searchExecutions = 0;
-  let itineraryExecutions = 0;
-  registry.register({
-    name: "save_travel_brief",
-    description: "保存需求",
-    parameters: { type: "object", properties: {} },
-    alwaysActive: true,
-    execute: async () => "需求单已保存",
-  });
-  registry.register({
-    name: "search_attractions",
-    description: "搜索景点",
-    parameters: { type: "object", properties: {} },
-    execute: async () => {
-      searchExecutions += 1;
-      return "找到一批景点";
-    },
-  });
-  registry.register({
-    name: "save_itinerary",
-    description: "保存行程",
-    parameters: { type: "object", properties: {} },
-    alwaysActive: true,
-    execute: async () => {
-      itineraryExecutions += 1;
-      return "行程已保存";
-    },
-  });
-  const agent = new ChatAgent(new Session(), provider, registry);
-
-  assert.equal(
-    await agent.run("规划北京三日游", { maxToolRounds: 11 }),
-    "第 1 天已保存，继续完善。",
-  );
-  assert.equal(searchExecutions, 8, "第 8 次必要检索仍可执行");
-  assert.equal(itineraryExecutions, 1);
-
-  assert.ok(provider.seenToolsHistories[8].some((tool) => tool.name === "search_attractions"));
-  assert.equal(agent.history.find((message) => message.toolCallId === "search-8")?.content.includes("资料检索已暂停"), false);
-
+  const registry = new ToolRegistry(root)
+    .register(createSaveTravelBriefTool(root))
+    .register(createSaveItineraryTool(root))
+    .register({ name: "search_attractions", description: "搜索景点", parameters: { type: "object", properties: {} }, execute: async () => { searchExecutions++; return "未找到地点"; } });
+  const agent = new ChatAgent(new Session(), provider, registry, root);
+  const reply = await agent.run("规划北京三日游", { maxToolRounds: 7 });
+  assert.match(reply, /基础安排 3\/3/); assert.match(reply, /strict 未通过/);
+  assert.equal(searchExecutions, 4, "基础层三次检索后暂停，保存全日期安排后恢复本日检索");
+  assert.equal(agent.session.travelState?.itinerary?.outline?.length, 3);
+  assert.equal(agent.session.travelState?.itinerary?.dayCount, 0);
+  assert.equal(provider.seenToolsHistories[4].some((tool) => tool.name === "search_attractions"), false);
+  assert.match(agent.history.find((message) => message.toolCallId === "search-4")!.content, /outline基础安排/);
+  assert.ok(provider.seenToolsHistories[6].some((tool) => tool.name === "search_attractions"));
+  assert.doesNotMatch(agent.history.find((message) => message.toolCallId === "search-5")!.content, /当前先交付/);
 });
 
 test("Agent 保留最近一轮完整工具参数，旧轮次压缩后仍能读取并继续修改", async () => {
@@ -266,7 +217,7 @@ test("Agent 保留最近一轮完整工具参数，旧轮次压缩后仍能读�
   });
   const agent = new ChatAgent(new Session(), provider, registry);
 
-  assert.equal(await agent.run("规划北京五日游", { maxToolRounds: 3 }), "已继续修改");
+  assert.match(await agent.run("规划北京五日游", { maxToolRounds: 3 }), /当前有效安排1\/5天.*尚未完成/);
 
   const secondRequest = provider.seenHistories[1];
   const savedCall = secondRequest
@@ -307,7 +258,7 @@ test("Agent 保留最近一轮完整工具参数，旧轮次压缩后仍能读�
   );
 });
 
-test("Agent 安全检查点：用户消息后、工具批次后、最终回答后各触发一次", async () => {
+test("Agent 安全检查点：用户消息、调用意图、批次结果与最终回答均保存", async () => {
   const provider = new ScriptedProvider([
     { type: "tool_calls", toolCalls: [{ id: "call_1", name: "echo", arguments: '{"text":"你好"}' }] },
     { type: "text", content: "完成" },
@@ -324,8 +275,8 @@ test("Agent 安全检查点：用户消息后、工具批次后、最终回答�
   });
 
   assert.equal(reply, "完成");
-  // 落盘时机：仅用户消息 → 工具结果全部回填 → 最终回答入库
-  assert.deepEqual(snapshots, [1, 3, 4]);
+  // 工具执行前先保存调用意图，崩溃后才能关联操作回执。
+  assert.deepEqual(snapshots, [1, 2, 3, 4]);
 });
 
 test("Agent 检查点失败不打断对话，后续边界仍会尝试", async () => {

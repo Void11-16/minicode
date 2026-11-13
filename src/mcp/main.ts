@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { recoverManagedOperations } from "../storage/managed-operation.ts";
 import { join } from "node:path";
 import { ConfigStore } from "../config/config.ts";
 import { createDefaultRegistry } from "../tools/all.ts";
@@ -16,11 +17,13 @@ async function main(): Promise<void> {
 
   // workspace: MCP 无人工确认环节，文件类工具与 bash 限制在项目目录内
   const registry = createDefaultRegistry({ writeRoot: plansDir, workspace: projectRoot });
+  await recoverManagedOperations(projectRoot);
   await runStdioMcp(registry, {
     name: "minicode",
     version: serverVersion(),
     instructions:
       "通用 AI 助手工具集（旅行规划为特长）：文件读写编辑、命令执行、天气、地理编码、路线距离、景点/住宿/餐厅搜索、网络口碑。" +
+      "参观信息用get_place_visit_info(fields=[hours/closure/last_admission/sessions/notices/visit_duration])；口碑、排队、招牌菜和人均消费用get_place_reviews，不换工具重复取证。" +
       "坐标规则：行程条目的经纬度从 search_attractions/search_stays/search_restaurants 返回条目里逐字复制（格式「纬度,经度」）；" +
       "用 geocode 必须传 city（会做省市字段校验，防止外地同名地点——「北海公园」不带 city 会命中新疆五家渠）；" +
       "核实失败先换查询词重查（城市+区+完整名称，如「北京市西城区北海公园」），再改用 search_attractions 取坐标；" +

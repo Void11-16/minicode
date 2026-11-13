@@ -1,4 +1,5 @@
 import { cancellableFetch } from "./travel-request.ts";
+import { externalState } from "../core/external-environment.ts";
 import type { CoordinateSystem } from "./coordinates.ts";
 type FetchLike = typeof fetch;
 
@@ -20,12 +21,13 @@ export interface GeoResult {
 }
 
 /** 地理编码结果 TTL 缓存：坐标基本不变，天气/景点/住宿工具会重复查询同一城市 */
-const geoCache = new Map<string, { value: GeoResult; expiresAt: number }>();
+const liveGeoCache = new Map<string, { value: GeoResult; expiresAt: number }>();
 const GEO_CACHE_TTL_MS = 30 * 60_000;
 /** 容量上限：Map 按插入序，超限时删最早条目（近似 LRU），防止长驻进程无限增长 */
 const GEO_CACHE_MAX = 500;
 
 function cacheGet(key: string): GeoResult | undefined {
+  const geoCache = externalState("geocode-cache", liveGeoCache, () => new Map<string, { value: GeoResult; expiresAt: number }>());
   const entry = geoCache.get(key);
   if (entry === undefined) return undefined;
   if (Date.now() > entry.expiresAt) {
@@ -36,6 +38,7 @@ function cacheGet(key: string): GeoResult | undefined {
 }
 
 function cacheSet(key: string, value: GeoResult): void {
+  const geoCache = externalState("geocode-cache", liveGeoCache, () => new Map<string, { value: GeoResult; expiresAt: number }>());
   if (geoCache.size >= GEO_CACHE_MAX) {
     const oldest = geoCache.keys().next().value;
     if (oldest !== undefined) geoCache.delete(oldest);

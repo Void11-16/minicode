@@ -12,9 +12,13 @@ import { loadSuite, type EvalCase, type EvalSuite } from "./cases.ts";
 import { findItinerary } from "./itinerary-file.ts";
 import { defaultRunId, resumeLiveSuite, runNewLiveSuite } from "./live.ts";
 import { computeItineraryMetrics, type ItineraryEvalMetrics } from "./metrics.ts";
+import { requirementFailures } from "./requirements.ts";
 import { loadPlanSamples } from "./plans.ts";
-import { requireSafeRunId, type EvalRunManifest } from "./run-store.ts";
+import { requireSafeRunId, summarizeRun, type EvalRunManifest } from "./run-store.ts";
 import { parseItinerary } from "../tools/itinerary-schema.ts";
+import { loadExternalWorld, worldSuite } from "./external-world.ts";
+import { writeDashboard } from "./dashboard.ts";
+import { runWorkflowSuite } from "./workflow.ts";
 
 /**
  * 行程质量评测。
@@ -72,6 +76,22 @@ async function main(): Promise<void> {
     console.log(helpText());
     return;
   }
+  if (args.includes("--list")) {
+    const worldPath = optionalFlagValue(args, "--world");
+    const suite = worldPath ? worldSuite((await loadExternalWorld(resolve(root, worldPath))).world) : await loadSuite(resolveSuitePath(optionalFlagValue(args, "--suite") ?? "core"));
+    console.log(JSON.stringify({ ...suite, cases: filterSuiteCases(suite, args) }, null, 2));
+    return;
+  }
+  if (args.includes("--inspect")) {
+    const path = optionalFlagValue(args, "--world");
+    if (!path) throw new Error("--inspect 需要 --world <文件>，只查看数据，不请求模型");
+    const { world, sha256 } = await loadExternalWorld(resolve(root, path));
+    console.log(JSON.stringify({ world_id: world.id, version: world.version, sha256, provenance: world.provenance, now: world.now, time_zone: world.time_zone, eval_case: world.eval_case, travel_dates: world.travel_dates, places: world.places, routes: world.routes, weather: world.weather }, null, 2));
+    return;
+  }
+  if (optionalFlagValue(args, "--arch") === "workflow") { await runWorkflowMode(args); return; }
+  if (args.includes("--arch") && optionalFlagValue(args, "--arch") !== "agent") throw new Error("--arch 只支持 agent 或 workflow");
+  if (args.includes("--world") && !args.includes("--live")) throw new Error("--world 需要 --live；使用 npm run eval:world");
 
   if (args.includes("--plans")) {
     await runPlansMode(args);
@@ -89,6 +109,7 @@ async function runLiveMode(args: readonly string[]): Promise<void> {
     throw new Error("--resume 需要配合 live 评测脚本使用：npm run eval:live -- --resume <run-id>");
   }
   const resumeId = optionalFlagValue(args, "--resume");
+  if (resumeId && args.includes("--world")) throw new Error("续跑从批次内恢复世界快照，不接受 --world 替换数据");
   if (args.includes("--resume") && resumeId === undefined) {
     throw new Error("--resume 需要批次 ID，例如 --resume 20261026-153012-representative");
   }
@@ -108,6 +129,12 @@ async function runLiveMode(args: readonly string[]): Promise<void> {
 
   console.log(`\n机器可读报告: ${relative(root, join(root, "eval", "runs", manifest.run_id, "report.json"))}`);
   console.log(`可读报告: ${relative(root, join(root, "eval", "runs", manifest.run_id, "report.md"))}\n`);
+  try {
+    await writeDashboard(join(root, "eval", "runs"), join(outRoot, "dashboard.html"));
+    console.log("版本对比: eval/out/dashboard.html");
+  } catch (error) {
+    console.warn(`版本看板更新失败: ${error instanceof Error ? error.message : String(error)}`);
+  }
 
   if (args.includes("--strict") && manifest.status !== "completed") {
     console.error("strict 闸门未通过：批次中仍有未通过案例\n");
@@ -116,13 +143,38 @@ async function runLiveMode(args: readonly string[]): Promise<void> {
   await reportLiveAgainstBaseline(args, manifest);
 }
 
+async function runWorkflowMode(args: readonly string[]): Promise<void> {
+  const worldFlag = optionalFlagValue(args, "--world");
+  if (worldFlag === undefined) throw new Error("workflow 需要 --world <文件>");
+  const worldPath = resolve(root, worldFlag);
+  const { world } = await loadExternalWorld(worldPath);
+  const suite = worldSuite(world);
+  const cases = filterSuiteCases(suite, args);
+  if (cases.length !== 1 || cases[0]?.id !== world.eval_case.id) {
+    throw new Error("workflow 固定世界评测只能运行快照内的唯一案例");
+  }
+  const runId = requireSafeRunId(optionalFlagValue(args, "--run-id") ?? defaultRunId(suite.id));
+  const manifest = await runWorkflowSuite({ rootDir: root, suitePath: worldPath, suite, cases, runId, worldPath });
+  const summary = summarizeRun(manifest);
+  console.log(`workflow 批次 ${manifest.run_id} · ${summary.cases} 个案例 · 通过 ${summary.passed} · 失败 ${summary.failed}`);
+  console.log(`机器可读报告: ${relative(root, join(root, "eval", "runs", manifest.run_id, "report.json"))}`);
+  console.log(`可读报告: ${relative(root, join(root, "eval", "runs", manifest.run_id, "report.md"))}\n`);
+  if (args.includes("--strict") && manifest.status !== "completed") {
+    console.error("strict 闸门未通过：批次中仍有未通过案例\n");
+    process.exitCode = 1;
+  }
+}
+
 async function createLiveRun(
   args: readonly string[],
   profileFilter: string | undefined,
   onProgress: (message: string) => void,
 ): Promise<EvalRunManifest> {
-  const suitePath = resolveSuitePath(optionalFlagValue(args, "--suite") ?? "core");
-  const suite = await loadSuite(suitePath);
+  const worldFlag = optionalFlagValue(args, "--world");
+  if (args.includes("--world") && !worldFlag) throw new Error("--world 需要场景 JSON 文件");
+  if (worldFlag && args.includes("--suite")) throw new Error("--world 自带案例，不再同时指定 --suite");
+  const suitePath = worldFlag ? resolve(root, worldFlag) : resolveSuitePath(optionalFlagValue(args, "--suite") ?? "core");
+  const suite = worldFlag ? worldSuite((await loadExternalWorld(suitePath)).world) : await loadSuite(suitePath);
   const cases = filterSuiteCases(suite, args);
   const runId = requireSafeRunId(optionalFlagValue(args, "--run-id") ?? defaultRunId(suite.id));
   return runNewLiveSuite({
@@ -136,6 +188,7 @@ async function createLiveRun(
     ...(optionalLimit(args) === undefined ? {} : { limit: optionalLimit(args) }),
     ...(profileFilter === undefined ? {} : { profileFilter }),
     onProgress,
+    ...(worldFlag ? { worldPath: suitePath } : {}),
   });
 }
 
@@ -255,6 +308,7 @@ async function evaluateFile(evalCase: EvalCase, path: string, run: RunMeta | nul
     const metrics = computeItineraryMetrics(itinerary, {
       expectedDays: evalCase.days,
       mustVisit: evalCase.must_visit,
+      requirements: evalCase.requirements,
       ...(evalCase.budget_per_person_yuan === undefined
         ? {}
         : { budgetPerPersonYuan: evalCase.budget_per_person_yuan }),
@@ -299,6 +353,7 @@ function strictFailuresFor(evalCase: EvalCase, metrics: ItineraryEvalMetrics | n
   if (metrics.issueCounts.P0 > 0 || metrics.issueCounts.P1 > 0) {
     failures.push(`${evalCase.id}: P0 ${metrics.issueCounts.P0} / P1 ${metrics.issueCounts.P1}`);
   }
+  failures.push(...requirementFailures(metrics).map((reason) => `${evalCase.id}: ${reason}`));
 
   return failures;
 }
@@ -327,7 +382,7 @@ function printCaseResult(result: CaseResult): void {
     ` · 路线问题 ${metrics.routeIssueCount} · 人均 ¥${Math.round(metrics.costPerPerson)}` +
     (metrics.budgetPerPersonYuan === undefined
       ? ""
-      : `（预算 ¥${metrics.budgetPerPersonYuan}，${((metrics.budgetRatio ?? 0) * 100).toFixed(0)}%）`),
+      : `（预算 ¥${metrics.budgetPerPersonYuan}，${((metrics.budgetRatio ?? 0) * 100).toFixed(0)}%${metrics.estimatedCostPerPerson === undefined ? "" : `，含估算 ¥${Math.round(metrics.estimatedCostPerPerson)}`}）`),
   );
   if (result.run !== null) {
     console.log(
@@ -336,6 +391,11 @@ function printCaseResult(result: CaseResult): void {
     );
   }
   if (metrics.issueCodes.length > 0) console.log(`    问题码 ${metrics.issueCodes.join(", ")}`);
+  if (metrics.requirementChecks) {
+    console.log(`    需求验收 ${metrics.requirementChecks.filter((check) => check.passed).length}/${metrics.requirementChecks.length}`);
+    for (const failure of requirementFailures(metrics)) console.log(`    未满足 ${failure}`);
+  }
+  if (evalCase.review_focus?.length) console.log(`    人工复核（不计自动通过） ${evalCase.review_focus.join("；")}`);
   console.log("");
 }
 
@@ -366,6 +426,7 @@ async function writeReports(
     results: results.map((result) => ({
       id: result.evalCase.id,
       title: result.evalCase.title,
+      review_focus: result.evalCase.review_focus,
       itinerary: result.itineraryPath,
       note: result.note,
       run: result.run,
@@ -408,6 +469,9 @@ async function writeReports(
       `问题码: ${result.metrics.issueCodes.join(", ") || "（无）"}`,
       "",
     );
+    for (const check of result.metrics.requirementChecks ?? []) lines.push(`- ${check.passed ? "通过" : "未通过"} ${check.code}: ${check.message}`);
+    if (result.evalCase.review_focus?.length) lines.push("", `人工复核（不计自动通过）：${result.evalCase.review_focus.join("；")}`);
+    lines.push("");
   }
   await writeFile(`${reportBase}.md`, lines.join("\n"), "utf8");
 }
@@ -485,7 +549,11 @@ function helpText(): string {
     "",
     "  npm run eval -- --suite core                 离线检查旧 eval/out 产出",
     "  npm run eval -- --case <id> --tag <tag>      按案例或标签筛选",
+    "  npm run eval -- --suite comprehensive --list 查看案例与验收条件（不请求模型）",
     "  npm run eval:live -- --suite representative  新建独立 live 批次",
+    "  npm run eval:world -- --inspect              查看西安固定场景（不请求模型）",
+    "  npm run eval:world -- --run-id <id>           固定旅行数据，真实运行完整 Agent",
+    "     --world <file>                            自定义场景；不能与 --suite/--resume 混用",
     "     --run-id <id>                             指定批次 ID；已存在时拒绝覆盖",
     "     --case <id> --tag <tag> --limit <n>       筛选本次案例",
     "     --profile <id>                            指定 models.json 里的模型",

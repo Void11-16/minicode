@@ -1,7 +1,9 @@
+import { checkRequirements, mainVisitCount, validTravelDate, violatesForbiddenVisit } from "./travel-requirements.ts";
 import { normalizeStayReferences, compatibleStay } from "./stay-policy.ts";
 import { routeQueryHint } from "./route-request.ts";
 import { alignRouteContext } from "./itinerary-route-context.ts";
-import { sameVisit, visitAssignments, materializedDay } from "./itinerary-planning.ts";
+import { sameVisit, visitAssignments, materializedDay, hasTimedDeparture } from "./itinerary-planning.ts";
+import { itineraryDayRole } from "./day-role.ts";
 import { repeatVisitAllowed } from "./repeat-visit-policy.ts";
 import { routeTimingTolerance, dayBoundarySeverity, activeDurationSeverity, ACTIVE_TARGET_MINUTES } from "./timing-policy.ts";
 import { scenicVisitKey } from "./scenic-area.ts";
@@ -17,8 +19,9 @@ import {
   type ItineraryDay,
   type ItineraryItem,
 } from "./itinerary-schema.ts";
-import { recommendationCoverage, recommendationPolicy, distinctMeals, formatRecommendationPolicy, type RecommendationPolicy } from "./recommendation-policy.ts";
+import { recommendationCoverage, recommendationPolicy, formatRecommendationPolicy, type RecommendationPolicy } from "./recommendation-policy.ts";
 import { isRemoteDayTravel, REMOTE_DAY_NEARBY_KM, DEFAULT_REMOTE_LEG_LIMIT_MINUTES } from "./remote-day-policy.ts";
+import { budgetResultText, recordedCostPerPerson, tripBudgetReport, type TripBudgetReport } from "./trip-budget.ts";
 
 export type QualityIssueLevel = "P0" | "P1" | "P2";
 export type ItineraryQualityStatus = "ok" | "needs_confirmation" | "needs_revision" | "invalid";
@@ -28,6 +31,7 @@ export interface QualityIssue {
   readonly code: string;
   readonly message: string;
   readonly day?: number;
+  readonly date?: string;
   readonly item_id?: string;
   readonly kind?: "error" | "pending" | "advice";
   readonly related_days?: readonly number[];
@@ -45,6 +49,7 @@ export interface ItineraryQualityReport {
   readonly score_version?: typeof QUALITY_SCORING_VERSION;
   readonly source_signature?: string;
   readonly recommendation_policy?: RecommendationPolicy;
+  readonly budget?: TripBudgetReport;
   readonly scoring?: OpportunityScore;
   readonly daily?: readonly DayQualityReport[];
   readonly changed_days?: readonly number[];
@@ -103,6 +108,10 @@ export function validateItinerary(
 ): ItineraryQualityReport {
   const sourceSignature = qualitySourceSignature(itinerary);
   itinerary = normalizeStayReferences(itinerary);
+  itinerary = { ...itinerary, days: itinerary.days.map((day, index) => {
+    const role = itineraryDayRole(itinerary, day, index);
+    return day.day_type !== "departure" && role === "departure" ? { ...day, day_type: role } : day;
+  }) };
   itinerary = { ...itinerary, days: itinerary.days.map((day) => alignRouteContext(day, itinerary.constraints?.destination)) };
   // 空间算法统一用 WGS84；持久化数据仍保留原始供应商坐标及坐标系。
   itinerary = { ...itinerary, days: itinerary.days.map((day) => ({ ...day, items: day.items.map((item) => {
@@ -175,13 +184,18 @@ export function validateItinerary(
       ),
     );
   }
-  const totalCost = totalCostPerPerson(itinerary);
-  const budget = options.budget_per_person_yuan ?? itinerary.budget_per_person_yuan;
-  if (budget !== undefined && totalCost > budget) {
-    issues.push(
-      issue("P1", "budget-exceeded", `人均预估花费 ¥${totalCost}，超过预算 ¥${budget}`),
-    );
+  const perPerson = options.budget_per_person_yuan ?? itinerary.budget_per_person_yuan;
+  const budget = tripBudgetReport(itinerary, perPerson, titleDays ?? itinerary.days.length);
+  const stayEstimate = budget?.categories.find((category) => category.label === "住宿")?.estimated;
+  if (budget?.plan.economy && stayEstimate && itinerary.days.some((day) => day.day_type !== "departure" && day.items.some((item) => item.type === "accommodation" && item.stay_nights !== 0))) {
+    issues.push({ ...issue("P2", "economy-stay-price-pending", `住宿预算中有 ¥${stayEstimate} 为估算，请核对入住日期的床位或房型与实付价格`), kind: "pending" });
   }
+  if (budget?.status === "over_limit") {
+    const largest = [...budget.days].sort((a, b) => (b.projected - b.target) - (a.projected - a.target))[0];
+    const excess = Math.round((budget.projected - budget.plan.limit) * 100) / 100;
+    const expensive = budget.categories.filter((row) => row.recorded + row.estimated > row.target).map((row) => row.label);
+    issues.push(issue("P1", "budget-exceeded", `${budgetResultText(budget)}需节省 ¥${excess}${expensive.length ? `，先调整${expensive.join("、")}` : ""}。`, largest?.day));
+  } else if (perPerson === 0 && totalCostPerPerson(itinerary) > 0) issues.push(issue("P1", "budget-exceeded", "已录费用超过零支出预算。"));
 
   issues.push(...deliveryIssues(itinerary));
   const assignments = visitAssignments(itinerary), city = itinerary.constraints?.destination;
@@ -198,7 +212,7 @@ export function validateItinerary(
   if (itinerary.outline?.length && titleDays !== undefined && itinerary.outline.length !== titleDays) issues.push(issue("P1", "outline-day-count-mismatch", `粗排 ${itinerary.outline.length}/${titleDays} 天，请先补齐全局分配，不能把粗排算作已完成`));
   if (itinerary.outline?.some((day) => (itinerary.constraints?.start_date !== undefined && day.date < itinerary.constraints.start_date) || (itinerary.constraints?.end_date !== undefined && day.date > itinerary.constraints.end_date))) issues.push(issue("P1", "outline-date-outside-request", "粗排包含需求日期范围之外的日期，请只调整相关预留"));
   for (const excluded of itinerary.excluded_visits ?? []) if (assignments.some((entry) => sameVisit(entry, excluded, city))) issues.push(issue("P1", "excluded-visit-assigned", `「${excluded.name}」已明确排除（${excluded.reason}），仍被预留或安排`));
-  issues.push(...requiredVisitIssues(itinerary));
+  issues.push(...requiredVisitIssues(itinerary), ...explicitRequirementIssues(itinerary));
   // 餐饮默认仅作建议，显式严格策略才进入正式验收。
   const itineraryIssues = aggregateIssues(issues.filter((item) => !isMealNote(item)).map(plainIssue), itinerary);
   const mealNotes = recommendationPolicy(itinerary).mode === "off" ? [] : issues.filter(isMealNote).map(plainIssue);
@@ -216,14 +230,14 @@ export function validateItinerary(
   for (const item of itineraryIssues) if (item.related_days?.some((day) => affected.has(day))) item.related_days.forEach((day) => affected.add(day));
   const repairs = new Set(itineraryIssues.filter((item) => item.level !== "P2" && item.day !== undefined).map((item) => item.day!));
   return { title: itinerary.title, generated_at: new Date().toISOString(), status: qualityStatus(itineraryIssues),
-    score: scoring.score, score_version: QUALITY_SCORING_VERSION, source_signature: sourceSignature, recommendation_policy: recommendationPolicy(itinerary), scoring, issue_count: counts,
+    score: scoring.score, score_version: QUALITY_SCORING_VERSION, source_signature: sourceSignature, recommendation_policy: recommendationPolicy(itinerary), ...(budget ? { budget } : {}), scoring, issue_count: counts,
     issues: itineraryIssues, meal_notes: mealNotes, daily,
     changed_days: [...changed], affected_days: [...affected].sort((a, b) => a - b), repair_days: [...repairs].sort((a, b) => a - b) };
 
 }
 
 /** 缓存报告必须对应同一份规范化行程，不能用旧公式或旧内容的分数冒充当前结果。 */
-export function qualitySourceSignature(itinerary: Itinerary): string { return createHash("sha256").update(JSON.stringify(itinerary)).digest("hex"); }
+export function qualitySourceSignature(itinerary: Itinerary): string { const { planning_layers: _layers, ...source } = itinerary; return createHash("sha256").update(JSON.stringify(source)).digest("hex"); }
 
 /** Haversine 大圆距离（公里）——空间连贯性校验用 */
 function haversineKm(fromLat: number, fromLon: number, toLat: number, toLon: number): number {
@@ -285,15 +299,14 @@ function validateDay(
     issues.push(issue("P1", "missing-time", "存在缺少 time 的条目（餐饮候选除外），无法完整核验时间线", dayNumber));
   }
 
-  // 全天没有任何游览安排（只有吃饭/交通/住宿）——典型是"空壳返程日"，
-  // 模型为凑天数把纯返程拉成一天，或为过晚餐校验塞假条目
+  // 完整游玩日须有景点，返程日由交付检查核对到站或离城交通。
   if ((day.day_type ?? "full") === "full" && !day.items.some((item) => item.type === "visit")) {
     const kinds = [...new Set(day.items.map((item) => item.type))].join("、");
     issues.push(
       issue(
         "P1",
         "no-activity",
-        `当天没有任何游览安排（仅有 ${kinds}）。返程日建议安排上午活动，或压缩行程天数`,
+        `完整游玩日没有任何游览安排（仅有 ${kinds}），请补充当日景点`,
         dayNumber,
       ),
     );
@@ -475,7 +488,7 @@ function validateItem(item: ItineraryItem, dayNumber: number, weekday: string | 
           "long-transport",
           extreme
             ? `交通耗时 ${duration} 分钟，超过 ${transportLimit} 分钟：` +
-              "建议调整顺序、交通或景点；仅用户允许时更换住宿"
+              "建议调整顺序、交通或景点；后续行程跨区域时可转场换宿，遵守用户明确不换酒店的要求"
             : `交通耗时 ${duration} 分钟，属于远郊/跨区长距离移动：` +
               `请确认当天已预留缓冲（超过 ${LONG_TRANSPORT_MINUTES} 分钟会提示，但不阻断交付）`,
           dayNumber,
@@ -722,6 +735,10 @@ function transferTimeIssues(items: readonly ItineraryItem[], dayNumber: number):
     const current = waypoints[i];
     const previousEnd = itemEndMinutes(previous);
     if (previousEnd === undefined) continue;
+    // 真实路线及其实际方式优先；时长不足由route-duration-too-short检查，不能再套步行估算。
+    if (items.some((item) => item.type === "transport" && item.from === previous.name && item.to === current.name &&
+      item.route_verified === true && item.route_duration_min !== undefined && item.time !== undefined &&
+      timeToMinutes(item.time) >= previousEnd && itemEndMinutes(item) !== undefined && itemEndMinutes(item)! <= timeToMinutes(current.time!))) continue;
     const distanceKm = haversineKm(
       previous.location.latitude,
       previous.location.longitude,
@@ -916,53 +933,7 @@ function bestOpenPathM(
 }
 
 export function totalCostPerPerson(itinerary: Itinerary): number {
-  itinerary = normalizeStayReferences(itinerary);
-  let total = 0;
-  const travelers = itinerary.travelers ?? 2;
-  const paidNights = new Map<string, [number, number][]>();
-  for (const [dayIndex, day] of itinerary.days.entries()) {
-    // 非餐饮条目直接累加
-    for (const item of day.items) {
-      if (item.type === "accommodation" && item.room_price_per_night !== undefined) {
-        const isLastDay = day.date !== undefined && itinerary.constraints?.end_date !== undefined
-          ? day.date >= itinerary.constraints.end_date
-          : dayIndex >= (itinerary.constraints?.expected_days ?? itinerary.days.length) - 1;
-        const nights = item.stay_nights ?? (isLastDay ? 0 : 1);
-        const rooms = item.room_count ?? itinerary.room_count ?? Math.ceil(travelers / 2);
-        const start = day.date === undefined || !Number.isFinite(Date.parse(day.date)) ? dayIndex : Date.parse(day.date) / 86400000;
-        const key = JSON.stringify([item.name, item.location?.latitude, item.location?.longitude]);
-        const paid = paidNights.get(key) ?? [];
-        // 按日期区间去重，复杂度由条目数决定，避免大晚数触发逐晚循环。
-        let unpaid: [number, number][] = nights === 0 ? [] : [[start, start + nights]];
-        for (const [paidStart, paidEnd] of paid) {
-          unpaid = unpaid.flatMap(([a, b]) => {
-            if (paidEnd <= a || paidStart >= b) return [[a, b] as [number, number]];
-            const segments: [number, number][] = [];
-            if (a < paidStart) segments.push([a, paidStart]);
-            if (paidEnd < b) segments.push([paidEnd, b]);
-            return segments;
-          });
-        }
-        total += unpaid.reduce((sum, [a, b]) => sum + b - a, 0) * item.room_price_per_night * rooms / travelers;
-        if (nights > 0) paidNights.set(key, [...paid, [start, start + nights]]);
-      } else if (item.type !== "meal") {
-        // 历史文件中显式的人均费用保持原语义，不自动猜测成房价。
-        total += (item.cost_per_person ?? 0) + (item.ticket_price_per_person ?? 0);
-      }
-    }
-    // 餐饮是候选：用户每餐只选一家，按同餐候选均价估算一次（避免把所有候选重复累加）
-    const costsBySubtype = new Map<string, ItineraryItem[]>();
-    for (const item of day.items) {
-      if (item.type !== "meal") continue;
-      const key = item.subtype ?? "meal";
-      costsBySubtype.set(key, [...(costsBySubtype.get(key) ?? []), item]);
-    }
-    for (const candidates of costsBySubtype.values()) {
-      const costs = distinctMeals(candidates).flatMap((item) => item.cost_per_person === undefined ? [] : [item.cost_per_person]);
-      if (costs.length > 0) total += costs.reduce((sum, cost) => sum + cost, 0) / costs.length;
-    }
-  }
-  return total;
+  return recordedCostPerPerson(itinerary);
 }
 
 function itemDurationMinutes(item: ItineraryItem): number {
@@ -993,6 +964,36 @@ function outsideOpeningHours(item: ItineraryItem & { time?: string }, hours: { o
   return start < opens || start >= closes || end > closes || (admission !== undefined && start > admission);
 }
 
+function explicitRequirementIssues(plan: Itinerary): QualityIssue[] {
+  const constraints = plan.constraints;
+  const requirements = constraints?.requirements;
+  if (!requirements) return [];
+  // 日期覆盖与固定住宿由 deliveryIssues 检查；这里复用评测的其余硬约束。
+  const { dates, fixed_stay: _fixedStay, ...checks } = requirements;
+  const plannedDay = (date: string | undefined, index: number): number => {
+    if (validTravelDate(constraints.start_date) && validTravelDate(date)) return (Date.parse(date) - Date.parse(constraints.start_date)) / 86_400_000 + 1;
+    const slot = date === undefined ? -1 : (dates ?? plan.outline?.map((day) => day.date) ?? []).indexOf(date);
+    return slot === -1 ? index + 1 : slot + 1;
+  };
+  const issues = checkRequirements(plan, checks, { partial: true, plannedDay }).flatMap((check): QualityIssue[] => check.passed ? [] :
+    [{ ...issue("P1", check.code, check.message, check.day), kind: "error" }]);
+  for (const [index, day] of (plan.outline ?? []).entries()) {
+    const actual = plan.days.findIndex((entry) => entry.date === day.date) + 1;
+    const add = (code: string, message: string): void => {
+      if (actual && issues.some((entry) => entry.day === actual && entry.code === code && entry.message === message)) return;
+      issues.push({ ...issue("P1", code, message, actual || undefined), date: day.date, kind: "error" });
+    };
+    for (const name of requirements.forbidden_visits ?? []) {
+      if (violatesForbiddenVisit(day.visits, name, constraints.destination)) add("forbidden-visit", `禁去景点「${name}」仍出现在游览安排中`);
+    }
+    if (requirements.max_visits_per_day !== undefined) {
+      const count = mainVisitCount(day.visits);
+      if (count > requirements.max_visits_per_day) add("daily-visit-limit", `第 ${plannedDay(day.date, index)} 天游览 ${count} 个主景点，上限 ${requirements.max_visits_per_day}`);
+    }
+  }
+  return issues;
+}
+
 function deliveryIssues(itinerary: Itinerary): QualityIssue[] {
   const constraints = itinerary.constraints ?? {};
   const issues: QualityIssue[] = [];
@@ -1014,23 +1015,37 @@ function deliveryIssues(itinerary: Itinerary): QualityIssue[] {
     const isLast = constraints.end_date === undefined ? number === expectedDays : day.date === constraints.end_date;
     if ((role === "arrival" && !isFirst) || (role === "departure" && !isLast)) issues.push(issue("P1", "invalid-day-role", "抵达日只能是首日，离开日只能是实际末日", number));
     if (role === "transfer" && !day.items.some((item) => item.type === "transport" && item.time !== undefined && itemEndMinutes(item) !== undefined)) issues.push(issue("P1", "missing-transfer-activity", "转场日需要实际交通时间块，不能只有日期类型", number));
-    if (["arrival", "departure", "transfer"].includes(role) && day.available_start === undefined && day.available_end === undefined) issues.push(issue("P1", "missing-day-window", "非完整游玩日需要明确可用时间，不能只改日期类型规避检查", number));
+    if ((role === "arrival" || role === "transfer" || role === "departure" && !constraints.return_last_day)
+      && day.available_start === undefined && day.available_end === undefined) issues.push(issue("P1", "missing-day-window", "非完整游玩日需要明确可用时间，不能只改日期类型规避检查", number));
+    if (role === "departure" && !hasTimedDeparture(day)) {
+      const hasVisit = day.items.some((item) => item.type === "visit" && item.time && itemEndMinutes(item) !== undefined);
+      issues.push({ ...issue(hasVisit ? "P2" : "P1", "departure-transport-pending", "请确认返程站点、班次及到站交通，按实际信息留足进站时间", number), kind: "pending" });
+    }
     if (constraints.require_accommodation && role !== "departure" && !day.items.some((item) => item.type === "accommodation")) issues.push(issue("P1", "missing-accommodation", "当天缺少住宿安排或已确认的住宿地点", number));
     const timed = day.items.filter((item) => item.time !== undefined && item.type !== "meal").sort((a, b) => a.time!.localeCompare(b.time!));
     const coreTimed = timed.filter((item) => ["visit", "transport", "accommodation"].includes(item.type));
     const remote = day.items.some((item) => item.type === "visit") && isRemoteDayTravel(day.items.filter((item) => item.type === "transport"));
     const starts = coreTimed.map((item) => timeToMinutes(item.time!));
     const ends = coreTimed.flatMap((item) => itemEndMinutes(item) === undefined ? [] : [itemEndMinutes(item)!]);
-    const requiredStart = Math.max(availableStart, constraints.day_start === undefined ? availableStart : timeToMinutes(constraints.day_start));
-    const requiredEnd = Math.min(availableEnd, constraints.day_end === undefined ? availableEnd : timeToMinutes(constraints.day_end));
-    if (requiredStart < requiredEnd) {
+    const plannedIndex = validTravelDate(constraints.start_date) && validTravelDate(day.date)
+      ? (Date.parse(day.date) - Date.parse(constraints.start_date)) / 86_400_000 + 1
+      : (day.date && itinerary.outline ? itinerary.outline.findIndex((slot) => slot.date === day.date) + 1 : number) || number;
+    const requested = [constraints.requirements?.daily_window, constraints.requirements?.day_windows?.find((window) => window.day === plannedIndex)].filter((window) => window !== undefined);
+    const requiredStart = Math.max(availableStart, constraints.day_start === undefined ? availableStart : timeToMinutes(constraints.day_start), ...requested.map((window) => timeToMinutes(window.start)));
+    const requiredEnd = Math.min(availableEnd, constraints.day_end === undefined ? availableEnd : timeToMinutes(constraints.day_end), ...requested.map((window) => timeToMinutes(window.end)));
+    if (role !== "departure" && requiredStart < requiredEnd) {
       const window = requiredEnd - requiredStart;
       const startLevel = starts.length === 0 ? "P1" : dayBoundarySeverity(Math.min(...starts) - requiredStart, window);
       const endLevel = ends.length === 0 ? "P1" : dayBoundarySeverity(requiredEnd - Math.max(...ends), window);
       if (constraints.day_start !== undefined && startLevel) issues.push(issue(startLevel, "incomplete-day-start", `当天开始晚于参考 ${formatClock(requiredStart)}${startLevel === "P2" ? "；节奏提示，不扣分、不阻断" : "，缺口超过参考窗口的25%或没有有效活动，请确认是否缺少安排"}`, number));
       if (!remote && constraints.day_end !== undefined && endLevel) issues.push(issue(endLevel, "incomplete-day-end", `当天结束早于参考 ${formatClock(requiredEnd)}${endLevel === "P2" ? "；允许提前返店，节奏提示不扣分、不阻断" : "，缺口超过参考窗口的25%或没有有效活动，请确认是否缺少安排"}`, number));
     }
-    for (const item of timed) if (timeToMinutes(item.time!) < availableStart || (itemEndMinutes(item) ?? timeToMinutes(item.time!)) > availableEnd) issues.push(issue("P1", "outside-day-window", `${item.name} 超出当天已知可用时间`, number, item.id));
+    for (const item of timed) {
+      const start = timeToMinutes(item.time!), end = itemEndMinutes(item) ?? start;
+      // 出发前的酒店内准备不占外出窗口；抵达日及窗口结束后的入住仍须检查。
+      const beforeDeparture = item.type === "accommodation" && role === "full" && end <= availableStart;
+      if ((!beforeDeparture && start < availableStart) || end > availableEnd) issues.push(issue("P1", "outside-day-window", `${item.name} 超出当天已知可用时间`, number, item.id));
+    }
     for (const item of day.items) {
       if (constraints.require_place_evidence && ["visit", "meal", "accommodation"].includes(item.type) && item.evidence_verified !== true) {
         issues.push(issue("P1", "unverified-place-evidence", `${item.name} 缺少对应城市的工具地点证据`, number, item.id, item.type === "meal" && recommendationPolicy(itinerary).mode !== "strict"));
@@ -1069,13 +1084,11 @@ function deliveryIssues(itinerary: Itinerary): QualityIssue[] {
       }
     }
   });
-  if (constraints.allow_hotel_changes === false || (constraints.require_accommodation && constraints.allow_hotel_changes !== true)) {
+  if (constraints.allow_hotel_changes === false) {
     const stays = itinerary.days.flatMap((day, index) => day.items.filter((item) => item.type === "accommodation").map((item) => ({ item, day: index + 1 })));
     const base = stays.find((entry) => entry.item.name === constraints.base_stay_name)?.item ?? stays[0]?.item;
-    const changed = new Set<string>();
-    for (const entry of stays) if (base && ((constraints.base_stay_name !== undefined && entry.item.name !== constraints.base_stay_name) || !compatibleStay(base, entry.item)) && !changed.has(entry.item.name)) {
-      changed.add(entry.item.name);
-      issues.push(issue("P1", "hotel-change-not-allowed", `本次默认全程住「${constraints.base_stay_name ?? base.name}」，却安排「${entry.item.name}」；请沿用已选酒店，确需换酒店时先更新用户需求`, entry.day, entry.item.id));
+    for (const entry of stays) if (base && ((constraints.base_stay_name !== undefined && entry.item.name !== constraints.base_stay_name) || !compatibleStay(base, entry.item))) {
+      issues.push(issue("P1", "hotel-change-not-allowed", `用户要求全程住「${constraints.base_stay_name ?? base.name}」，却安排「${entry.item.name}」；请遵守用户明确不换酒店的要求`, entry.day, entry.item.id));
     }
   }
   const policy = recommendationPolicy(itinerary);
@@ -1166,7 +1179,7 @@ export function renderQualityReport(report: ItineraryQualityReport): string {
     return [
       `## ${level}`,
       ...levelIssues.map((item) => {
-        const location = item.day === undefined ? "" : `Day ${item.day} · `;
+        const location = item.date ? `${item.date} · ` : item.day === undefined ? "" : `Day ${item.day} · `;
         const itemId = item.item_id === undefined ? "" : `${item.item_id}: `;
         return `- ${location}${itemId}${item.kind === "pending" ? "[资料待确认] " : ""}${item.message}（${item.code}${item.related_codes?.length ? `；关联检查 ${item.related_codes.join(",")}` : ""}）`;
       }),
@@ -1199,6 +1212,11 @@ export function renderQualityReport(report: ItineraryQualityReport): string {
     "",
     `- 状态: ${status}`,
     `- 评分: ${report.score} / 100${report.score_version === undefined ? "" : `（${report.score_version}，按检查对象归一化）`}`,
+    ...(report.budget ? [
+      `- ${budgetResultText(report.budget)}`,
+      ...report.budget.categories.map((row) => `- ${row.label} · 分配 ¥${row.target}，已录 ¥${row.recorded}，估算 ¥${row.estimated}`),
+      ...report.budget.days.filter((day) => day.gaps.length).map((day) => `- ${day.date ?? `Day ${day.day}`}待补预算安排 · ${day.gaps.join("、")}`),
+    ] : []),
     ...(report.scoring === undefined ? [] : [`- 完整度: ${(report.scoring.completeness * 100).toFixed(0)}%`, ...Object.entries(report.scoring.dimensions).map(([name, d]) => `- ${{ schedule: "时间安排", routing: "交通衔接", evidence: "资料核验", consistency: "行程一致性" }[name as keyof OpportunityScore["dimensions"]]}: ${d.score} 分，${d.failed}/${d.checked} 个检查对象有问题`)]),
     ...(report.daily === undefined ? [] : ["- 分日验收: " + report.daily.map((day) => `D${day.day} ${day.strict_pass ? "通过" : day.status === "needs_confirmation" ? "待确认" : "待修改"}`).join("；")]),
     ...(report.repair_days?.length ? [`- 建议局部修复日期: ${report.repair_days.join("、")}`] : []),

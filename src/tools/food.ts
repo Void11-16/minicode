@@ -1,3 +1,4 @@
+import { externalNow } from "../core/external-environment.ts";
 import { cancellableFetch } from "./travel-request.ts";
 import { convertPoint } from "./coordinates.ts";
 import type { Tool } from "./tool.ts";
@@ -95,7 +96,7 @@ export function createFoodTool(fetchFn: FetchLike = fetch): Tool {
         city: { type: "string", description: "搜索中心：景点/商圈/酒店名或城市名，例如：灵隐寺、西湖、杭州" },
         region: { type: "string", description: "所在城市名（如 杭州）。中心为景点名时建议传入，可选" },
         cuisine: { type: "string", description: "菜系或品类关键词，例如：杭帮菜、川菜、火锅。可选" },
-        max_cost: { type: "number", description: "人均消费上限（元），可选" },
+        max_cost: { type: "number", minimum: 0, description: "人均消费上限（元）。省略时沿用需求单分项额度。" },
         min_rating: { type: "number", description: "最低评分（如 4.5），可选；不传则默认 4.2 且不足自动放宽" },
         avoid_cuisines: {
           type: "string",
@@ -141,7 +142,7 @@ export function createFoodTool(fetchFn: FetchLike = fetch): Tool {
       if (!pool && args.refresh !== true) pool = ctx?.evidence?.discoveryPools.find("search_restaurants", targetCity, city, cuisine, radiusKm, geo);
       if (pool) ctx?.onDiscoveryReuse?.(pool.observed_at);
       else ctx?.beforeDiscoveryFetch?.(geo);
-      const observedAt = pool?.observed_at ?? Date.now();
+      const observedAt = pool?.observed_at ?? externalNow().getTime();
       const pois = pool?.pois ?? await amap!.poiSearch(
         cuisine === "" ? "美食" : cuisine, { ...convertPoint(geo, "gcj02") }, radiusKm * 1000, "050000",
       );
@@ -187,7 +188,7 @@ export function createFoodTool(fetchFn: FetchLike = fetch): Tool {
       for (const f of foods) {
         f.score = scoreFood(f, radiusKm, maxCost);
       }
-      foods.sort((a, b) => b.score - a.score);
+      foods.sort((a, b) => (maxCost === undefined ? 0 : Number(a.avgCost === undefined) - Number(b.avgCost === undefined)) || b.score - a.score);
 
       // 菜系多样性：同一菜系最多保留 MAX_PER_CUISINE 家，保证候选可组合出不重复的三餐
       const perCuisine = new Map<string, number>();
@@ -204,6 +205,7 @@ export function createFoodTool(fetchFn: FetchLike = fetch): Tool {
         const parts = [`${index + 1}. ${f.name} 综合 ${f.score.toFixed(1)}`, `${f.cuisine}${f.local ? "·本地特色" : ""}`];
         if (f.rating !== undefined) parts.push(`评分 ${f.rating.toFixed(1)}`);
         if (f.avgCost !== undefined) parts.push(`人均 ¥${f.avgCost}`);
+        else if (maxCost !== undefined) parts.push("人均价格待确认");
         parts.push(`距离 ${f.distanceKm.toFixed(1)} 公里`);
         parts.push(`坐标 ${f.latitude.toFixed(4)},${f.longitude.toFixed(4)}`);
         if (f.address !== undefined && f.address !== "") parts.push(f.address);

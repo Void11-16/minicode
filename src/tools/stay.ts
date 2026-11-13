@@ -17,6 +17,8 @@ const STAY_TYPE_LABELS: Record<string, string> = {
   apartment: "公寓",
   motel: "汽车旅馆",
 };
+const ECONOMY_STAY = /青年旅舍|青旅|经济型|快捷酒店|招待所|宾馆|旅馆|客栈|住宿旅社|全季|如家|汉庭|7天|格林豪泰|锦江之星|速8|布丁酒店|怡莱|海友/;
+const HOSTEL = /青年旅舍|青旅|hostel/i;
 
 interface StayInfo {
   readonly name: string;
@@ -40,13 +42,15 @@ export function createStayTool(fetchFn: FetchLike = fetch): Tool {
     recordsPlaceEvidence: true,
     description:
       "搜索某个城市的真实住宿：酒店/民宿/青旅，返回名称、地址、距离、坐标（纬度,经度，可直接写入行程 location），" +
-      "高德数据源还包含真实评分与每房每晚参考价格（元/房/晚），结果按评分降序排列。未配置高德或查询失败时使用 OpenStreetMap（无价格评分）。",
+      "高德可能提供评分与每房每晚参考价。穷游优先青旅和经济住宿，按已知价格与距离排序，青旅床位及房型价格待确认。高德不可用时使用 OpenStreetMap（无价格评分）。",
     parameters: {
       type: "object",
       properties: {
         region: { type: "string", description: "目标城市；city 为酒店/商圈名时用于城市核验" },
         city: { type: "string", description: "城市名，例如：杭州" },
         radius_km: { type: "number", description: "搜索半径（公里），默认 10，最大 30" },
+        max_room_price: { type: "number", minimum: 0, description: "每房每晚参考价上限（元）。省略时沿用需求单分项额度；无价格候选单列待确认。" },
+        economy: { type: "boolean", description: "穷游优先青旅、经济型住宿。床位与独立房分别确认，明确房型要求照常保留。" },
         limit: { type: "number", description: "返回数量上限，默认 10" },
       },
       required: ["city"],
@@ -55,6 +59,12 @@ export function createStayTool(fetchFn: FetchLike = fetch): Tool {
       ctx?.signal?.throwIfAborted();
       const request = cancellableFetch(fetchFn, ctx?.signal);
       const city = requireString(args, "city");
+      const cap = typeof args.max_room_price === "number" ? args.max_room_price : undefined;
+      const economy = args.economy === true;
+      const price = (value: string | undefined) => {
+        const cost = Number(value);
+        return Number.isFinite(cost) && cost > 0 ? cost : undefined;
+      };
       const radiusKm = Math.min(30, Math.max(1, typeof args.radius_km === "number" ? args.radius_km : 10));
       const limit = Math.floor(Math.min(30, Math.max(1, typeof args.limit === "number" ? args.limit : 10)));
 
@@ -69,33 +79,47 @@ export function createStayTool(fetchFn: FetchLike = fetch): Tool {
       if (amap !== undefined && geo.country === "中国") {
         try {
           // 实测: 高德 POI 的 distance 字段经常为空，用坐标自算
-          const pois = await amap.poiSearch(
-            "酒店",
-            { ...convertPoint(geo, "gcj02") },
-            radiusKm * 1000,
-            "100000", // 住宿服务 POI 分类
-          );
+          const center = convertPoint(geo, "gcj02");
+          const searches = economy ? ["青年旅舍", "经济型酒店|招待所"] : ["酒店"];
+          const results = await Promise.allSettled(searches.map((keyword) => amap.poiSearch(keyword, center, radiusKm * 1000, "100000")));
+          const pois = [...new Map(results.flatMap((result) => result.status === "fulfilled" ? result.value.map((poi) => [poi.id, poi] as const) : [])).values()];
+          const failure = results.find((result) => result.status === "rejected");
+          if (failure?.status === "rejected" && pois.length === 0) throw failure.reason;
           if (pois.length > 0) {
             // 评分降序（无评分沉底）：API 原始顺序会把高分酒店挤出前列
-            const ranked = rankPoisByRating(pois, { ...convertPoint(geo, "gcj02") }).filter((entry) => entry.distanceKm <= radiusKm && (typeof args.region !== "string" || poiCityVerdict(entry.poi, args.region) === "match"));
-            const lines = ranked.slice(0, limit).map((entry, index) => {
-              const parts = [`${index + 1}. ${entry.poi.name}`];
-              if (entry.poi.type !== undefined && entry.poi.type !== "") parts.push(entry.poi.type);
-              parts.push(`距中心 ${entry.distanceKm.toFixed(1)} 公里`);
-              if (entry.rating !== undefined) parts.push(`评分 ${entry.rating.toFixed(1)}`);
-              const coords = formatPoiCoordinates(entry.poi.location);
-              if (coords !== null) parts.push(`坐标 ${coords}`);
-              const rawCost = entry.poi.biz_ext?.cost;
-              const cost = typeof rawCost === "string" && rawCost.trim() !== "" ? Number(rawCost) : undefined;
-              if (cost !== undefined && Number.isFinite(cost) && cost > 0) parts.push(`参考价 ¥${cost}/房/晚起`);
-              if (entry.poi.address !== undefined && entry.poi.address !== "") parts.push(entry.poi.address);
-              return parts.filter(Boolean).join(" | ");
+            const nearby = rankPoisByRating(pois, center).filter((entry) => entry.distanceKm <= radiusKm && (typeof args.region !== "string" || poiCityVerdict(entry.poi, args.region) === "match"));
+            const hostel = (poi: typeof pois[number]) => HOSTEL.test(`${poi.name} ${poi.type ?? ""}`);
+            const roomPrice = (poi: typeof pois[number]) => hostel(poi) ? undefined : price(poi.biz_ext?.cost);
+            const ranked = nearby.filter(({ poi }) => {
+              const cost = roomPrice(poi);
+              if (cost !== undefined && cap !== undefined) return cost <= cap;
+              return !economy || ECONOMY_STAY.test(`${poi.name} ${poi.type ?? ""}`);
             });
-            const output = (
-              `${geo.name} 住宿（按评分排序，前 ${Math.min(limit, ranked.length)} / 共 ${ranked.length} 家，高德数据）：\n` +
-              lines.join("\n")
-            );
-            return await ctx?.evidence?.observePlaces("search_stays", String(args.region ?? ctx?.destination ?? city), output, "amap") ?? output;
+            if (economy) ranked.sort((a, b) => (roomPrice(a.poi) ?? Infinity) - (roomPrice(b.poi) ?? Infinity)
+              || Number(hostel(b.poi)) - Number(hostel(a.poi)) || a.distanceKm - b.distanceKm);
+            else if (cap !== undefined) ranked.sort((a, b) => Number(roomPrice(a.poi) === undefined) - Number(roomPrice(b.poi) === undefined));
+            if (!economy && cap !== undefined && !ranked.length) return `未找到每房每晚参考价不超过 ¥${cap} 的住宿；请调整区域或核对全程余额再调整上限。`;
+            if (ranked.length) {
+              const lines = ranked.slice(0, limit).map((entry, index) => {
+                const parts = [`${index + 1}. ${entry.poi.name}`];
+                if (entry.poi.type !== undefined && entry.poi.type !== "") parts.push(entry.poi.type);
+                parts.push(`距中心 ${entry.distanceKm.toFixed(1)} 公里`);
+                if (entry.rating !== undefined) parts.push(`评分 ${entry.rating.toFixed(1)}`);
+                const coords = formatPoiCoordinates(entry.poi.location);
+                if (coords !== null) parts.push(`坐标 ${coords}`);
+                const cost = roomPrice(entry.poi);
+                if (cost !== undefined) parts.push(`参考价 ¥${cost}/房/晚起`);
+                else if (hostel(entry.poi)) parts.push("床位或独立房及到店价格待确认");
+                else if (cap !== undefined) parts.push("房价待确认");
+                if (entry.poi.address !== undefined && entry.poi.address !== "") parts.push(entry.poi.address);
+                return parts.filter(Boolean).join(" | ");
+              });
+              const output = (
+                `${geo.name} 住宿（${economy ? "青旅及经济候选，" : cap === undefined ? "按评分排序，" : ""}前 ${Math.min(limit, ranked.length)} / 共 ${ranked.length} 家，高德数据${cap === undefined ? "" : `，已知参考价上限 ¥${cap}/房/晚，缺价在后`}）：\n` +
+                lines.join("\n") + (failure ? "\n部分住宿来源查询失败，候选可能不完整。" : "")
+              );
+              return await ctx?.evidence?.observePlaces("search_stays", String(args.region ?? ctx?.destination ?? city), output, "amap") ?? output;
+            }
           }
         } catch (error) {
           ctx?.signal?.throwIfAborted();
@@ -109,7 +133,7 @@ export function createStayTool(fetchFn: FetchLike = fetch): Tool {
         "[out:json][timeout:25];" +
         "(" +
         `nwr(around:${radiusKm * 1000},${osmGeo.latitude},${osmGeo.longitude})` +
-        '[tourism~"^(hotel|hostel|guest_house|apartment|motel)$"];' +
+        (economy ? '[tourism~"^(hostel|guest_house)$"];' : '[tourism~"^(hotel|hostel|guest_house|apartment|motel)$"];') +
         ");" +
         `out center ${limit * 3};`;
 

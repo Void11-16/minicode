@@ -1,14 +1,18 @@
+import type { PlannedVisit } from "./itinerary-schema.ts";
+import type { VisitFeasibility } from "../core/planning-layers.ts";
+import { externalNow } from "../core/external-environment.ts";
 import { createHash } from "node:crypto";
 import { mkdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { convertPoint, type GeoPoint, type CoordinateSystem } from "./coordinates.ts";
 import { atomicWrite, withPlanLock } from "./plan-files.ts";
-import type { ItineraryItem, ItineraryOpeningHours, ScenicParent } from "./itinerary-schema.ts";
-import { scenicParentName } from "./scenic-area.ts";
+import type { CoveredVisit, ItineraryItem, ItineraryOpeningHours, ScenicParent } from "./itinerary-schema.ts";
+import { isGeographicArea, scenicParentName } from "./scenic-area.ts";
 import { CLOSURE_POLICY_VERSION, extractClosure, type ClosureSource } from "./closure-policy.ts";
 import { QUERY_TTL_MS, queryKeyArgs, querySummary, type QueryObservation } from "./travel-query.ts";
 import { requiredVisitMatches } from "./required-visits.ts";
 import { routeQueryHint } from "./route-request.ts";
+import { hasScope, scopeApplies } from "./opening-schedule.ts";
 import { DiscoveryPoolStore, type DiscoveryPool } from "./discovery-pool.ts";
 import { OPENING_FIELDS, OPENING_POLICY_VERSION, extractOpeningFacts, validOpeningFact, isHistoricalOpening, sourcePriority, openingHoursFor, lastAdmissionFor, ruleApplies, requestedOpeningFields, type OpeningFact, type OpeningField, type OpeningSource } from "./opening-facts.ts";
 
@@ -30,6 +34,7 @@ export interface PlaceEvidence {
   readonly recommended_spots?: readonly string[];
   /** 完整包含关系由POI工具直接记录；展示推荐可截短，关系不能随展示条数丢失。 */
   readonly contained_visits?: readonly string[];
+  readonly contained_places?: readonly { readonly name: string; readonly relation: CoveredVisit["relation"] }[];
 }
 
 import type { RouteGeometry } from "./amap.ts";
@@ -84,7 +89,7 @@ function latest<T extends { observed_at: number }>(values: readonly T[], matches
 function checkedOpening(fact: OpeningFact | undefined): boolean {
   if (fact?.status === "verified") return !isHistoricalOpening(fact);
   return fact !== undefined && !(fact.sources.length > 0 && fact.sources.every((s) => s.kind === "amap" || s.kind === "osm"))
-    && Date.now() >= fact.observed_at && Date.now() - fact.observed_at < CACHE_TTL;
+    && externalNow().getTime() >= fact.observed_at && externalNow().getTime() - fact.observed_at < CACHE_TTL;
 }
 
 /** First-party tool observations only. Model arguments never write this store. */
@@ -153,13 +158,13 @@ export class TravelEvidenceStore {
       this.openingFacts = merge((disk.opening_facts ?? []).filter(validOpeningFact), this.openingFacts, (f) => f.id).sort((a, b) => a.observed_at - b.observed_at).slice(-3000);
       if (Array.isArray(disk.discovery_pools)) this.discoveryPools.merge(disk.discovery_pools);
       const query_log = merge(disk.query_log?.map((r) => ({ ...r, observed_at: r.at })) ?? [], [...this.queryLog.values()].map((r) => ({ ...r, observed_at: r.at })), (r) => r.key)
-        .filter((r) => Date.now() - r.at >= 0 && Date.now() - r.at < QUERY_TTL_MS).sort((a, b) => a.at - b.at).slice(-100)
+        .filter((r) => externalNow().getTime() - r.at >= 0 && externalNow().getTime() - r.at < QUERY_TTL_MS).sort((a, b) => a.at - b.at).slice(-100)
         .map((r) => ({ key: r.key, tool: r.tool, city: r.city, entity: r.entity, topic: r.topic, status: r.status, at: r.at, ...(r.closure_policy_version === undefined ? {} : { closure_policy_version: r.closure_policy_version }), ...(r.opening_policy_version === undefined ? {} : { opening_policy_version: r.opening_policy_version }) }));
       await atomicWrite(path, JSON.stringify({ places: this.places, routes: this.routes, closures: this.closures, opening_facts: this.openingFacts, query_log, discovery_pools: this.discoveryPools.snapshot() }));
     });
   }
 
-  get fingerprint(): string { return evidenceId([this.places.map((p) => [p.id, p.rating, p.price, p.opening_hours, p.closed_on, p.contained_visits]).sort(), this.routes.map((r) => r.id).sort(), this.closures.map((r) => [r.city, r.name, r.closed_on, r.verified, r.holiday_exception, r.policy_version]).sort(), this.openingFacts.map((f) => f.id).sort()]); }
+  get fingerprint(): string { return evidenceId([this.places.map((p) => [p.id, p.rating, p.price, p.opening_hours, p.closed_on, p.contained_visits, p.contained_places]).sort(), this.routes.map((r) => r.id).sort(), this.closures.map((r) => [r.city, r.name, r.closed_on, r.verified, r.holiday_exception, r.policy_version]).sort(), this.openingFacts.map((f) => f.id).sort()]); }
 
   /** 仅已选/必去实体的可用事实算相关进展；查询日志、采集时间和无关候选不计。 */
   usableEvidenceKeys(names: readonly string[], city?: string): string[] {
@@ -184,25 +189,25 @@ export class TravelEvidenceStore {
 
   cached(key: string): string | undefined {
     const value = this.queries.get(key);
-    const age = value === undefined ? Infinity : Date.now() - value.at;
+    const age = value === undefined ? Infinity : externalNow().getTime() - value.at;
     return value !== undefined && age >= 0 && age < CACHE_TTL ? value.output : undefined;
   }
-  cache(key: string, output: string, at = Date.now()): void {
+  cache(key: string, output: string, at = externalNow().getTime()): void {
     if (this.queries.size >= 300) this.queries.delete(this.queries.keys().next().value!);
     this.queries.set(key, { at, output });
   }
 
   queryRecord(key: string): QueryObservation | undefined {
     const value = this.queryLog.get(key);
-    const age = value === undefined ? Infinity : Date.now() - value.at;
-    if (value?.tool === "get_place_reviews" && value.topic === "开放时间" && value.closure_policy_version !== CLOSURE_POLICY_VERSION) return undefined;
-    if (value?.tool === "get_place_reviews" && value.topic === "开放时间" && value.opening_policy_version !== OPENING_POLICY_VERSION) return undefined;
+    const age = value === undefined ? Infinity : externalNow().getTime() - value.at;
+    if ((value?.tool === "get_place_visit_info" || value?.tool === "get_place_reviews" && value.topic === "开放时间") && value.closure_policy_version !== CLOSURE_POLICY_VERSION) return undefined;
+    if ((value?.tool === "get_place_visit_info" || value?.tool === "get_place_reviews" && value.topic === "开放时间") && value.opening_policy_version !== OPENING_POLICY_VERSION) return undefined;
     return value !== undefined && age >= 0 && age < (value.status === "failed" ? 30_000 : QUERY_TTL_MS) ? value : undefined;
   }
 
   async observeQuery(record: QueryObservation): Promise<void> {
-    if (record.tool === "get_place_reviews" && record.topic === "开放时间" && record.closure_policy_version === undefined) record = { ...record, closure_policy_version: CLOSURE_POLICY_VERSION };
-    if (record.tool === "get_place_reviews" && record.topic === "开放时间" && record.opening_policy_version === undefined) record = { ...record, opening_policy_version: OPENING_POLICY_VERSION };
+    if (record.tool === "get_place_visit_info" && record.closure_policy_version === undefined) record = { ...record, closure_policy_version: CLOSURE_POLICY_VERSION };
+    if (record.tool === "get_place_visit_info" && record.opening_policy_version === undefined) record = { ...record, opening_policy_version: OPENING_POLICY_VERSION };
     if ([record.city, record.entity, record.topic].some((v) => v.length > 500)) return;
     this.queryLog.delete(record.key);
     this.queryLog.set(record.key, record);
@@ -236,7 +241,7 @@ export class TravelEvidenceStore {
     await this.persist();
   }
 
-  async observePlaces(tool: string, city: string, output: string, provider?: "amap" | "osm", containments?: readonly { readonly parent: string; readonly children: readonly string[] }[], observedAt = Date.now()): Promise<string> {
+  async observePlaces(tool: string, city: string, output: string, provider?: "amap" | "osm", containments?: readonly { readonly parent: string; readonly children: readonly string[]; readonly relation?: CoveredVisit["relation"] }[], observedAt = externalNow().getTime()): Promise<string> {
     await this.load();
     const ids: string[] = [];
     for (const line of output.split("\n")) {
@@ -253,16 +258,25 @@ export class TravelEvidenceStore {
       let spots: unknown;
       try { spots = rawSpots === undefined ? undefined : JSON.parse(rawSpots); } catch { /* 扩展工具的坏推荐字段不应丢失整批地点证据。 */ }
       const recommendedSpots = Array.isArray(spots) && spots.every((v) => typeof v === "string") ? spots.slice(0, 10) as string[] : undefined;
-      const children = containments?.find((relation) => relation.parent === name)?.children ?? previous?.contained_visits ?? recommendedSpots;
+      const relations = containments?.filter((relation) => relation.parent === name);
+      const relationKind = isGeographicArea(name) ? "geographic_area" as const : "scenic_child" as const;
+      const oldRelations = previous?.contained_places ?? (previous?.contained_visits ?? []).map((child) => ({ name: child, relation: relationKind }));
+      // 新一轮检索未返回某子点不构成否定证据；只更新实际观测到的关系。
+      const incomingRelations = relations?.length ? relations.flatMap((r) => r.children.map((child) => ({ name: child, relation: r.relation ?? relationKind })))
+        : (recommendedSpots ?? []).map((child) => ({ name: child, relation: relationKind }));
+      const contained = [...new Map([...oldRelations, ...incomingRelations].map((r) => [r.name, r])).values()];
+      const children = contained.map((r) => r.name);
       const rawHours = /开放时间 ([^|]+)/.exec(line)?.[1];
       const hourFacts = rawHours === undefined ? [] : extractOpeningFacts(city, name, [{ title: name, snippet: rawHours, kind: source === "amap" ? "amap" : "osm" }], ["hours"], id, observedAt).filter((f) => f.status !== "not_found");
       for (const fact of hourFacts) if (!this.openingFacts.some((f) => f.id === fact.id && f.observed_at > fact.observed_at)) this.openingFacts = [...this.openingFacts.filter((f) => f.id !== fact.id), fact];
       const hours = openingHoursFor(hourFacts.find((f) => f.field === "hours"));
       const place: PlaceEvidence = { id, city, name, kind: tool === "search_stays" ? "accommodation" : tool === "search_restaurants" ? "meal" : "visit", latitude: Number(coords[1]), longitude: Number(coords[2]), source, crs: source === "amap" ? "gcj02" : "wgs84", observed_at: observedAt,
         ...(recommendedSpots === undefined ? {} : { recommended_spots: recommendedSpots }),
-        ...(children === undefined ? {} : { contained_visits: [...new Set(children)].slice(0, 200) }),
+        ...(children.length === 0 ? {} : { contained_visits: [...new Set(children)].slice(0, 200) }),
+        ...(contained.length === 0 ? {} : { contained_places: contained.slice(0, 200) }),
         ...(rating === undefined ? {} : { rating: Number(rating) }),
-        ...(price === undefined ? {} : { price: Number(price), price_unit: tool === "search_stays" ? "room_night" as const : "person" as const }),
+        ...(price === undefined ? tool === "search_attractions" && previous?.price !== undefined ? { price: previous.price, price_unit: previous.price_unit } : {}
+          : { price: Number(price), price_unit: tool === "search_stays" ? "room_night" as const : "person" as const }),
         ...(hours ? { opening_hours: { ...hours, source } } : rawHours === undefined && previous?.opening_hours ? { opening_hours: previous.opening_hours } : {}) };
       if (!previous || previous.observed_at <= observedAt) this.places = [...this.places.filter((p) => p.id !== id), place];
       ids.push(`${name}: ${id}`);
@@ -274,7 +288,7 @@ export class TravelEvidenceStore {
 
   async observeRoutes(legs: readonly Omit<RouteEvidence, "id" | "observed_at">[]): Promise<RouteEvidence[]> {
     await this.load();
-    const values = legs.map((leg) => ({ ...leg, id: evidenceId(leg), observed_at: Date.now() }));
+    const values = legs.map((leg) => ({ ...leg, id: evidenceId(leg), observed_at: externalNow().getTime() }));
     for (const route of values) this.routes = [...this.routes.filter((r) => r.id !== route.id), route];
     this.rememberRoutePoints(values);
     await this.persist();
@@ -286,7 +300,7 @@ export class TravelEvidenceStore {
     if (!Array.isArray(sources)) throw new Error("闭馆依据必须是结构化的外部搜索结果，不能传工具展示文本");
     const { verified, mentioned, closed_on, holiday_exception } = extractClosure(name, sources);
     if (!mentioned && this.hasVerifiedClosure(city, name)) return "本次未新增闭馆依据，沿用已有的已核验规则。";
-    this.closures = [...this.closures.filter((rule) => rule.city !== city || rule.name !== name), { city, name, closed_on, verified, holiday_exception, policy_version: CLOSURE_POLICY_VERSION, sources: sources.slice(0, 5), observed_at: Date.now() }];
+    this.closures = [...this.closures.filter((rule) => rule.city !== city || rule.name !== name), { city, name, closed_on, verified, holiday_exception, policy_version: CLOSURE_POLICY_VERSION, sources: sources.slice(0, 5), observed_at: externalNow().getTime() }];
     await this.persist();
     if (!verified) return `「${name}」未获得可核验的简单闭馆规则；含糊、例外或冲突信息仍待确认，不能换词重搜冒充已核验。`;
     return `工具已记录「${name}」闭馆依据（外部搜索结果，出发前复核）：${closed_on.join(", ") || "无固定闭馆日"}${holiday_exception ? "；法定节假日可能例外，不能当作当天已确认开放" : ""}；保存时程序回填。`;
@@ -295,25 +309,44 @@ export class TravelEvidenceStore {
   openingFactsFor(city: string, inputName: string, day?: string): Partial<Record<OpeningField, OpeningFact>> {
     const name = this.canonicalPlaceName(inputName, city), place = latest(this.places, (p) => p.city === city && p.name === name);
     const records = this.openingFacts.filter((f) => f.city === city && (f.place_id && place ? f.place_id === place.id : this.canonicalPlaceName(f.name, city) === name)
-      && !(day && f.field === "hours" && f.status === "verified" && f.value?.length && !f.value.some((rule) => ruleApplies(rule, day))));
+      && !(day && f.field === "hours" && f.status === "verified" && f.value?.length && !f.value.some((rule) => ruleApplies(rule, day)))
+      && !(day && f.field === "last_admission" && f.status === "verified" && !lastAdmissionFor(f, day))
+      && !(f.field === "closure" && f.value && !scopeApplies(f.value, day)));
     const result: Partial<Record<OpeningField, OpeningFact>> = {};
     for (const field of OPENING_FIELDS) result[field] = records.filter((f) => f.field === field).reverse().sort((a, b) => (day ? 0 : Number(isHistoricalOpening(a)) - Number(isHistoricalOpening(b))) || sourcePriority(b) - sourcePriority(a) || b.observed_at - a.observed_at)[0];
     return result;
   }
 
-  async observeOpening(city: string, inputName: string, sources: readonly OpeningSource[], requested: readonly OpeningField[], skipNegative = false): Promise<OpeningFact[]> {
+  async observeOpening(city: string, inputName: string, sources: readonly OpeningSource[], requested: readonly OpeningField[], skipNegative = false, observedAt = externalNow().getTime()): Promise<OpeningFact[]> {
     await this.load();
     const name = this.canonicalPlaceName(inputName, city), place = latest(this.places, (p) => p.city === city && p.name === name);
-    const facts = extractOpeningFacts(city, name, sources, requested, place?.id);
+    const facts = extractOpeningFacts(city, name, sources, requested, place?.id, observedAt);
     for (const fact of facts.filter((fact) => !skipNegative || fact.status === "verified" || fact.status === "conflicting")) this.openingFacts = [...this.openingFacts.filter((f) => f.id !== fact.id), fact];
     const closure = facts.find((f) => f.field === "closure");
-    if (closure?.field === "closure" && closure.status === "verified" && closure.value) this.closures = [...this.closures.filter((r) => r.city !== city || r.name !== name),
-      { city, name, closed_on: closure.value.closed_on, holiday_exception: closure.value.holiday_exception, verified: true, policy_version: CLOSURE_POLICY_VERSION, sources: sources.slice(0, 5), observed_at: Date.now() }];
+    if (closure?.field === "closure" && closure.status === "verified" && closure.value && !hasScope(closure.value)) this.closures = [...this.closures.filter((r) => r.city !== city || r.name !== name),
+      { city, name, closed_on: closure.value.closed_on, holiday_exception: closure.value.holiday_exception, verified: true, policy_version: CLOSURE_POLICY_VERSION, sources: sources.slice(0, 5), observed_at: observedAt }];
     await this.persist(); return facts;
   }
 
-  openingSummary(city: string, name: string, fields: readonly OpeningField[]): string {
-    const known = this.openingFactsFor(city, name), labels = { hours: "开放时段", closure: "每周闭馆", last_admission: "最后入场", sessions: "表演场次", notices: "临时闭馆公告" };
+  visitFeasibility(visit: PlannedVisit, city: string, date: string): VisitFeasibility {
+    const name = this.canonicalPlaceName(visit.name, city);
+    const bound = this.bind({ id: "feasibility", type: "visit", name, evidence_id: visit.evidence_id }, city, date);
+    const facts = this.openingFactsFor(city, name, date), pending: string[] = [], conflicts: string[] = [];
+    const identity = bound.evidence_verified === true;
+    if (!identity) pending.push("地点身份/坐标尚未核验");
+    const fields = requestedOpeningFields({ place: name });
+    const missing = this.missingOpeningFields(city, name, fields, date);
+    if (!bound.opening_hours) pending.push("开放时间待确认");
+    if (fields.includes("closure") && !bound.closure_verified) pending.push("闭馆规则待确认");
+    if (fields.includes("sessions") && facts.sessions?.status !== "verified") pending.push("场次待确认");
+    const weekdays = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+    if (bound.closed_dates?.includes(date) || bound.closure_verified && bound.closed_on?.includes(weekdays[new Date(date + "T00:00:00Z").getUTCDay()]!)) conflicts.push(`${name}在${date}有已核验的闭馆/关闭规则`);
+    return { name: visit.name, identity_verified: identity, checked: identity && missing.length === 0, pending, conflicts,
+      evidence_ids: [...new Set([bound.evidence_id, ...fields.map((field) => facts[field]?.id)].filter((id): id is string => !!id))] };
+  }
+
+  openingSummary(city: string, name: string, fields: readonly OpeningField[], day?: string): string {
+    const known = this.openingFactsFor(city, name, day), labels = { hours: "开放时段", closure: "每周闭馆", last_admission: "最后入场", sessions: "表演场次", notices: "临时闭馆公告" };
     return fields.map((field) => {
       const fact = known[field];
       if (field === "closure" && fact?.status !== "verified" && this.hasVerifiedClosure(city, name)) {
@@ -326,17 +359,17 @@ export class TravelEvidenceStore {
     }).join("\n");
   }
 
-  missingOpeningFields(city: string, name: string, fields = requestedOpeningFields({ place: name })): OpeningField[] {
-    const known = this.openingFactsFor(city, name);
-    return fields.filter((field) => !checkedOpening(known[field]) && !(field === "closure" && this.hasVerifiedClosure(city, name)));
+  missingOpeningFields(city: string, name: string, fields = requestedOpeningFields({ place: name }), day?: string): OpeningField[] {
+    const known = this.openingFactsFor(city, name, day);
+    return fields.filter((field) => !checkedOpening(known[field]) && !(field === "closure" && this.hasVerifiedClosure(city, name, day)));
   }
 
   /** 按缺失字段补查；闭馆日已知不意味着开放时段也已解决。 */
-  pendingReviewPlaces(names: readonly string[], city: string, attempts?: ReadonlyMap<string, number>): string[] {
+  pendingVisitInfoPlaces(names: readonly string[], city: string, attempts?: ReadonlyMap<string, number>, day?: string): string[] {
     return [...new Set(names.map((name) => this.canonicalPlaceName(name, city)))].filter((name) => {
-      const fields = this.missingOpeningFields(city, name);
+      const fields = this.missingOpeningFields(city, name, undefined, day);
       if (fields.length === 0) return false;
-      const key = evidenceId(["get_place_reviews", queryKeyArgs("get_place_reviews", { place: name, city, aspect: "开放时间", fields })]);
+      const key = evidenceId(["get_place_visit_info", queryKeyArgs("get_place_visit_info", { place: name, city, fields, visit_date: day })]);
       if ((attempts?.get(evidenceId(["opening-attempt", city, name])) ?? 0) >= 2) return false;
       if ((attempts?.get(key) ?? 0) >= 2) return false;
       const checked = this.queryRecord(key);
@@ -344,22 +377,24 @@ export class TravelEvidenceStore {
     });
   }
 
-  /** 一个检索返回的闭馆/时长可跨 aspect 复用；不同事实未知时不伪装成已取证。 */
-  reviewFacts(city: string, name: string, topic: string, fields = requestedOpeningFields({ place: name })): string | undefined {
-    if (topic === "开放时间") {
-      const known = this.openingFactsFor(city, name);
-      if (fields.every((field) => (field === "closure" && this.hasVerifiedClosure(city, name)) || checkedOpening(known[field]))) return `复用「${name}」已查开放字段，未联网；保存时按字段回填：\n${this.openingSummary(city, name, fields)}`;
-    }
-    if (topic === "游玩时长") for (const record of [...this.queryLog.values()].reverse()) {
-      if (record.tool !== "get_place_reviews" || record.city !== city || record.entity !== name) continue;
+  /** 一个检索返回的参观字段可跨字段请求复用；不同事实未知时不伪装成已取证。 */
+  visitInfoFacts(city: string, name: string, fields: readonly string[], day?: string): string | undefined {
+    const opening = fields.filter((field): field is OpeningField => OPENING_FIELDS.includes(field as OpeningField));
+    const known = this.openingFactsFor(city, name, day);
+    if (!opening.every((field) => (field === "closure" && this.hasVerifiedClosure(city, name, day)) || checkedOpening(known[field]))) return undefined;
+    let duration: string | undefined;
+    if (fields.includes("visit_duration")) for (const record of [...this.queryLog.values()].reverse()) {
+      // 旧日志只读复用；运行入口不再接受 reviews 的开放/时长参数。
+      if (!["get_place_visit_info", "get_place_reviews"].includes(record.tool) || record.city !== city || record.entity !== name) continue;
       const output = this.cached(record.key), index = output?.indexOf("⏱") ?? -1;
-      if (output !== undefined && index >= 0) return `复用「${name}」已有游玩时长参考，未联网：\n${output.slice(index, index + 600)}`;
+      if (output !== undefined && index >= 0) { duration = output.slice(index, index + 600); break; }
     }
-    return undefined;
+    if (fields.includes("visit_duration") && !duration) return undefined;
+    return [`复用「${name}」已查参观字段，未联网；保存时按字段回填：`, ...(opening.length ? [this.openingSummary(city, name, opening, day)] : []), ...(duration ? [duration] : [])].join("\n");
   }
 
-  hasVerifiedClosure(city: string, name: string): boolean {
-    const opening = this.openingFactsFor(city, name).closure;
+  hasVerifiedClosure(city: string, name: string, day?: string): boolean {
+    const opening = this.openingFactsFor(city, name, day).closure;
     if (opening?.status === "verified") return true;
     if (opening?.status === "conflicting" || opening?.status === "needs_confirmation") return false;
     const rule = latest(this.closures, (rule) => rule.city === city && rule.name === name);
@@ -376,6 +411,12 @@ export class TravelEvidenceStore {
 
   stayNames(city?: string): string[] {
     return [...new Set(this.places.filter((p) => (city === undefined || p.city === city) && (p.kind === "accommodation" || p.price_unit === "room_night")).map((p) => p.name))];
+  }
+
+  visitPrice(city: string, name: string): number | undefined {
+    const prices = new Set(this.places.filter((place) => place.city === city && place.name === name && place.kind === "visit"
+      && place.price !== undefined && Number.isFinite(place.price)).map((place) => place.price));
+    return prices.size === 1 ? prices.values().next().value : undefined;
   }
 
   private bindRoute(item: ItineraryItem, city?: string): Partial<ItineraryItem> {
@@ -402,21 +443,76 @@ export class TravelEvidenceStore {
       route_binding_error: route.estimated ? `路线ID ${route.id} 只是估算，不能作为已核验事实。${routeQueryHint(city ?? route.city, route.from, route.to, intendedMode ?? route.mode)}` : undefined };
   }
 
-  /** 包含关系只取工具观测到的内部推荐或明确名称前缀，歧义/循环不猜。 */
-  parentVisit(name: string, city: string): ScenicParent | undefined {
-    const byName = new Map<string, PlaceEvidence>();
-    for (const place of this.places.filter((p) => p.city === city && p.kind === "visit")) if (!byName.has(place.name) || byName.get(place.name)!.observed_at <= place.observed_at) byName.set(place.name, place);
-    if (!byName.has(name)) return undefined;
-    let current = name, parent: PlaceEvidence | undefined;
-    const seen = new Set<string>();
-    for (;;) {
-      if (seen.has(current)) return undefined;
-      seen.add(current);
-      const prefix = scenicParentName(current), candidates = [...byName.values()].filter((p) => p.name !== current && ((p.contained_visits ?? p.recommended_spots)?.includes(current) || p.name === prefix));
-      if (candidates.length > 1) return undefined;
-      if (!candidates.length) return parent ? { name: parent.name, evidence_id: parent.id } : undefined;
-      parent = candidates[0]!; current = parent.name;
+  /** 只从工具观测构图；多父级歧义与循环不产生覆盖关系。 */
+  private containmentGraph(city: string): { places: Map<string, PlaceEvidence>; edges: Map<string, { parent: PlaceEvidence; relation: CoveredVisit["relation"] }> } {
+    const places = new Map<string, PlaceEvidence>();
+    for (const p of this.places.filter((p) => p.city === city && p.kind === "visit")) if (!places.has(p.name) || places.get(p.name)!.observed_at <= p.observed_at) places.set(p.name, p);
+    const choices = new Map<string, Map<string, { parent: PlaceEvidence; relation: CoveredVisit["relation"] }>>();
+    const add = (name: string, parent: PlaceEvidence, relation: CoveredVisit["relation"]) => {
+      if (name === parent.name) return;
+      const values = choices.get(name) ?? new Map();
+      values.set(parent.name, { parent, relation }); choices.set(name, values);
+    };
+    for (const p of places.values()) {
+      const children = p.contained_places ?? (p.contained_visits ?? p.recommended_spots ?? []).map((name) => ({ name, relation: isGeographicArea(p.name) ? "geographic_area" as const : "scenic_child" as const }));
+      for (const child of children) add(child.name, p, child.relation);
     }
+    for (const p of places.values()) {
+      const prefix = scenicParentName(p.name), parent = prefix ? places.get(prefix) : undefined;
+      if (parent) add(p.name, parent, isGeographicArea(parent.name) ? "geographic_area" : "scenic_child");
+    }
+    const ancestorOf = (ancestor: string, child: string, seen = new Set<string>()): boolean => {
+      if (seen.has(child)) return false;
+      seen.add(child);
+      return [...(choices.get(child)?.keys() ?? [])].some((parent) => parent === ancestor || ancestorOf(ancestor, parent, seen));
+    };
+    const edges = new Map([...choices].flatMap(([name, values]) => {
+      const nearest = [...values.values()].filter((value) => ![...values.keys()].some((other) => other !== value.parent.name && ancestorOf(value.parent.name, other) && !ancestorOf(other, value.parent.name)));
+      return nearest.length === 1 ? [[name, nearest[0]!] as const] : [];
+    }));
+    for (const name of edges.keys()) {
+      const seen = new Set<string>(); let current = name;
+      while (edges.has(current)) {
+        if (seen.has(current)) { for (const value of seen) edges.delete(value); break; }
+        seen.add(current); current = edges.get(current)!.parent.name;
+      }
+    }
+    return { places, edges };
+  }
+
+  parentVisit(name: string, city: string): ScenicParent | undefined {
+    const { places, edges } = this.containmentGraph(city);
+    if (!places.has(name)) return undefined;
+    let current = name, parent: PlaceEvidence | undefined;
+    while (edges.get(current)?.relation === "scenic_child") { parent = edges.get(current)!.parent; current = parent.name; }
+    return parent ? { name: parent.name, evidence_id: parent.id } : undefined;
+  }
+
+  areaGroup(name: string, city: string): ScenicParent | undefined {
+    const { places, edges } = this.containmentGraph(city);
+    if (!places.has(name)) return undefined;
+    let current = name;
+    while (edges.has(current)) {
+      const edge = edges.get(current)!;
+      if (edge.relation === "geographic_area") return { name: edge.parent.name, evidence_id: edge.parent.id };
+      current = edge.parent.name;
+    }
+    return undefined;
+  }
+
+  coveredVisits(name: string, city: string): CoveredVisit[] {
+    const { places, edges } = this.containmentGraph(city);
+    if (!places.has(name)) return [];
+    return [...edges.keys()].flatMap((child): CoveredVisit[] => {
+      let current = child, relation: CoveredVisit["relation"] = "scenic_child";
+      while (edges.has(current)) {
+        const edge = edges.get(current)!;
+        if (edge.relation === "geographic_area") relation = "geographic_area";
+        if (edge.parent.name === name) return [{ name: child, evidence_id: edge.parent.id, relation }];
+        current = edge.parent.name;
+      }
+      return [];
+    }).slice(0, 200);
   }
 
   bind(item: ItineraryItem, city?: string, day?: string): ItineraryItem {
@@ -433,7 +529,10 @@ export class TravelEvidenceStore {
     const closedDates = notices?.field === "notices" && notices.status === "verified" && notices.value ? [...new Set([...notices.value.closed_dates, ...(day && notices.value.closed_ranges.some((r) => day >= r.start && (!r.end || day <= r.end)) ? [day] : [])])] : [];
     const used = [hours && opening.hours?.status === "verified" ? opening.hours.id : undefined, hours && admission && opening.last_admission?.status === "verified" ? opening.last_admission.id : undefined,
       closureFact?.status === "verified" ? closureFact.id : undefined, sessions?.status === "verified" ? sessions.id : undefined, closedDates.length ? notices?.id : undefined].filter((v): v is string => v !== undefined);
-    return { ...item, parent_visit: item.type === "visit" && place && city ? this.parentVisit(item.name, city) : undefined, closure_verified: false, closure_holiday_exception: false, closure_policy_version: undefined,
+    return { ...item, parent_visit: item.type === "visit" && place && city ? this.parentVisit(item.name, city) : undefined,
+      area_group: item.type === "visit" && place && city ? this.areaGroup(item.name, city) : undefined,
+      covered_visits: item.type === "visit" && place && city ? this.coveredVisits(item.name, city) : undefined,
+      closure_verified: false, closure_holiday_exception: false, closure_policy_version: undefined,
       ...(place === undefined ? {} : { evidence_id: place.id, evidence_verified: true, evidence_observed_at: place.observed_at, rating: place.rating,
         ...(item.type === "visit" && item.recommended_spots === undefined && place.recommended_spots?.length ? { recommended_spots: place.recommended_spots } : {}),
         location: { ...item.location, latitude: place.latitude, longitude: place.longitude, source: place.source, crs: place.crs ?? (place.source === "amap" ? "gcj02" : "wgs84") },
@@ -492,7 +591,7 @@ export class TravelEvidenceStore {
       return Math.abs(x.latitude - y.latitude) < 1e-6 && Math.abs(x.longitude - y.longitude) < 1e-6;
     };
     return latest(this.routes, (r) => r.city === city && r.from === from && r.to === to && !r.estimated &&
-      (r.request_mode ?? r.mode) === requestMode && Date.now() >= r.observed_at && Date.now() - r.observed_at < CACHE_TTL &&
+      (r.request_mode ?? r.mode) === requestMode && externalNow().getTime() >= r.observed_at && externalNow().getTime() - r.observed_at < CACHE_TTL &&
       same(r.from_point, start) && same(r.to_point, end));
   }
 
@@ -518,6 +617,12 @@ export class TravelEvidenceStore {
     if (current === undefined) return false;
     const a = convertPoint(recorded, "wgs84"), b = convertPoint(current, "wgs84");
     return Math.abs(a.latitude - b.latitude) < 1e-6 && Math.abs(a.longitude - b.longitude) < 1e-6;
+  }
+
+  basicCandidates(city: string, limit = 30): string {
+    const byName = new Map<string, PlaceEvidence>();
+    for (const place of this.places.filter((place) => place.city === city && place.kind === "visit")) if (!byName.has(place.name) || byName.get(place.name)!.observed_at <= place.observed_at) byName.set(place.name, place);
+    return [...byName.values()].sort((a, b) => (b.rating ?? 0) - (a.rating ?? 0)).slice(0, limit).map((place) => `${place.name} | evidence_id=${place.id}${this.parentVisit(place.name, city) ? ` | 主景点=${this.parentVisit(place.name, city)!.name}` : ""}`).join("\n");
   }
 
   summary(city: string, selectedNames: readonly string[] = [], maxChars = 5000, unavailableVisits: readonly string[] = []): string {

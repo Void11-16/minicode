@@ -1,5 +1,6 @@
-import { mkdir, open, readFile, readdir, stat, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { open, readFile, readdir, stat } from "node:fs/promises";
+import { runManagedOperation } from "../storage/managed-operation.ts";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { Tool, ToolContext } from "./tool.ts";
 import { requireString } from "./tool.ts";
 import { trackRead, fileReadHint } from "./read-progress.ts";
@@ -193,6 +194,7 @@ export function createReadFileTool(defaultWorkspace: string = process.cwd()): To
 export function createWriteFileTool(defaultWorkspace: string = process.cwd()): Tool {
   return {
     name: "write_file",
+    effect: "managed_write",
     description:
       "把内容完整写入工作区内的文件（UTF-8，自动创建目录）。用于新建文件或整体重写；" +
       "修改已有文件的小改动请用 edit_file（更安全，不会覆盖无关内容）。",
@@ -216,9 +218,10 @@ export function createWriteFileTool(defaultWorkspace: string = process.cwd()): T
       }
       const workspace = workspaceOf(ctx, defaultWorkspace);
       const absolute = resolveInWorkspace(workspace, path);
-      await mkdir(dirname(absolute), { recursive: true });
-      await writeFile(absolute, content, "utf8");
-      return `已写入 ${relative(workspace, absolute)}（${Buffer.byteLength(content, "utf8")} 字节）`;
+      return runManagedOperation({ root: workspace, file: absolute, tool: "write_file", request: args, ...ctx }, async (commit) => {
+        await commit.commit(content);
+        return `已写入 ${relative(workspace, absolute)}（${Buffer.byteLength(content, "utf8")} 字节）`;
+      });
     },
     requiresConfirmation: true,
     workspaceEdit: true,
@@ -230,6 +233,7 @@ export function createWriteFileTool(defaultWorkspace: string = process.cwd()): T
 export function createEditFileTool(defaultWorkspace: string = process.cwd()): Tool {
   return {
     name: "edit_file",
+    effect: "managed_write",
     description:
       "对工作区内文件做精确文本替换：old_string 必须在文件中唯一命中（否则报错），除非 replace_all=true。" +
       "修改代码的首选方式：先 read_file 拿到原文，替换时带足上下文（含缩进）保证唯一。",
@@ -258,6 +262,7 @@ export function createEditFileTool(defaultWorkspace: string = process.cwd()): To
 
       const workspace = workspaceOf(ctx, defaultWorkspace);
       const absolute = resolveInWorkspace(workspace, path);
+      return runManagedOperation({ root: workspace, file: absolute, tool: "edit_file", request: args, ...ctx }, async (commit) => {
       const info = await friendlyStat(absolute, "文件");
       if (info.size > MAX_FILE_BYTES) {
         throw new Error(`文件过大（上限 2MB），edit_file 不支持`);
@@ -275,12 +280,13 @@ export function createEditFileTool(defaultWorkspace: string = process.cwd()): To
       }
 
       const updated = replaceAll ? raw.split(oldString).join(newString) : raw.replace(oldString, newString);
-      await writeFile(absolute, updated, "utf8");
+      await commit.commit(updated);
 
       const firstIndex = raw.indexOf(oldString);
       const line = raw.slice(0, firstIndex).split("\n").length;
       const relPath = relative(workspace, absolute);
       return `已替换 ${replaceAll ? occurrences : 1} 处 → ${relPath}（改动起始于第 ${line} 行）`;
+      });
     },
     requiresConfirmation: true,
     workspaceEdit: true,

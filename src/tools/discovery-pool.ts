@@ -1,3 +1,4 @@
+import { externalNow } from "../core/external-environment.ts";
 import type { AmapPoi } from "./amap.ts";
 import type { GeoResult } from "./geocoding.ts";
 import { convertPoint } from "./coordinates.ts";
@@ -35,7 +36,7 @@ export function discoveryPoolKey(pool: DiscoveryPool): string {
   return JSON.stringify([pool.tool, cityKey(pool.city), pool.center, pool.keyword, pool.radius_km]);
 }
 
-function fresh(pool: DiscoveryPool, now = Date.now()): boolean {
+function fresh(pool: DiscoveryPool, now = externalNow().getTime()): boolean {
   return pool.observed_at <= now && now - pool.observed_at < QUERY_TTL_MS;
 }
 

@@ -1,3 +1,4 @@
+import { externalNow } from "../core/external-environment.ts";
 import { groupScenicAttractions, scenicParentName } from "./scenic-area.ts";
 import { requiredVisitMatches } from "./required-visits.ts";
 import { attractionMinRating } from "./travel-query.ts";
@@ -31,7 +32,7 @@ export function createAttractionsTool(fetchFn: FetchLike = fetch): Tool {
       "搜索某个地点周边的旅游景点和博物馆/纪念馆，返回名称、类型、距离、真实评分（高德数据）与坐标（纬度,经度，可直接写入行程 location）。" +
       "结果按评分排序，主子点归并为一个主景区，内部推荐不计独立景点；只有子点时需核验主景区。" +
       "优先复用已查候选；30分钟内同中心缩小半径、改limit/评分会在原始候选池本地重筛，不新增联网。只有范围外的新区域或缺少明确实体才补查，不能靠微调参数获取新候选。" +
-      "只有入选点缺关键资料时才补 get_place_reviews，不逐个查全部候选。",
+      "只有入选点缺关键资料时才补 get_place_visit_info，不逐个查全部候选。",
     parameters: {
       type: "object",
       properties: {
@@ -40,6 +41,7 @@ export function createAttractionsTool(fetchFn: FetchLike = fetch): Tool {
         radius_km: { type: "number", description: "搜索半径（公里），默认 10，最大 50" },
         limit: { type: "number", description: "返回数量上限，默认 10" },
         min_rating: { type: "number", minimum: 0, maximum: 5, description: "高德评分筛选，旅游模式默认4.3，0放宽；指定地点和必去不受限制，OSM无评分不筛。" },
+        max_visit_cost: { type: "number", minimum: 0, description: "单个景点人均费用参考上限，已知超额的普通候选被筛除；必去保留供全程调剂，未知费用待确认。" },
       },
       required: ["location", "city"],
     },
@@ -55,6 +57,7 @@ export function createAttractionsTool(fetchFn: FetchLike = fetch): Tool {
       );
       const limit = Math.floor(clamp(typeof args.limit === "number" ? args.limit : 10, 1, 30));
       const minRating = attractionMinRating(args.min_rating);
+      const cap = typeof args.max_visit_cost === "number" ? args.max_visit_cost : undefined;
 
       await ctx?.evidence?.load();
       let pool = args.refresh === true ? undefined : ctx?.evidence?.discoveryPools.find("search_attractions", city, location, "", radiusKm);
@@ -80,7 +83,7 @@ export function createAttractionsTool(fetchFn: FetchLike = fetch): Tool {
           // 博物馆搜索失败要可见（配额/网络），否则博物馆不可见会静默回归
           let warning = pool?.warning ?? "";
           let pois = pool?.pois;
-          const observedAt = pool?.observed_at ?? Date.now();
+          const observedAt = pool?.observed_at ?? externalNow().getTime();
           if (!pois) {
             const [scenicPois, museumPois] = await Promise.all([
               amap!.poiSearch("旅游景点", center, radiusKm * 1000, "110000", 2),
@@ -98,6 +101,20 @@ export function createAttractionsTool(fetchFn: FetchLike = fetch): Tool {
             });
             if (pois.length) await ctx?.evidence?.observeDiscoveryPool({ tool: "search_attractions", city, center: location, geo, keyword: "", radius_km: radiusKm, pois, warning, observed_at: observedAt });
           }
+          // A nearby POI list may contain only children of the user's required area.
+          // Resolve the explicitly requested main entity by city/name; never promote a child by name alone.
+          const requiredTarget = [ctx?.dayPlanningScope?.goal_name, ...ctx?.brief?.mustVisit ?? []].find((name) => name && requiredVisitMatches(name, location, city));
+          let targetedLookup = false;
+          if (requiredTarget && !pois.some((poi) => requiredVisitMatches(requiredTarget, poi.name, city) && poiCityVerdict(poi, city) === "match")) {
+            ctx?.beforeDiscoveryFetch?.(geo);
+            targetedLookup = true;
+            const exact = (await amap!.poiSearchInCity(requiredTarget, city, 10)).filter((poi) => poiCityVerdict(poi, city) === "match" && requiredVisitMatches(requiredTarget, poi.name, city) && /风景名胜|博物|纪念|公园|美术馆|寺|教堂/.test(poi.type ?? ""));
+            if (exact.length) {
+              const seen = new Set(pois.map((poi) => poi.id ?? poi.name));
+              pois = [...pois, ...exact.filter((poi) => !seen.has(poi.id ?? poi.name))];
+              await ctx?.evidence?.observeDiscoveryPool({ tool: "search_attractions", city, center: location, geo, keyword: "", radius_km: radiusKm, pois, warning, observed_at: observedAt });
+            }
+          }
           if (pois.length > 0) {
             // 评分降序（无评分沉底），同分按距离：避免 API 原始顺序把高分景点挤出前列
             const enriched = rankPoisByRating(pois, center).filter((entry) => entry.distanceKm <= radiusKm && poiCityVerdict(entry.poi, city) === "match");
@@ -105,15 +122,20 @@ export function createAttractionsTool(fetchFn: FetchLike = fetch): Tool {
             const ranked = groupScenicAttractions(enriched).sort((a, b) => (b.main.rating ?? -1) - (a.main.rating ?? -1) || a.main.distanceKm - b.main.distanceKm);
             const requested = [location, ...(ctx?.brief?.mustVisit ?? [])];
             const matchesRequest = (name: string) => requested.some((target) => requiredVisitMatches(target, name, city));
-            const isRequested = ({ main, spots }: typeof ranked[number]) => matchesRequest(main.poi.name) || spots.some(matchesRequest);
-            const filtered = minRating === undefined || minRating === 0 ? ranked : ranked.filter((entry) => isRequested(entry) || (entry.main.rating ?? -1) >= minRating);
-            const fallback = ranked.length > 0 && filtered.length === 0;
-            const selected = (fallback ? ranked.slice(0, 3) : filtered).slice().sort((a, b) =>
+            const isRequested = ({ main, spots, area_spots }: typeof ranked[number]) => matchesRequest(main.poi.name) || [...spots, ...area_spots].some(matchesRequest);
+            const prices = new Map(ranked.map((entry) => [entry.main.poi.name, ctx?.evidence?.visitPrice(city, entry.main.poi.name)]));
+            const affordable = cap === undefined ? ranked : ranked.filter((entry) => isRequested(entry) || (prices.get(entry.main.poi.name) ?? 0) <= cap);
+            if (cap !== undefined && ranked.length && !affordable.length) return `未找到人均游览费用不超过 ¥${cap} 的景点，可调整区域或核对全程剩余额度。`;
+            const filtered = minRating === undefined || minRating === 0 ? affordable : affordable.filter((entry) => isRequested(entry) || (entry.main.rating ?? -1) >= minRating);
+            const fallback = affordable.length > 0 && filtered.length === 0;
+            const selected = (fallback ? affordable.slice(0, 3) : filtered).slice().sort((a, b) =>
               minRating ? Number(isRequested(b)) - Number(isRequested(a)) : 0).slice(0, limit);
-            const lines = selected.map(({ main: entry, spots }, index) => {
+            const lines = selected.map(({ main: entry, spots, area_spots, area_group }, index) => {
               const parts = [`${index + 1}. ${entry.poi.name}`, entry.poi.type ?? ""];
               parts.push(`距中心 ${entry.distanceKm.toFixed(1)} 公里`);
               if (entry.rating !== undefined) parts.push(`评分 ${entry.rating.toFixed(1)}`);
+              const price = prices.get(entry.poi.name);
+              if (cap !== undefined) parts.push(price === undefined ? "游览费用待确认" : `已存游览费用参考 ¥${price}/人${price > cap ? "（超过本次参考额）" : ""}`);
               const hours = entry.poi.biz_ext?.open_time;
               if (typeof hours === "string" && hours.trim() !== "") parts.push(`开放时间 ${hours}`);
               const coords = formatPoiCoordinates(entry.poi.location);
@@ -123,6 +145,8 @@ export function createAttractionsTool(fetchFn: FetchLike = fetch): Tool {
                 const recommended = minRating ? [...spots].sort((a, b) => Number(matchesRequest(b)) - Number(matchesRequest(a))) : spots;
                 parts.push(`内部推荐 ${JSON.stringify(recommended.slice(0, 5))}`);
               }
+              if (area_spots.length) parts.push(`区域内地点 ${JSON.stringify(area_spots.slice(0, 10))}（地理包含，各地点可独立安排时间与路线）`);
+              if (area_group) parts.push(`所属区域 ${area_group}`);
               const parent = scenicParentName(entry.poi.name);
               if (parent !== undefined) parts.push(`所属主景区 ${parent}（主 POI 未返回，选用前需核验，不独立凑景点数）`);
               return parts.filter(Boolean).join(" | ");
@@ -137,9 +161,12 @@ export function createAttractionsTool(fetchFn: FetchLike = fetch): Tool {
               `${geo.name} 周边景点（返回 ${selected.length} / 共 ${ranked.length} 个主候选，高德数据${collapsedNote}${filterNote}）：\n` +
               lines.join("\n") +
               (warning ? `\n${warning}` : "") +
-              `\n候选池：${pool ? "复用已采集样本，本次未重查POI" : "已保存原始采集样本"}，覆盖半径 ${pool?.radius_km ?? radiusKm} 公里、${pois.length} 条（非区域全量）；改limit/评分或缩小半径只在池内重筛。`
+              `\n候选池：${targetedLookup ? "复用原样本并定向补查必去主实体POI；原池有效期不续期" : pool ? "复用已采集样本，本次未重查POI" : "已保存原始采集样本"}，覆盖半径 ${pool?.radius_km ?? radiusKm} 公里、${pois.length} 条（非区域全量）；改limit/评分或缩小半径只在池内重筛。`
             );
-            return await ctx?.evidence?.observePlaces("search_attractions", city, output, "amap", selected.map(({ main, spots }) => ({ parent: main.poi.name, children: spots })), observedAt) ?? output;
+            return await ctx?.evidence?.observePlaces("search_attractions", city, output, "amap", selected.flatMap(({ main, spots, area_spots }) => [
+              { parent: main.poi.name, children: spots, relation: "scenic_child" as const },
+              { parent: main.poi.name, children: area_spots, relation: "geographic_area" as const },
+            ]), observedAt) ?? output;
           }
         } catch (error) {
           ctx?.signal?.throwIfAborted();
@@ -185,6 +212,7 @@ export function createAttractionsTool(fetchFn: FetchLike = fetch): Tool {
         (a) =>
           `${a.name} | ${a.type} | 距市中心 ${a.distanceKm.toFixed(1)} 公里` +
           ` | 坐标 ${a.latitude.toFixed(4)},${a.longitude.toFixed(4)}` +
+          (a.free ? " | 参考价 ¥0（地图标注免费）" : cap === undefined ? "" : " | 游览费用待确认") +
           `${a.website === undefined ? "" : ` | ${a.website}`}`,
       );
       const output = (
@@ -209,6 +237,7 @@ interface AttractionInfo {
   readonly latitude: number;
   readonly longitude: number;
   readonly website?: string;
+  readonly free: boolean;
 }
 
 function toAttraction(element: OsmElement, center: GeoResult): AttractionInfo | null {
@@ -229,6 +258,7 @@ function toAttraction(element: OsmElement, center: GeoResult): AttractionInfo | 
     distanceKm: haversineKm(center.latitude, center.longitude, lat, lon),
     latitude: lat,
     longitude: lon,
+    free: tags.fee === "no",
     website: tags.website ?? tags["contact:website"],
   };
 }

@@ -85,7 +85,7 @@ test("到离日期使用可用时间与适用餐段，不能仅靠改 day_type �
   const arrival = parseItinerary({ title: "到达一日游", constraints: { day_start: "10:00", day_end: "18:00", require_accommodation: true }, days: [{ day_type: "arrival", available_start: "20:00", items: [item("h", "酒店", "accommodation", "20:30", "21:00")] }] });
   assert.equal(validateItinerary(arrival).issue_count.P1, 0);
   assert.equal(recommendationCoverage(arrival).slots.length, 1, "20点仍在晚餐候选时段");
-  const departure = parseItinerary({ title: "离开一日游", constraints: { day_start: "10:00", day_end: "18:00", require_accommodation: true }, days: [{ day_type: "departure", available_end: "10:00", items: [item("t", "返程", "transport", "08:00", "10:00")] }] });
+  const departure = parseItinerary({ title: "离开一日游", constraints: { day_start: "10:00", day_end: "18:00", require_accommodation: true }, days: [{ day_type: "departure", available_end: "10:00", items: [{ ...item("t", "返程", "transport", "08:00", "10:00"), from: "酒店", to: "杭州东站" }] }] });
   assert.equal(validateItinerary(departure).issue_count.P1, 0); assert.equal(recommendationCoverage(departure).slots.length, 0);
   const missingWindow = parseItinerary({ ...departure, days: [{ ...departure.days[0], available_end: undefined }] });
   assert.ok(validateItinerary(missingWindow).issues.some((i) => i.code === "missing-day-window"));

@@ -41,7 +41,7 @@ test("save_travel_brief: 保存结构化需求单并直接进入规划", async (
   assert.match(output, /- 单餐人均: ¥100/);
   assert.match(output, /- 必去: 灵隐寺、西湖/);
   assert.match(output, /不要再保存第二份需求单/);
-  assert.match(output, /立即检索候选并开始保存第 1 天行程/);
+  assert.match(output, /覆盖全部日期、无跨日重复的outline基础安排，再逐日核验和细排/);
 
   const saved = JSON.parse(await readFile(join(root, "plans", "briefs", "杭州两日游.json"), "utf8"));
   assert.equal(saved.destination, "杭州");
@@ -72,6 +72,8 @@ test("save_travel_brief: 校验日期格式与正数", async () => {
     () => save.execute({ title: "x", destination: "杭州", startDate: "10月1日" }),
     /YYYY-MM-DD/,
   );
+  await assert.rejects(() => save.execute({ title: "x", destination: "杭州", startDate: "2026-02-30" }), /有效日期/);
+  await assert.rejects(() => save.execute({ title: "x", destination: "杭州", startDate: "2026-03-01", endDate: "2026-02-28" }), /起止日期需递增/);
   await assert.rejects(
     () => save.execute({ title: "x", destination: "杭州", budgetPerMealYuan: -5 }),
     /正数/,

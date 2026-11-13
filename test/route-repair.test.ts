@@ -52,6 +52,41 @@ test("真正换点保留交通位置，复用新端点路线并顺延，其他�
   assert.deepEqual(after.days[1], before.days[1]); assert.equal(validateItinerary(after).issue_count.P0, 0);
 });
 
+test("days补丁换住宿也自动绑定新端点，不依赖edits或手填repair_routes", async (t) => {
+  const f = await fixture(t), old = await f.route("甲酒店", "甲公园", 20);
+  await f.initial([{ id: "hotel", type: "accommodation", name: "甲酒店", time: "09:00" },
+    { ...transport("out", "甲酒店", "甲公园", "09:00", "09:20"), route_evidence_id: old.id }, visit("a", "甲公园", "09:30", "12:00")]);
+  const before = await f.load();
+  await f.evidence.observePlaces("search_stays", "北京", "1. 乙酒店 | 坐标 39.8900,116.3900", "amap");
+  const fresh = await f.route("乙酒店", "甲公园", 45);
+  await f.save.execute({ title: f.title, days: [{ date, items: [{ id: "hotel", type: "accommodation", name: "乙酒店", time: "09:00" }] }] }, f.ctx);
+  const after = await f.load(), route = after.days[0]!.items.find((item) => item.id === "out")!;
+  assert.equal(route.from, "乙酒店"); assert.equal(route.route_evidence_id, fresh.id); assert.equal(route.route_verified, true);
+  assert.equal(route.end_time, "09:45"); assert.equal(after.days[0]!.items.find((item) => item.id === "a")!.time, "09:45");
+  assert.deepEqual(after.days[1], before.days[1]);
+});
+
+test("缺新端点证据时清除旧路线ID并保存当前待查端点，不借用其他交通方式", async (t) => {
+  const f = await fixture(t), old = await f.route("甲公园", "乙公园", 20);
+  await f.initial([visit("a", "甲公园", "10:00", "11:00"), { ...transport("ab", "甲公园", "乙公园", "11:00", "11:20"), route_evidence_id: old.id }, visit("b", "乙公园", "11:30", "13:00")]);
+  await f.route("甲公园", "丙公园", 10, "driving");
+  await f.save.execute({ title: f.title, days: [{ date, items: [visit("b", "丙公园", "11:30", "13:00")] }] }, f.ctx);
+  const route = (await f.load()).days[0]!.items.find((item) => item.id === "ab")!;
+  assert.equal(route.to, "丙公园"); assert.equal(route.transport_mode, "transit");
+  assert.equal(route.route_evidence_id, undefined); assert.equal(route.route_verified, false);
+  assert.match(route.route_binding_error!, /当前计划transit/);
+});
+
+test("只改同名景点时间也修复受影响日期，显式repair_routes不漏掉其他已改日期", async (t) => {
+  const f = await fixture(t), old = await f.route("甲公园", "乙公园", 20);
+  await f.initial([visit("a", "甲公园", "10:00", "11:00"), { ...transport("ab", "甲公园", "乙公园", "11:00", "11:20"), route_evidence_id: old.id }, visit("b", "乙公园", "11:30", "13:00")]);
+  await f.save.execute({ title: f.title, repair_routes: [nextDate], edits: [{ op: "replace", date, item_id: "a", item: { name: "甲公园", end_time: "11:40" } }] }, f.ctx);
+  const plan = await f.load(), items = plan.days[0]!.items;
+  assert.equal(items.find((item) => item.id === "ab")!.time, "11:40");
+  assert.equal(items.find((item) => item.id === "b")!.time, "12:00");
+  assert.equal(validateItinerary(plan).issues.some((issue) => ["time-overlap", "transfer-too-tight", "missing-route-leg"].includes(issue.code)), false);
+});
+
 test("故宫规范名称修正只更新交通端点和证据，不删除交通或丢失景点说明", async (t) => {
   const f = await fixture(t);
   await f.evidence.observePlaces("search_attractions", "北京", "1. 故宫 | 坐标 39.9100,116.4100\n2. 故宫博物院 | 坐标 39.9100,116.4100", "amap");

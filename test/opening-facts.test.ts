@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { extractOpeningFacts, openingHoursFor, type OpeningSource } from "../src/tools/opening-facts.ts";
 import { TravelEvidenceStore } from "../src/tools/travel-evidence.ts";
-import { createReviewsTool, type ReviewSearchProvider } from "../src/tools/reviews.ts";
+import { createVisitInfoTool } from "../src/tools/place-visit-info.ts";
+import type { PlaceSearchProvider } from "../src/tools/place-sources.ts";
 import { createSaveItineraryTool, renderMarkdown } from "../src/tools/itinerary.ts";
 import { parseItinerary, type ItineraryItem } from "../src/tools/itinerary-schema.ts";
 import { validateItinerary } from "../src/tools/itinerary-validator.ts";
@@ -86,9 +87,9 @@ test("否定、历史与条件化入场时间不冒充通用规则；工作日�
 
 test("简称统一到已选POI，网页事实保存后不被缺字段的高德结果清空", async (t) => {
   const f = await fixture(t); let queries = 0;
-  const provider: ReviewSearchProvider = { name: "fixture", search: async (query) => { queries++; assert.match(query, /江西省博物馆/); return [source("09:00-17:00；周一闭馆；16:30停止入馆")]; } };
-  const tool = createReviewsTool((async () => { throw new Error("不应追加网络请求"); }) as typeof fetch, provider);
-  await tool.execute({ place: "江西博物馆", city, aspect: "开放时间" }, f.ctx);
+  const provider: PlaceSearchProvider = { name: "fixture", search: async (query) => { queries++; assert.match(query, /江西省博物馆/); return [source("09:00-17:00；周一闭馆；16:30停止入馆")]; } };
+  const tool = createVisitInfoTool((async () => { throw new Error("不应追加网络请求"); }) as typeof fetch, provider);
+  await tool.execute({ place: "江西博物馆", city }, f.ctx);
   await f.evidence.observePlaces("search_attractions", city, `${name} | 坐标 28.7059,115.8818 | 评分 4.9`, "amap");
   await f.save.execute({ title: "网页回填", constraints: { destination: city }, days: [{ date: "2026-11-04", items: [item()] }] }, f.ctx);
   const plan = parseItinerary(JSON.parse(await readFile(join(f.root, "plans/网页回填.json"), "utf8"))), bound = plan.days[0]!.items[0]!;
@@ -101,38 +102,38 @@ test("简称统一到已选POI，网页事实保存后不被缺字段的高德�
 test("闭馆已知仍能补开放时段；普通公园的全天信息无需额外网页查询", async (t) => {
   const f = await fixture(t);
   await f.evidence.observeClosure(city, name, [{ title: name, snippet: "每周一闭馆" }]);
-  assert.deepEqual(f.evidence.pendingReviewPlaces([name], city), [name]);
+  assert.deepEqual(f.evidence.pendingVisitInfoPlaces([name], city), [name]);
   let queryText = "";
-  const provider: ReviewSearchProvider = { name: "fixture", search: async (query) => { queryText = query; return [source("09:00-17:00")]; } };
-  const registry = new ToolRegistry(f.root).register(createReviewsTool((async () => { throw new Error("不应额外查询"); }) as typeof fetch, provider));
-  await registry.execute("get_place_reviews", JSON.stringify({ city, place: name, aspect: "开放时间" }), f.ctx);
+  const provider: PlaceSearchProvider = { name: "fixture", search: async (query) => { queryText = query; return [source("09:00-17:00")]; } };
+  const registry = new ToolRegistry(f.root).register(createVisitInfoTool((async () => { throw new Error("不应额外查询"); }) as typeof fetch, provider));
+  await registry.execute("get_place_visit_info", JSON.stringify({ city, place: name }), f.ctx);
   assert.doesNotMatch(queryText, /每周 闭馆/);
   await f.evidence.observePlaces("search_attractions", city, "八一广场 | 开放时间 24小时营业 | 坐标 28.6739,115.9045", "amap");
-  assert.deepEqual(f.evidence.pendingReviewPlaces(["八一广场"], city), []);
+  assert.deepEqual(f.evidence.pendingVisitInfoPlaces(["八一广场"], city), []);
 });
 
 test("缺失、冲突逐字段记账，切换fields也不能突破单实体两次预算", async (t) => {
   const f = await fixture(t); let requests = 0;
-  const provider: ReviewSearchProvider = { name: "fixture", search: async () => { requests++; return [source("周一闭馆")]; } };
-  const registry = new ToolRegistry(f.root).register(createReviewsTool((async () => { requests++; return new Response(""); }) as typeof fetch, provider));
+  const provider: PlaceSearchProvider = { name: "fixture", search: async () => { requests++; return [source("周一闭馆")]; } };
+  const registry = new ToolRegistry(f.root).register(createVisitInfoTool((async () => { requests++; return new Response(""); }) as typeof fetch, provider));
   const ctx = { ...f.ctx, queryAttempts: new Map<string, number>() };
-  await registry.execute("get_place_reviews", JSON.stringify({ city, place: name, aspect: "开放时间" }), ctx);
+  await registry.execute("get_place_visit_info", JSON.stringify({ city, place: name }), ctx);
   assert.equal(requests, 4); assert.equal(f.evidence.openingFactsFor(city, name).closure!.status, "verified"); assert.equal(f.evidence.openingFactsFor(city, name).hours!.status, "not_found");
-  await registry.execute("get_place_reviews", JSON.stringify({ city, place: name, aspect: "开放时间", fields: ["hours"] }), ctx); assert.equal(requests, 4);
-  const blocked = await registry.execute("get_place_reviews", JSON.stringify({ city, place: name, aspect: "开放时间", fields: ["sessions"], refresh: true }), ctx);
+  await registry.execute("get_place_visit_info", JSON.stringify({ city, place: name, fields: ["hours"] }), ctx); assert.equal(requests, 4);
+  const blocked = await registry.execute("get_place_visit_info", JSON.stringify({ city, place: name, fields: ["sessions"], refresh: true }), ctx);
   assert.match(blocked, /本次未执行/); assert.equal(requests, 4);
 });
 
 test("地图缺字段或季节条件不明确，仍允许对普通已选景点补查网页一次", async (t) => {
   const f = await fixture(t);
   await f.evidence.observePlaces("search_attractions", city, "普通公园 | 开放时间 详见现场公告 | 坐标 28.6800,115.9000\n季节公园 | 开放时间 夏季09:00-20:00 | 坐标 28.6900,115.9000", "amap");
-  assert.deepEqual(f.evidence.pendingReviewPlaces(["普通公园", "季节公园"], city), ["普通公园", "季节公园"]);
+  assert.deepEqual(f.evidence.pendingVisitInfoPlaces(["普通公园", "季节公园"], city), ["普通公园", "季节公园"]);
   let searches = 0;
-  const provider: ReviewSearchProvider = { name: "fixture", search: async () => { searches++; return [source("季节公园09:00-18:00", { title: "季节公园参观指南" })]; } };
-  const registry = new ToolRegistry(f.root).register(createReviewsTool((async () => { throw new Error("不应补发请求"); }) as typeof fetch, provider));
-  await registry.execute("get_place_reviews", JSON.stringify({ city, place: "季节公园", aspect: "开放时间" }), f.ctx);
+  const provider: PlaceSearchProvider = { name: "fixture", search: async () => { searches++; return [source("季节公园09:00-18:00", { title: "季节公园参观指南" })]; } };
+  const registry = new ToolRegistry(f.root).register(createVisitInfoTool((async () => { throw new Error("不应补发请求"); }) as typeof fetch, provider));
+  await registry.execute("get_place_visit_info", JSON.stringify({ city, place: "季节公园" }), f.ctx);
   assert.equal(searches, 1); assert.equal(f.evidence.bind({ ...item(), name: "季节公园" }, city).opening_hours!.closes, "18:00");
-  assert.deepEqual(f.evidence.pendingReviewPlaces(["季节公园"], city), []);
+  assert.deepEqual(f.evidence.pendingVisitInfoPlaces(["季节公园"], city), []);
 });
 
 test("没有链接的搜索摘要与其他场馆的规则不冒充已核实资料", () => {
@@ -165,10 +166,10 @@ test("带日期的闭馆时刻不能误判全天停业，条件不适用时清�
 
 test("来源返回、字段提取与最终保留分开计量，HTTP成功不冒充事实成功", async (t) => {
   const f = await fixture(t), diagnostics = new ToolDiagnostics();
-  const provider: ReviewSearchProvider = { name: "fixture", search: async () => [source("09:00-17:00；周一闭馆；16:30停止入馆")] };
-  const registry = new ToolRegistry(f.root).register(createReviewsTool((async () => new Response("")) as typeof fetch, provider)).register(f.save);
+  const provider: PlaceSearchProvider = { name: "fixture", search: async () => [source("09:00-17:00；周一闭馆；16:30停止入馆")] };
+  const registry = new ToolRegistry(f.root).register(createVisitInfoTool((async () => new Response("")) as typeof fetch, provider)).register(f.save);
   const run = async (name: string, args: object, round: number) => diagnostics.run({ id: `call-${round}`, name, arguments: JSON.stringify(args) }, round, async () => ({ output: await registry.execute(name, JSON.stringify(args), f.ctx) }));
-  await run("get_place_reviews", { place: name, city, aspect: "开放时间" }, 1);
+  await run("get_place_visit_info", { place: name, city }, 1);
   await run("save_itinerary", { title: "字段指标", constraints: { destination: city }, days: [{ date: "2026-11-04", items: [item()] }] }, 2);
   const plan = parseItinerary(JSON.parse(await readFile(join(f.root, "plans/字段指标.json"), "utf8"))), metrics = summarizeToolDiagnostics(diagnostics, plan).opening;
   assert.equal(metrics.source_return_rate, 1); assert.equal(metrics.page_content_return_rate, 1); assert.equal(metrics.extraction_rate, 1); assert.equal(metrics.retention_rate, 1);
@@ -178,9 +179,9 @@ test("来源返回、字段提取与最终保留分开计量，HTTP成功不冒�
 
 test("搜索HTTP200但没有相关来源，开放来源与提取均为零，未保存留存率未知", async (t) => {
   const f = await fixture(t), diagnostics = new ToolDiagnostics(); let requests = 0;
-  const registry = new ToolRegistry(f.root).register(createReviewsTool((async () => { requests++; return new Response("没有相关结果"); }) as typeof fetch));
-  await diagnostics.run({ id: "empty-search", name: "get_place_reviews", arguments: JSON.stringify({ city, place: name, aspect: "开放时间" }) }, 1,
-    async () => ({ output: await registry.execute("get_place_reviews", JSON.stringify({ city, place: name, aspect: "开放时间" }), f.ctx) }));
+  const registry = new ToolRegistry(f.root).register(createVisitInfoTool((async () => { requests++; return new Response("没有相关结果"); }) as typeof fetch));
+  await diagnostics.run({ id: "empty-search", name: "get_place_visit_info", arguments: JSON.stringify({ city, place: name }) }, 1,
+    async () => ({ output: await registry.execute("get_place_visit_info", JSON.stringify({ city, place: name }), f.ctx) }));
   const result = summarizeToolDiagnostics(diagnostics);
   assert.equal(requests, 4); assert.equal(result.http.success_rate, 1);
   assert.equal(result.opening.source_return_rate, 0); assert.equal(result.opening.page_content_return_rate, 0);

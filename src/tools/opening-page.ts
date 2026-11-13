@@ -1,3 +1,5 @@
+import { declaredOpeningAlias, openingCampusLabel } from "./opening-place.ts";
+
 /** 有界读取公开页面；达到上限后取消流，调用方不保留整页作为模型上下文。 */
 export async function readOpeningPage(response: Response, maxBytes = 512_000): Promise<string> {
   if (!response.body) return "";
@@ -56,7 +58,7 @@ export function openingPageLines(html: string): string[] {
 }
 
 /** 按时间事实选择附近正文，导航关键词和它在文档中的先后位置不再决定入选。 */
-export function openingPageSnippet(html: string, maxChars = 4000): string | undefined {
+export function openingPageSnippet(html: string, maxChars = 4000, place?: { name: string; city: string }): string | undefined {
   const lines = openingPageLines(html);
   const unrelated = (line: string) => /通行时间|交通路线|车程|地铁|公交|驾车|步行|预订|热线|服务时间/.test(line)
     || (/门票|票价|优惠|折扣|新闻列表|相关新闻/.test(line) && !/\d{1,2}[:：][0-5]\d/.test(line));
@@ -70,6 +72,13 @@ export function openingPageSnippet(html: string, maxChars = 4000): string | unde
     return 0;
   };
   const selected = new Set<number>(); let size = 0;
+  // 馆区标题和别名声明决定后续行的主语，即使它们与时段之间隔了多行。
+  if (place) for (const [index, line] of lines.entries()) {
+    if (size + line.length + 1 > maxChars / 4) continue;
+    if (openingCampusLabel(line, place.name, place.city) || declaredOpeningAlias(line, place.name, place.city)) {
+      selected.add(index); size += line.length + 1;
+    }
+  }
   const anchors = lines.map((line, index) => ({ index, score: score(line) })).filter((v) => v.score > 0).sort((a, b) => b.score - a.score || a.index - b.index);
   for (const { index } of anchors) {
     for (const at of [index, index - 1, index - 2]) {
@@ -83,7 +92,7 @@ export function openingPageSnippet(html: string, maxChars = 4000): string | unde
     }
   }
   const result = [...selected].sort((a, b) => a - b).map((index) => lines[index]!.split(/新闻列表|相关新闻|更多资讯/)[0]!.trim()).join("\n");
-  return result || undefined;
+  return anchors.some(({ index }) => selected.has(index)) ? result : undefined;
 }
 
 /** 从当前页面选择同站参观入口，链接文本只是导航线索，不直接认定官网身份。 */

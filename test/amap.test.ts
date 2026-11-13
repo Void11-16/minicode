@@ -505,17 +505,26 @@ test("未配置 Key 时 getAmapClient 返回 undefined", () => {
 });
 
 test("search_stays: 高德结果按评分降序，无评分沉底", async () => {
+  const keywords: string[] = [];
   setAmapKey("test-key", amapOnlyFetch((url) => {
     if (url.pathname.includes("geocode")) {
       return amapResponse({ geocodes: [{ formatted_address: "浙江省杭州市", location: "120.1600,30.2500" }] });
     }
     if (url.pathname.includes("place")) {
+      keywords.push(url.searchParams.get("keywords") ?? "");
       // API 故意乱序：无评分在前、4.2 中间、4.8 最后
       return amapResponse({
         pois: [
           { id: "h1", name: "无评分宾馆", type: "住宿服务;宾馆", location: "120.1600,30.2500" },
           { id: "h2", name: "普通连锁酒店", type: "住宿服务;酒店", location: "120.1700,30.2600", biz_ext: { rating: "4.2", cost: "300" } },
           { id: "h3", name: "高分君悦", type: "住宿服务;星级酒店", location: "120.1500,30.2400", biz_ext: { rating: "4.8", cost: "1200" } },
+          ...(url.searchParams.get("keywords") === "青年旅舍" ? [
+            { id: "h4", name: "青年旅舍", type: "住宿服务;青年旅舍", location: "120.1600,30.2510", biz_ext: { cost: "65" } },
+          ] : []),
+          ...(url.searchParams.get("keywords")?.includes("经济型酒店") ? [
+            { id: "h5", name: "经济宾馆", type: "住宿服务;宾馆", location: "120.1610,30.2510", biz_ext: { cost: "80" } },
+            { id: "h6", name: "无报价豪华酒店", type: "住宿服务;星级酒店", location: "120.1610,30.2520" },
+          ] : []),
         ],
       });
     }
@@ -529,6 +538,13 @@ test("search_stays: 高德结果按评分降序，无评分沉底", async () => 
   // 4.8 最前、4.2 次之、无评分沉底
   assert.ok(output.indexOf("高分君悦") < output.indexOf("普通连锁酒店"));
   assert.ok(output.indexOf("普通连锁酒店") < output.indexOf("无评分宾馆"));
+
+  const economy = await tool.execute({ city: "杭州", economy: true, max_room_price: 90 });
+  assert.match(economy, /经济宾馆.*参考价 ¥80\/房\/晚/);
+  assert.match(economy, /青年旅舍.*床位或独立房及到店价格待确认/);
+  assert.ok(economy.indexOf("青年旅舍 |") < economy.indexOf("无评分宾馆 |"));
+  assert.doesNotMatch(economy, /¥65\/房\/晚|高分君悦|无报价豪华酒店/);
+  assert.deepEqual(keywords.sort(), ["经济型酒店|招待所", "酒店", "青年旅舍"].sort());
 
   setAmapKey(undefined);
 });

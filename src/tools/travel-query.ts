@@ -1,5 +1,7 @@
 import { calendarDate } from "./opening-schedule.ts";
-export const TRAVEL_QUERY_TOOLS: readonly string[] = ["search_attractions", "search_stays", "search_restaurants", "get_place_reviews", "get_weather", "plan_day_routes"];
+import { ToolValidationError } from "../core/tool-error.ts";
+import { normalizeToolArguments } from "./tool-contract.ts";
+export const TRAVEL_QUERY_TOOLS: readonly string[] = ["search_attractions", "search_stays", "search_restaurants", "get_place_reviews", "get_place_visit_info", "get_weather", "plan_day_routes"];
 export const TRAVEL_ATTRACTION_MIN_RATING = 4.3;
 export function attractionMinRating(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 5 ? value : undefined;
@@ -18,19 +20,34 @@ export interface QueryObservation {
   readonly at: number;
 }
 
-/** 将检索限定词与实体分离；闭馆/开放原本就执行相同检索，统一缓存键。 */
+export function normalizePlaceName(value: unknown): unknown {
+  return typeof value === "string" ? value.trim().replace(/\s+(?:开放时间|闭馆时间|(?:每?周|星期)[一二三四五六日天]|官网|预约|门票).*$/, "").trim().replace(/(?:开放时间|闭馆时间|闭馆日|预约要求|门票价格)[？?。!！]*$/, "").trim() : value;
+}
+export const REVIEW_ASPECTS = ["口碑", "人均价格", "招牌菜", "排队"] as const;
+export const VISIT_INFO_FIELDS = ["hours", "closure", "last_admission", "sessions", "notices", "visit_duration"] as const;
+export type VisitInfoField = typeof VISIT_INFO_FIELDS[number];
+
+/** 错用工具要明确报错，不把开放/时长查询静默变成口碑查询。 */
 export function normalizeReviewArgs(args: Record<string, unknown>): Record<string, unknown> {
-  const place = typeof args.place === "string" ? args.place.trim().replace(/\s+(?:开放时间|闭馆时间|(?:每?周|星期)[一二三四五六日天]|官网|预约|门票).*$/, "").trim().replace(/(?:开放时间|闭馆时间|闭馆日|预约要求|门票价格)[？?。!！]*$/, "").trim() : args.place;
   const aspect = typeof args.aspect === "string" ? args.aspect.trim() : "口碑";
-  const topic = ["闭馆时间", "闭馆日"].includes(aspect) ? "开放时间" : ["口碑", "人均价格", "招牌菜", "排队", "游玩时长", "开放时间"].includes(aspect) ? aspect : "口碑";
-  const fields = topic === "开放时间" ? requestedOpeningFields({ ...args, place }) : undefined;
-  const visitDate = fields?.includes("notices") && typeof args.visit_date === "string" ? calendarDate(args.visit_date.trim()) : undefined;
-  return { ...args, place, aspect: topic, fields, visit_date: visitDate };
+  if (!REVIEW_ASPECTS.includes(aspect as typeof REVIEW_ASPECTS[number]) || args.fields !== undefined || args.visit_date !== undefined) throw new ToolValidationError([{ code: "PLACE_REVIEWS_WRONG_TOOL", path: "aspect", message: "口碑工具只接受口碑、人均价格、招牌菜或排队；开放、闭馆及游玩时长使用 get_place_visit_info。", hint: "用get_place_visit_info(place,city,fields=[hours/closure/last_admission/sessions/notices/visit_duration])，不要换aspect重试。" }]);
+  return { ...args, place: normalizePlaceName(args.place), city: typeof args.city === "string" ? args.city.trim() : args.city, aspect };
+}
+
+export function normalizeVisitInfoArgs(args: Record<string, unknown>): Record<string, unknown> {
+  args = normalizeToolArguments("get_place_visit_info", args).args;
+  if (args.aspect !== undefined) throw new ToolValidationError([{ code: "VISIT_INFO_USE_FIELDS", path: "aspect", message: "参观资料工具不使用aspect。", hint: "使用fields选择所缺字段；时长用visit_duration。" }]);
+  const place = normalizePlaceName(args.place);
+  const fields = args.fields === undefined ? requestedOpeningFields({ place }) : args.fields;
+  if (!Array.isArray(fields) || !fields.length || fields.some((v) => !VISIT_INFO_FIELDS.includes(v))) throw new ToolValidationError([{ code: "VISIT_INFO_FIELDS_INVALID", path: "fields", message: "fields须是有效且非空的参观字段数组。", hint: `可用字段：${VISIT_INFO_FIELDS.join(",")}` }]);
+  const visitDate = args.visit_date === undefined ? undefined : typeof args.visit_date === "string" ? calendarDate(args.visit_date.trim()) : undefined;
+  if (args.visit_date !== undefined && !visitDate) throw new ToolValidationError([{ code: "VISIT_INFO_DATE_INVALID", path: "visit_date", message: "visit_date须是有效YYYY-MM-DD日期。", hint: "填写实际访问日期，未确定则省略。" }]);
+  return { ...args, place, city: typeof args.city === "string" ? args.city.trim() : args.city, fields: [...new Set(fields)].sort(), visit_date: visitDate };
 }
 
 export function queryFields(tool: string, args: Record<string, unknown>) {
   return { tool, city: String(args.region ?? args.city ?? ""), entity: String(args.place ?? args.location ?? args.city ?? ""),
-    topic: tool === "get_place_reviews" ? String(args.aspect) : tool };
+    topic: tool === "get_place_reviews" ? String(args.aspect) : tool === "get_place_visit_info" ? Array.isArray(args.fields) && args.fields.length === 1 && args.fields[0] === "visit_duration" ? "游玩时长" : "参观信息" : tool };
 }
 
 /** 只比较工具实际使用的参数；省略默认值与显式默认值表示同一事项。 */
@@ -42,8 +59,9 @@ export function queryKeyArgs(tool: string, args: Record<string, unknown>): Recor
   };
   let values: Record<string, unknown>;
   if (tool === "get_place_reviews") values = normalizeReviewArgs(args);
-  else if (tool === "search_attractions") values = { city: text(args.city), location: text(args.location), radius_km: bounded(args.radius_km, 10, 50), limit: bounded(args.limit, 10, 30, true), min_rating: attractionMinRating(args.min_rating) };
-  else if (tool === "search_stays") values = { region: text(args.region), city: text(args.city), radius_km: bounded(args.radius_km, 10, 30), limit: bounded(args.limit, 10, 30, true) };
+  else if (tool === "get_place_visit_info") values = normalizeVisitInfoArgs(args);
+  else if (tool === "search_attractions") values = { city: text(args.city), location: text(args.location), radius_km: bounded(args.radius_km, 10, 50), limit: bounded(args.limit, 10, 30, true), min_rating: attractionMinRating(args.min_rating), max_visit_cost: args.max_visit_cost };
+  else if (tool === "search_stays") values = { region: text(args.region), city: text(args.city), radius_km: bounded(args.radius_km, 10, 30), limit: bounded(args.limit, 10, 30, true), max_room_price: args.max_room_price, economy: args.economy === true || undefined };
   else if (tool === "search_restaurants") values = { region: text(args.region), city: text(args.city), cuisine: text(args.cuisine) ?? "", max_cost: args.max_cost, min_rating: args.min_rating,
     avoid_cuisines: typeof args.avoid_cuisines === "string" ? [...new Set(args.avoid_cuisines.split(/[,，、;；]+/).map((v) => v.trim()).filter(Boolean))].sort() : [],
     radius_km: bounded(args.radius_km, 3, 30), limit: bounded(args.limit, 8, 20, true) };
@@ -53,7 +71,7 @@ export function queryKeyArgs(tool: string, args: Record<string, unknown>): Recor
   }
   else if (tool === "get_weather") values = { city: text(args.city), location: text(args.location), ...(args.start_date === undefined ? { days: bounded(args.days, 3, 16, true) } : { start_date: args.start_date, end_date: args.end_date ?? args.start_date }) };
   else values = args;
-  const allowed = tool === "get_place_reviews" ? ["place", "city", "aspect", "fields", "visit_date"] : undefined;
+  const allowed = tool === "get_place_reviews" ? ["place", "city", "aspect"] : tool === "get_place_visit_info" ? ["place", "city", "fields", "visit_date"] : undefined;
   return Object.fromEntries(Object.entries(values).filter(([key, value]) => value !== undefined && key !== "refresh" && (allowed === undefined || allowed.includes(key))).sort(([a], [b]) => a.localeCompare(b)));
 }
 

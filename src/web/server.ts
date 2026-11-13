@@ -1,4 +1,6 @@
 import { validateItinerary, qualitySourceSignature } from "../tools/itinerary-validator.ts";
+import { recoverManagedOperations } from "../storage/managed-operation.ts";
+import type { ToolExecutionState } from "../core/execution-state.ts";
 import { QUALITY_SCORING_VERSION } from "../tools/itinerary-assessment.ts";
 import { ToolValidationError, toolErrorPayload } from "../core/tool-error.ts";
 import { createExecutionBudget, executionInputLimit } from "../core/execution-budget.ts";
@@ -15,7 +17,7 @@ import {
   parseCookie,
   type AuthUser,
 } from "../auth/auth-store.ts";
-import { updateSavedItinerary, itineraryWithBriefRequirements } from "../tools/itinerary.ts";
+import { updateSavedItinerary, inspectSavedItinerary, loadItineraryQualityInputs, bindItineraryEvidence } from "../tools/itinerary.ts";
 import { parseItinerary } from "../tools/itinerary-schema.ts";
 import { convertPoint } from "../tools/coordinates.ts";
 import type { ItinerarySnapshot } from "../tools/tool.ts";
@@ -87,6 +89,7 @@ export async function startWebServer(options: WebServerOptions = {}): Promise<Ru
 
 async function startSingleUserWebServer(options: WebServerOptions): Promise<RunningWebServer> {
   const rootDir = options.rootDir ?? join(import.meta.dirname, "..", "..");
+  await recoverManagedOperations(rootDir);
   const config = {
     ...(await new ConfigStore(join(rootDir, ".minicode", "config.json")).load()),
     ...options.configOverrides,
@@ -773,7 +776,8 @@ async function startSingleUserWebServer(options: WebServerOptions): Promise<Runn
             }
             let quality: { status: string; score: number } | null = null;
             try {
-              const parsed = await itineraryWithBriefRequirements(rootDir, parseItinerary(data));
+              const { plan, evidence } = await loadItineraryQualityInputs(rootDir, parseItinerary(data));
+              const parsed = bindItineraryEvidence(plan, evidence);
               const signature = qualitySourceSignature(parsed);
               const memory = qualityCache.get(name);
               quality = memory?.signature === signature ? memory.quality : null;
@@ -931,9 +935,11 @@ async function startSingleUserWebServer(options: WebServerOptions): Promise<Runn
       const body = await readJsonBody(req);
       try {
         let snapshot: ItinerarySnapshot | undefined;
-        const result = await applyPlanEdit(rootDir, body, { workspace: rootDir, onItinerary: (value) => { snapshot = value; } });
+        let executionState: ToolExecutionState | undefined;
+        const operationId = typeof req.headers["idempotency-key"] === "string" ? req.headers["idempotency-key"] : undefined;
+        const result = await applyPlanEdit(rootDir, body, { workspace: rootDir, operationId, onExecution: (value) => { executionState = value; }, onItinerary: (value) => { snapshot = value; } });
         if (snapshot !== undefined) await syncEditedSnapshot(snapshot);
-        stateJson(res, { ok: true, ...result });
+        stateJson(res, { ok: true, ...result, execution_state: executionState });
       } catch (error) {
         res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
         res.end(JSON.stringify(toolErrorPayload(error)));
@@ -970,6 +976,12 @@ async function startSingleUserWebServer(options: WebServerOptions): Promise<Runn
         const file = join(rootDir, "plans", `${safe}.json`);
         const raw = await readFile(file, "utf8");
         const plan = JSON.parse(raw) as PlanJson;
+        // 明细始终按当前行程与需求单本地重算，不用旧质量文件冒充当前问题。
+        let quality = null;
+        let checkedPlan;
+        try {
+          ({ itinerary: checkedPlan, report: quality } = await inspectSavedItinerary(rootDir, parseItinerary(plan)));
+        } catch { /* 兼容旧行程：仍可查看，但明确标注质量检查不可用。 */ }
         // 模型写入的坐标常是估算值，但校准不能阻塞首屏：
         // 先把本地数据交给地图，高德 POI 校准在后台完成后写回文件。
         const amap = getAmapClient();
@@ -978,8 +990,12 @@ async function startSingleUserWebServer(options: WebServerOptions): Promise<Runn
         const knownStatus = previous?.raw === raw && Date.now() - previous.at < 10 * 60_000 ? previous.status : null;
         stateJson(res, {
           ...plan,
+          required_visit_goals: checkedPlan?.required_visit_goals,
+          planning_layers: checkedPlan?.planning_layers,
+          outline: checkedPlan?.outline ?? plan.outline,
+          quality,
           routeVersion: planRouteVersion(raw),
-          days: plan.days?.map((day) => ({ ...day, items: day.items?.map((item) => {
+          days: (checkedPlan?.days ?? plan.days)?.map((day) => ({ ...day, items: day.items?.map((item) => {
             const location = item.location;
             if (location?.latitude === undefined || location.longitude === undefined) return item;
             return { ...item, display_location: { ...location, ...convertPoint({ latitude: location.latitude, longitude: location.longitude, crs: location.crs ?? (location.source === "osm" ? "wgs84" : "gcj02") }, "gcj02") } };

@@ -105,8 +105,11 @@ async function callTool(
   }
 
   try {
-    const text = await registry.execute(params.name, JSON.stringify(objectOf(params.arguments)));
-    return { content: [{ type: "text", text }], isError: false };
+    const meta = objectOf(params._meta);
+    let corrections: readonly string[] = [];
+    const result = await registry.executeDetailed(params.name, JSON.stringify(params.arguments ?? {}), { ...(typeof meta["minicode/operation_id"] === "string" ? { operationId: meta["minicode/operation_id"] as string } : {}), onArgumentsPrepared: (_args, changes) => { corrections = changes; } });
+    const text = result.error ? JSON.stringify({ error: result.error, execution_state: result.executionState, output: result.output }) : result.output;
+    return { content: [{ type: "text", text }], isError: result.error !== undefined, ...(corrections.length ? { structuredContent: { argument_corrections: corrections } } : {}), ...(result.executionState && (result.executionState.operation_id || result.executionState.effect_status !== "none") ? { _meta: { execution_state: result.executionState } } : {}) };
   } catch (error) {
     return { content: [{ type: "text", text: toolErrorOutput(error) }], isError: true };
   }

@@ -1,9 +1,16 @@
-import { mkdir, readFile, readdir, stat } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { createHash } from "node:crypto";
+import { annotateToolCall } from "../core/tool-diagnostics.ts";
+import { parseRequirements, validTravelDate, type TravelRequirements } from "./travel-requirements.ts";
+import { ToolValidationError } from "../core/tool-error.ts";
+import { readFile, readdir, stat } from "node:fs/promises";
+import { join } from "node:path";
 import type { Tool } from "./tool.ts";
 import { requireString } from "./tool.ts";
-import { atomicWrite, withPlanLock, planFileFor } from "./plan-files.ts";
+import { planFileFor } from "./plan-files.ts";
+import { runManagedOperation } from "../storage/managed-operation.ts";
 import { loadProfile, mergeProfiles } from "./profiles.ts";
+import { allocateTripBudget, BUDGET_OVERRUN, budgetPlanText } from "./trip-budget.ts";
+import type { UserRequest } from "./repeat-visit-policy.ts";
 
 export const DEFAULT_TRAVELERS = 2;
 
@@ -17,7 +24,10 @@ export interface TravelBrief {
   readonly roomCount?: number;
   readonly budgetTotalYuan?: number;
   readonly budgetPerMealYuan?: number;
+  readonly budgetOverrunRatio?: number;
   readonly accommodation?: string;
+  readonly requireAccommodation?: boolean;
+  readonly returnLastDay?: boolean;
   readonly allowHotelChanges?: boolean;
   readonly pace?: string;
   readonly mustVisit?: readonly string[];
@@ -26,7 +36,31 @@ export interface TravelBrief {
   /** 同行人档案名字列表（与 profiles 合并后的约束见合并输出） */
   readonly travelerProfiles?: readonly string[];
   readonly notes?: string;
+  readonly requirements?: TravelRequirements;
+  readonly requirementVersion?: string;
+  readonly travelerConstraints?: string;
+  readonly missingTravelerProfiles?: readonly string[];
 }
+
+const clockSchema = { type: "string", pattern: "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$" };
+const timeWindowProperties = { start: clockSchema, end: clockSchema };
+const requirementsSchema = {
+  type: "object", additionalProperties: false,
+  description: "用户明确的硬要求；软偏好保留在 avoid/pace/notes。每日上限按主景点计，day 从1开始。",
+  properties: {
+    dates: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 90 },
+    forbidden_visits: { type: "array", items: { type: "string" }, minItems: 1 },
+    max_visits_per_day: { type: "integer", minimum: 1 },
+    daily_window: { type: "object", required: ["start", "end"], additionalProperties: false, properties: timeWindowProperties },
+    day_windows: { type: "array", minItems: 1, items: {
+      type: "object", required: ["day", "start", "end"], additionalProperties: false,
+      properties: { ...timeWindowProperties, day: { type: "integer", minimum: 1, maximum: 90 } },
+    } },
+    travelers: { type: "integer", minimum: 1 },
+    room_count: { type: "integer", minimum: 1 },
+    fixed_stay: { type: "boolean" },
+  },
+};
 
 /** 可填写的需求模板：用户复制填写后一次性粘贴，模型解析为结构化需求单 */
 export const BRIEF_TEMPLATE = [
@@ -53,6 +87,8 @@ export const BRIEF_TEMPLATE = [
 export function createSaveTravelBriefTool(rootDir: string = process.cwd()): Tool {
   return {
     name: "save_travel_brief",
+    effect: "managed_write",
+    operationRoot: rootDir,
     description:
       "保存旅行需求单（结构化）。用户提供需求文本（模板或自由描述）后，解析成此结构保存，" +
       "需求信息足够时只保存一次并立即进入规划，不等待用户二次确认；后续规划的所有工具参数从需求单取：" +
@@ -71,8 +107,11 @@ export function createSaveTravelBriefTool(rootDir: string = process.cwd()): Tool
         travelers: { type: "number", description: "出行人数，可选" },
         budgetTotalYuan: { type: "number", description: "总预算（元），可选" },
         budgetPerMealYuan: { type: "number", description: "单餐人均预算（元），可选" },
-        allowHotelChanges: { type: "boolean", description: "默认false全程同一家酒店；仅用户明确允许或需要转场时为true。不能为缩短单段交通擅自换酒店。" },
+        budgetOverrunRatio: { type: "number", minimum: 0, maximum: BUDGET_OVERRUN, description: "总预算允许的超支比例，默认0.2；用户明确不可超支时填0。" },
+        allowHotelChanges: { type: "boolean", description: "默认省略：同区域优先连住，后续行程转到另一片区域时可按通勤和行李安排换宿，不设固定距离门槛。仅用户明确要求全程不换酒店时填false；明确允许换宿时填true。" },
         accommodation: { type: "string", description: "住宿偏好描述，可选" },
+        requireAccommodation: { type: "boolean", description: "用户明确不住宿/当天往返填 false；明确需要过夜填 true。省略时一日游不强制住宿，多日游检查住宿。" },
+        returnLastDay: { type: "boolean", description: "多日游默认末日返程。仅用户明确末日留在当地继续游玩或另日返程时填false。" },
         pace: { type: "string", description: "行程节奏：慢 / 适中 / 紧凑，可选" },
         mustVisit: { type: "array", items: { type: "string" }, description: "必去地点列表，可选" },
         avoid: { type: "array", items: { type: "string" }, description: "要避开的地点/类型，可选" },
@@ -82,33 +121,56 @@ export function createSaveTravelBriefTool(rootDir: string = process.cwd()): Tool
           items: { type: "string" },
           description: "同行人档案名字列表（用户在页面勾选或提到时填写，如 [\"爸爸\",\"妈妈\"]），可选",
         },
+        requirements: requirementsSchema,
         notes: { type: "string", description: "其他要求（带老人/孩子、摄影等），可选" },
       },
       required: ["title", "destination"],
     },
-    async execute(args) {
-      const brief = parseBrief(args);
+    async execute(args, ctx) {
+      let brief: TravelBrief;
+      try {
+        const parsed = parseBrief(args);
+        const savedRatio = ctx?.brief?.title === parsed.title ? ctx.brief.budgetOverrunRatio : undefined;
+        const budgetOverrunRatio = ctx?.userRequests?.length ? userBudgetOverrun(ctx.userRequests) ?? savedRatio : parsed.budgetOverrunRatio;
+        brief = await resolveBrief(rootDir, { ...parsed, budgetOverrunRatio });
+      } catch (error) {
+        throw new ToolValidationError([{ code: "TRAVEL_BRIEF_INVALID", path: "brief", message: error instanceof Error ? error.message : String(error), hint: "按参数定义修正后重试；mustVisit/avoid须传字符串数组，而不是JSON字符串。当前尚未进入任何写入。" }]);
+      }
       const file = planFileFor(rootDir, "plans/briefs", brief.title, "json");
 
-      await mkdir(dirname(file), { recursive: true });
-      await withPlanLock(file, () => atomicWrite(file, JSON.stringify(brief, null, 2)));
-
-      return (
+      return runManagedOperation({ root: rootDir, file, tool: "save_travel_brief", request: args, ...ctx,
+        onReplay: async () => {
+          const saved = await loadBriefForTitle(rootDir, brief.title);
+          if (saved) ctx?.onBrief?.(saved);
+        },
+      }, async (commit) => {
+        await commit.commit(JSON.stringify(brief, null, 2));
+        ctx?.onBrief?.(brief);
+        return (
         `需求单已保存: ${file}\n${summarizeBrief(brief)}\n` +
-        "空缺项按默认值处理。不要再保存第二份需求单，立即检索候选并开始保存第 1 天行程；" +
+        "空缺项按默认值处理。不要再保存第二份需求单，先用少量候选保存覆盖全部日期、无跨日重复的outline基础安排，再逐日核验和细排；" +
         "后续保存行程沿用本次标题。"
       );
+      });
     },
   };
+}
+
+function userBudgetOverrun(requests: readonly UserRequest[]): number | undefined {
+  let ratio: number | undefined;
+  for (const { content } of requests) for (const clause of content.split(/[。！？，,；;\n]/)) {
+    if (/(?:禁止|不(?:能|得|可|要|允许|接受))\s*(?:超支|超出(?:总)?预算)|(?:预算|花费|费用|支出|总价|人均).{0,8}(?:不超过|不得超过|严格控制在).{0,15}(?:元|块)/.test(clause)) ratio = 0;
+    const allowed = /(?:超支|超出(?:总)?预算)\s*(?:不超过|最多|可以|允许|控制在)?\s*(\d{1,2}(?:\.\d+)?)\s*[%％]/.exec(clause);
+    if (allowed) ratio = Math.min(BUDGET_OVERRUN, Number(allowed[1]) / 100);
+  }
+  return ratio;
 }
 
 export function createLoadTravelBriefTool(rootDir: string = process.cwd()): Tool {
   return {
     name: "load_travel_brief",
     description:
-      "读取已保存的旅行需求单。开始规划或用户补充需求前先调用它拿到当前版本，" +
-      "更新后用 save_travel_brief 保存。需求单里若勾选了同行人档案，" +
-      "输出会附上已合并的同行人约束（忌口取并集、辣度/节奏取最保守），规划必须遵守。",
+      "从磁盘恢复已保存的需求单，含已合并的同行人约束。状态卡已有同标题需求版本时直接复用，无需读取。用户补充需求后用 save_travel_brief 保存新版本。",
     parameters: {
       type: "object",
       properties: {
@@ -116,24 +178,17 @@ export function createLoadTravelBriefTool(rootDir: string = process.cwd()): Tool
       },
       required: ["title"],
     },
-    async execute(args) {
+    async execute(args, ctx) {
       const title = requireString(args, "title");
-      let raw: string;
-      try {
-        raw = await readFile(planFileFor(rootDir, "plans/briefs", title, "json"), "utf8");
-      } catch {
-        return `未找到需求单「${title}」。已保存的需求单在 plans/briefs/ 目录。`;
+      if (ctx?.brief?.title === title && ctx.brief.requirementVersion) {
+        annotateToolCall({ execution: "cache_hit" });
+        return `需求单「${title}」版本 ${ctx.brief.requirementVersion} 已在状态卡，直接复用。`;
       }
-      const brief = JSON.parse(raw) as TravelBrief;
-      const names = Array.isArray(brief.travelerProfiles) ? brief.travelerProfiles : [];
-      if (names.length === 0) return raw;
-      const profiles = (await Promise.all(names.map((name) => loadProfile(rootDir, name)))).filter(
-        (profile): profile is NonNullable<typeof profile> => profile !== null,
-      );
-      const missing = names.filter((name) => !profiles.some((profile) => profile.name === name || profile.id === name));
-      const merged = mergeProfiles(profiles);
-      const missingNote = missing.length > 0 ? `\n（注意：未找到档案 ${missing.join("、")}，可在页面 👥 里导入）` : "";
-      return `${raw}${merged === "" ? "" : `\n\n${merged}`}${missingNote}`;
+      const brief = await loadBriefForTitle(rootDir, title);
+      if (brief === null) return `未找到需求单「${title}」。已保存的需求单在 plans/briefs/ 目录。`;
+      ctx?.onBrief?.(brief);
+      const missing = brief.missingTravelerProfiles?.join("、");
+      return JSON.stringify(brief, null, 2) + (missing ? `\n（注意：未找到档案 ${missing}，可在页面 👥 里导入）` : "");
     },
   };
 }
@@ -143,17 +198,30 @@ function parseBrief(args: Record<string, unknown>): TravelBrief {
   const title = requireString(args, "title");
   const destination = requireString(args, "destination");
 
-  for (const key of ["startDate", "endDate"]) {
-    const value = args[key];
-    if (value !== undefined && (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value))) {
-      throw new Error(`${key} 需要 YYYY-MM-DD 格式`);
-    }
+  const startDate = args.startDate;
+  const endDate = args.endDate;
+  for (const [key, value] of Object.entries({ startDate, endDate })) {
+    if (value !== undefined && !validTravelDate(value)) throw new Error(`${key} 需要有效日期 YYYY-MM-DD`);
   }
-  if (args.durationDays !== undefined && args.startDate !== undefined && args.endDate !== undefined) {
-    const span = (Date.parse(String(args.endDate)) - Date.parse(String(args.startDate))) / 86400000 + 1;
-    if (!Number.isFinite(span) || span !== args.durationDays) throw new Error("durationDays与起止日期跨度不一致，请先统一用户要求的天数和日期");
+  const span = validTravelDate(startDate) && validTravelDate(endDate)
+    ? (Date.parse(endDate) - Date.parse(startDate)) / 86_400_000 + 1 : undefined;
+  if (span !== undefined && (span < 1 || span > 90)) throw new Error("起止日期需递增且跨度为1—90天");
+  if (span !== undefined && args.durationDays !== undefined && span !== args.durationDays) throw new Error("durationDays与起止日期跨度不一致，请先统一用户要求的天数和日期");
+  const requirements = args.requirements === undefined ? undefined : parseRequirements(args.requirements, span ?? (args.durationDays as number | undefined), title);
+  const dates = requirements?.dates;
+  const travelers = args.travelers ?? requirements?.travelers;
+  const roomCount = args.roomCount ?? requirements?.room_count;
+  const allowHotelChanges = args.allowHotelChanges ?? (requirements?.fixed_stay === true ? false : undefined);
+  for (const [key, value, expected] of [
+    ["startDate", startDate, dates?.[0]], ["endDate", endDate, dates?.at(-1)],
+    ["travelers", args.travelers, requirements?.travelers], ["roomCount", args.roomCount, requirements?.room_count],
+    ["allowHotelChanges", args.allowHotelChanges, requirements?.fixed_stay === true ? false : undefined],
+  ]) {
+    if (value !== undefined && expected !== undefined && value !== expected) throw new Error(`${key} 与 requirements 不一致`);
   }
   if (args.allowHotelChanges !== undefined && typeof args.allowHotelChanges !== "boolean") throw new Error("allowHotelChanges 必须为布尔值");
+  if (args.requireAccommodation !== undefined && typeof args.requireAccommodation !== "boolean") throw new Error("requireAccommodation 必须为布尔值");
+  if (args.returnLastDay !== undefined && typeof args.returnLastDay !== "boolean") throw new Error("returnLastDay 必须为布尔值");
   for (const key of ["travelers", "roomCount"]) {
     if (args[key] !== undefined && !Number.isSafeInteger(args[key])) throw new Error(`${key} 需要正整数`);
   }
@@ -163,6 +231,8 @@ function parseBrief(args: Record<string, unknown>): TravelBrief {
       throw new Error(`${key} 需要正数`);
     }
   }
+  if (args.budgetOverrunRatio !== undefined && (typeof args.budgetOverrunRatio !== "number" || !Number.isFinite(args.budgetOverrunRatio)
+    || args.budgetOverrunRatio < 0 || args.budgetOverrunRatio > BUDGET_OVERRUN)) throw new Error("budgetOverrunRatio 须在 0 至 0.2 之间");
   for (const key of ["mustVisit", "avoid"]) {
     const value = args[key];
     if (value !== undefined && (!Array.isArray(value) || value.some((item) => typeof item !== "string"))) {
@@ -176,25 +246,51 @@ function parseBrief(args: Record<string, unknown>): TravelBrief {
     }
   }
 
+  const durationDays = span ?? (args.durationDays as number | undefined) ?? dates?.length;
+  const effectiveStart = startDate ?? dates?.[0];
+  const effectiveEnd = endDate ?? dates?.at(-1) ?? (durationDays && validTravelDate(effectiveStart)
+    ? new Date(Date.parse(effectiveStart) + (durationDays - 1) * 86_400_000).toISOString().slice(0, 10) : undefined);
   return {
-    ...(args.durationDays === undefined ? {} : { durationDays: Number(args.durationDays) }),
+    ...(durationDays === undefined ? {} : { durationDays }),
     title,
     destination,
-    ...(typeof args.startDate === "string" ? { startDate: args.startDate } : {}),
-    ...(typeof args.endDate === "string" ? { endDate: args.endDate } : {}),
-    ...(typeof args.roomCount === "number" ? { roomCount: args.roomCount } : {}),
-    ...(typeof args.travelers === "number" ? { travelers: args.travelers } : {}),
+    ...(typeof effectiveStart === "string" ? { startDate: effectiveStart } : {}),
+    ...(typeof effectiveEnd === "string" ? { endDate: effectiveEnd } : {}),
+    ...(typeof roomCount === "number" ? { roomCount } : {}),
+    ...(typeof travelers === "number" ? { travelers } : {}),
     ...(typeof args.budgetTotalYuan === "number" ? { budgetTotalYuan: args.budgetTotalYuan } : {}),
     ...(typeof args.budgetPerMealYuan === "number" ? { budgetPerMealYuan: args.budgetPerMealYuan } : {}),
-    ...(typeof args.allowHotelChanges === "boolean" ? { allowHotelChanges: args.allowHotelChanges } : {}),
+    ...(typeof args.budgetOverrunRatio === "number" ? { budgetOverrunRatio: args.budgetOverrunRatio } : {}),
+    ...(typeof allowHotelChanges === "boolean" ? { allowHotelChanges } : {}),
     ...(typeof args.accommodation === "string" ? { accommodation: args.accommodation } : {}),
+    ...(typeof args.requireAccommodation === "boolean" ? { requireAccommodation: args.requireAccommodation } : {}),
+    ...(typeof args.returnLastDay === "boolean" ? { returnLastDay: args.returnLastDay } : {}),
     ...(typeof args.pace === "string" ? { pace: args.pace } : {}),
     ...(Array.isArray(args.mustVisit) ? { mustVisit: args.mustVisit as string[] } : {}),
     ...(Array.isArray(args.avoid) ? { avoid: args.avoid as string[] } : {}),
     ...(typeof args.tastePreferences === "string" ? { tastePreferences: args.tastePreferences } : {}),
     ...(Array.isArray(args.travelerProfiles) ? { travelerProfiles: args.travelerProfiles as string[] } : {}),
     ...(typeof args.notes === "string" ? { notes: args.notes } : {}),
+    ...(requirements === undefined ? {} : { requirements }),
   };
+}
+
+async function resolveBrief(rootDir: string, brief: TravelBrief): Promise<TravelBrief> {
+  if (brief.requirementVersion) return brief;
+  const names = Array.isArray(brief.travelerProfiles) ? brief.travelerProfiles.filter((name) => typeof name === "string") : [];
+  const loaded = await Promise.all(names.map((name) => loadProfile(rootDir, name)));
+  const profiles = loaded.filter((profile) => profile !== null);
+  const missing = names.filter((_, index) => loaded[index] === null);
+  const travelerConstraints = mergeProfiles(profiles);
+  const effective = {
+    ...brief,
+    ...(travelerConstraints ? { travelerConstraints } : {}),
+    ...(missing.length ? { missingTravelerProfiles: missing } : {}),
+  };
+  const canonical = JSON.stringify(effective, (_, value: unknown) => value && typeof value === "object" && !Array.isArray(value)
+    ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value);
+  const requirementVersion = createHash("sha256").update(canonical).digest("hex").slice(0, 20);
+  return { ...effective, requirementVersion };
 }
 
 function summarizeBrief(brief: TravelBrief): string {
@@ -203,27 +299,35 @@ function summarizeBrief(brief: TravelBrief): string {
     ["天数", brief.durationDays === undefined ? "按日期/标题确定" : `${brief.durationDays}天`],
     ["日期", brief.startDate === undefined ? "未定（按当天推算）" : `${brief.startDate} 至 ${brief.endDate ?? brief.startDate}`],
     ["人数", brief.travelers === undefined ? "未填（按 2 人）" : `${brief.travelers} 人`],
-    ["酒店策略", brief.allowHotelChanges === true ? "用户允许换酒店" : "默认全程同一家酒店"],
+    ["酒店策略", brief.allowHotelChanges === false ? "用户要求全程同一家酒店" : brief.allowHotelChanges === true ? "允许换酒店，同区域优先连住" : "同区域优先连住，后续行程跨区域时可转场换宿"],
     ["房数", brief.roomCount === undefined ? `未填（按每间 2 人，${Math.ceil((brief.travelers ?? DEFAULT_TRAVELERS) / 2)} 间）` : `${brief.roomCount} 间`],
     ["总预算", brief.budgetTotalYuan === undefined ? "未填" : `¥${brief.budgetTotalYuan}`],
     ["单餐人均", brief.budgetPerMealYuan === undefined ? "未填（不限制）" : `¥${brief.budgetPerMealYuan}`],
     ["口味", brief.tastePreferences ?? "未填（用长期偏好或询问）"],
     ["住宿", brief.accommodation ?? "未填"],
+    ["过夜要求", brief.requireAccommodation === false ? "不要求住宿" : brief.requireAccommodation === true ? "需要住宿" : "一日游不默认过夜，多日游检查住宿"],
     ["节奏", brief.pace ?? "适中"],
     ["必去", brief.mustVisit?.join("、") ?? "无"],
     ["避开", brief.avoid?.join("、") ?? "无"],
     ["同行人档案", brief.travelerProfiles?.join("、") ?? "无"],
   ];
-  return rows.map(([key, value]) => `- ${key}: ${value}`).join("\n");
+  const allocation = briefBudgetPlan(brief);
+  return [...rows.map(([key, value]) => `- ${key}: ${value}`), ...(allocation ? [budgetPlanText(allocation)] : [])].join("\n");
 }
 
 /** 行程天数（含首尾）；日期缺失或非法时返回 undefined（无法据此估算工作量） */
 export function briefDays(brief: TravelBrief): number | undefined {
-  if (brief.startDate === undefined || brief.endDate === undefined) return undefined;
+  if (!validTravelDate(brief.startDate) || !validTravelDate(brief.endDate)) return brief.durationDays;
   const start = Date.parse(`${brief.startDate}T00:00:00Z`);
   const end = Date.parse(`${brief.endDate}T00:00:00Z`);
   if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return undefined;
   return Math.round((end - start) / 86_400_000) + 1;
+}
+
+export function briefBudgetPlan(brief: TravelBrief) {
+  const days = briefDays(brief) ?? daysFromText(brief.title), target = brief.budgetTotalYuan, travelers = brief.travelers ?? DEFAULT_TRAVELERS;
+  if (!days || !target) return undefined;
+  return allocateTripBudget(target, days, travelers, brief.roomCount ?? Math.ceil(travelers / 2), brief.requireAccommodation !== false, brief.budgetOverrunRatio);
 }
 
 /**
@@ -303,7 +407,8 @@ export async function listTravelBriefs(rootDir: string): Promise<TravelBrief[]> 
 /** 读取指定标题的需求单；不存在或损坏返回 null */
 export async function loadBriefForTitle(rootDir: string, title: string): Promise<TravelBrief | null> {
   const raw = await readFile(planFileFor(rootDir, "plans/briefs", title, "json"), "utf8").catch(() => null);
-  return raw === null ? null : parseBriefJson(raw);
+  const brief = raw === null ? null : parseBriefJson(raw);
+  return brief === null ? null : resolveBrief(rootDir, brief);
 }
 
 /**
@@ -312,12 +417,10 @@ export async function loadBriefForTitle(rootDir: string, title: string): Promise
  */
 export async function briefForSessionTitle(rootDir: string, sessionText: string): Promise<TravelBrief | null> {
   const briefs = await listTravelBriefs(rootDir);
-  return (
-    briefs.find((brief) => sessionText.includes(brief.title)) ??
-    briefs.find((brief) => sessionText.includes(brief.destination)) ??
-    briefs[0] ??
-    null
-  );
+  const selected = briefs.find((brief) => sessionText.includes(brief.title))
+    ?? briefs.find((brief) => sessionText.includes(brief.destination))
+    ?? briefs[0];
+  return selected ?? null;
 }
 
 async function readBriefFile(file: string): Promise<{ brief: TravelBrief; mtimeMs: number } | null> {

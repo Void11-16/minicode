@@ -1,22 +1,27 @@
-import { isKnownOpeningOfficial } from "./official-opening.ts";
+import { externalNow } from "../core/external-environment.ts";
 import { createHash } from "node:crypto";
 import { extractClosure, type ClosureSource } from "./closure-policy.ts";
 import type { ItineraryOpeningHours } from "./itinerary-schema.ts";
-import { sameVisitName } from "./required-visits.ts";
+import { declaredOpeningAlias, mentionsOpeningPlace, sameOpeningPlace, scopeOpeningCampus } from "./opening-place.ts";
 import { WEEKDAYS, clock as time, calendarDate as date, recurringScope, splitRecurringSections, scopeKey, hasScope, scopeApplies, validScope, otherOpeningSubject, type TimeRule, type AdmissionRule, type OpeningScope } from "./opening-schedule.ts";
 export type { TimeRule } from "./opening-schedule.ts";
+export { mentionsOpeningPlace } from "./opening-place.ts";
 
-export const OPENING_POLICY_VERSION = 8;
+export const OPENING_POLICY_VERSION = 11;
 export const OPENING_FIELDS = ["hours", "closure", "last_admission", "sessions", "notices"] as const;
 export type OpeningField = typeof OPENING_FIELDS[number];
 export type OpeningStatus = "verified" | "not_found" | "conflicting" | "needs_confirmation";
 export type SourceKind = "official" | "government" | "platform" | "amap" | "osm" | "search";
 const SOURCE_PRIORITY: Record<SourceKind, number> = { official: 4, government: 3, platform: 2, amap: 1, osm: 1, search: 0 };
-export interface OpeningSource extends ClosureSource { readonly kind?: SourceKind; readonly content_kind?: "snippet" | "page" }
+export interface OpeningSource extends ClosureSource {
+  readonly kind?: SourceKind;
+  readonly content_kind?: "snippet" | "page";
+  readonly closure_scope?: Pick<OpeningScope, "start_date" | "end_date">;
+}
 export interface OpeningSession { readonly starts: string; readonly ends?: string }
 export interface OpeningValues {
   hours: readonly TimeRule[];
-  closure: { readonly closed_on: readonly string[]; readonly holiday_exception: boolean };
+  closure: { readonly closed_on: readonly string[]; readonly holiday_exception: boolean } & Pick<OpeningScope, "start_date" | "end_date">;
   last_admission: string | readonly AdmissionRule[];
   sessions: readonly OpeningSession[];
   notices: { readonly closed_dates: readonly string[]; readonly closed_ranges: readonly { start: string; end?: string }[] };
@@ -38,19 +43,10 @@ export function requestedOpeningFields(args: Record<string, unknown>): OpeningFi
 }
 
 function normalized(text: string): string { return text.replace(/：/g, ":").replace(/([\u4e00-\u9fff]{2,3})省(?=博物(?:馆|院))/g, "$1"); }
-export function mentionsOpeningPlace(text: string, name: string, city: string): boolean {
-  const source = normalized(text).replace(/\s+/g, "");
-  const subject = normalized(name).replace(/\s+/g, "");
-  const prefix = city.replace(/市$/, "");
-  const local = prefix && subject.startsWith(prefix) ? subject.slice(prefix.length).replace(/^市/, "") : subject;
-  return [subject, local, local.replace(/(?:旅游景区|旅游区|景区)$/, "")].some((alias) => alias.length >= 2 && source.includes(alias));
-}
-function sourceKind(source: OpeningSource, place: string, city: string): SourceKind {
+function sourceKind(source: OpeningSource): SourceKind {
   if (source.kind) return source.kind;
-  if (source.engine === "official-web") return "official";
   try {
     const url = new URL(source.url ?? "");
-    if (isKnownOpeningOfficial(url, place, city)) return "official";
     if (url.hostname.endsWith(".gov.cn")) return "government";
     if (url.hostname.endsWith(".ctrip.com") && /\/sight\//.test(url.pathname)) return "platform";
   } catch { /* 无URL不伪装成可追溯来源。 */ }
@@ -62,7 +58,7 @@ export function sourcePriority(fact: OpeningFact): number {
 
 const chinaDate = new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Shanghai" });
 
-export function isHistoricalOpening(fact: OpeningFact | undefined, now = Date.now()): boolean {
+export function isHistoricalOpening(fact: OpeningFact | undefined, now = externalNow().getTime()): boolean {
   return fact?.field === "hours" && fact.status === "verified" && Boolean(fact.value?.length
     && fact.value.every((rule) => rule.end_date !== undefined && rule.end_date < chinaDate.format(now)));
 }
@@ -73,6 +69,45 @@ function clockMinutes(value: string): number {
 
 function closingMinute(rule: TimeRule): number {
   return clockMinutes(rule.closes) + (rule.closes < rule.opens ? 1440 : 0);
+}
+
+const OPEN_LABEL = "(?:开放入[馆园场]|开馆|开园|开始参观)";
+const CLOSE_LABEL = "(?<!开)(?:闭馆|闭园|停止开放|结束营业)";
+const ADMISSION_LABEL = "(?:最后|最晚|停止|截止)(?:入场|入馆|入园|检票)";
+const CLOCK_LABEL = `(?:${OPEN_LABEL}|${CLOSE_LABEL}|${ADMISSION_LABEL})(?:时间)?`;
+const CLOCK_VALUE = "(?<!\\d)\\d{1,2}:[0-5]\\d(?!\\d)";
+const CLOCK_PAIRS = new RegExp(`(${CLOCK_LABEL})\\s*:?\\s*(${CLOCK_VALUE})|(${CLOCK_VALUE})\\s*(${CLOCK_LABEL})`, "g");
+const OPEN_CLOCK_LABEL = new RegExp(`^${OPEN_LABEL}`);
+const ADMISSION_CLOCK_LABEL = new RegExp(`^${ADMISSION_LABEL}`);
+
+/** 同一个时刻只配一个标签。票务页常用“09:00 开馆时间 16:30 停止入馆”。 */
+function labeledClocks(sentence: string): { namedOpen?: string; namedClose?: string; admission?: string } {
+  const clocks: { namedOpen?: string; namedClose?: string; admission?: string } = {};
+  for (const match of sentence.matchAll(CLOCK_PAIRS)) {
+    const label = (match[1] ?? match[4])!, value = (match[2] ?? match[3])!;
+    if (OPEN_CLOCK_LABEL.test(label)) clocks.namedOpen ??= value;
+    else if (ADMISSION_CLOCK_LABEL.test(label)) clocks.admission ??= value;
+    else clocks.namedClose ??= value;
+  }
+  return clocks;
+}
+
+function weekdaysBeforeTime(sentence: string): string[] | undefined {
+  const prefix = sentence.split(/\d{1,2}:[0-5]\d/, 1)[0]!;
+  const days = new Set<string>();
+  for (const match of prefix.matchAll(/(?:周|星期)([一二三四五六日天])(?:\s*(?:至|到|[-–—])\s*(?:周|星期)?([一二三四五六日天]))?/g)) {
+    const first = "日一二三四五六".indexOf(match[1]!.replace("天", "日"));
+    const last = match[2] ? "日一二三四五六".indexOf(match[2].replace("天", "日")) : first;
+    for (let i = first; ; i = (i + 1) % 7) { days.add(WEEKDAYS[i]!); if (i === last) break; }
+  }
+  if (days.size) return [...days];
+  if (/周末/.test(prefix)) return ["Saturday", "Sunday"];
+  if (/工作日/.test(prefix)) return ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"];
+  return undefined;
+}
+
+function adjacentMonthDay(value: string, days: number): string {
+  return new Date(Date.parse(`2000-${value}T00:00:00Z`) + days * 86_400_000).toISOString().slice(5, 10);
 }
 
 /** 官网票务表中的入园窗口与闭园时刻分开，月份列表保留实际适用范围。 */
@@ -96,29 +131,44 @@ function expandMonthlyAdmission(text: string): string {
 }
 
 /** 只提取当前实体的句子；招聘、其他场馆及不明确季节条件不降格成通用事实。 */
-export function extractOpeningFacts(city: string, name: string, sources: readonly OpeningSource[], requested: readonly OpeningField[], placeId?: string, now = Date.now()): OpeningFact[] {
+export function extractOpeningFacts(city: string, name: string, sources: readonly OpeningSource[], requested: readonly OpeningField[], placeId?: string, now = externalNow().getTime()): OpeningFact[] {
   const candidates = new Map<OpeningField, { value: OpeningValues[OpeningField]; citation: OpeningCitation }[]>();
   const uncertain = new Map<OpeningField, OpeningCitation[]>();
   const add = <K extends OpeningField>(field: K, value: OpeningValues[K], citation: OpeningCitation) => candidates.set(field, [...candidates.get(field) ?? [], { value, citation }]);
   for (const source of sources.slice(0, 8)) {
     const subject = normalized(name), title = normalized(source.title);
-    const body = normalized(source.snippet).slice(0, 4000)
+    const scoped = scopeOpeningCampus(title, normalized(source.snippet).slice(0, 4000), name, city);
+    if (!scoped || /招聘|雇用|招标|培训资料|文库/.test(title)) continue;
+    const body = scoped.text
       .replace(/(\d{1,2}:[0-5]\d)\s*[-‐‑‒–—―－~～]+\s*(?=\d{1,2}:[0-5]\d)/g, "$1-");
-    if (!mentionsOpeningPlace(`${title}\n${body}`, subject, city) || /招聘|雇用|招标|培训资料|文库/.test(title)) continue;
-    const kind = sourceKind(source, name, city), traceable = kind === "amap" || Boolean(source.url && /^https?:\/\//.test(source.url));
+    const alias = declaredOpeningAlias(`${title}\n${body}`, subject, city);
+    const aliases = [alias, scoped.campus].filter((value): value is string => value !== undefined);
+    const mentions = (text: string) => mentionsOpeningPlace(text, subject, city) || Boolean(alias && mentionsOpeningPlace(text, alias, city));
+    if (!scoped.campus && !mentions(`${title}\n${body}`)) continue;
+    const kind = sourceKind(source), traceable = kind === "amap" || Boolean(source.url && /^https?:\/\//.test(source.url));
+    const limitedNotice = /\d{4}\s*年.{0,12}(?:局部开放|部分开放)|近期.{0,8}(?:展馆|展厅).{0,8}(?:对外)?开放/.test(title);
     const ambiguous = new Set<OpeningField>();
-    // 先过滤完整句段，再拆字段分句；否则其他场馆逗号后的“停止入馆”会失去主语。
-    const sentences = splitRecurringSections(expandMonthlyAdmission(body)).replace(/[，,](?=\s*(?:但|其中)?[^，,。；;\n]{2,28}(?:博物馆|博物院|纪念馆|街区)(?:开放时间|的开放时间|有参观时间|\s*\d{1,2}:))/g, "\n").split(/[。！？；;\n]|(?=(?:简介|服务内容|游玩时间|景点地址|出行攻略|门票(?:价格)?)\s*:)/).map((s) => s.trim()).filter((s) => {
+    const undatedSpecial = new Set<OpeningField>();
+    // 预约分时说明可能内嵌季节日期，必须在拆分季节前排除。
+    const operationalText = expandMonthlyAdmission(body).split(/[。！？；;\n｡]/).filter((s) =>
+      !/选择入馆时段|(?:售票|预约)(?:放票)?(?:时间|(?:入[馆园场])?时段)|停车场|停车费|(?:为|是)(?:观展|参观|游览|客流)高峰期/.test(s)).join("\n");
+    // 先核对场馆，再拆字段分句，避免逗号后的“停止入馆”丢失主语。
+    const sentences = splitRecurringSections(operationalText).replace(/[，,](?=\s*(?:但|其中)?[^，,。；;\n]{2,28}(?:博物馆|博物院|纪念馆|街区)(?:开放时间|的开放时间|有参观时间|\s*\d{1,2}:))/g, "\n").split(/[\n]|(?=(?:简介|服务内容|游玩时间|景点地址|出行攻略|门票(?:价格)?)\s*:)/).map((s) => s.trim()).filter((s) => {
       if (!s || /^(?:简介|服务内容|游玩时间|景点地址|出行攻略|门票(?:价格)?)\s*:/.test(s)) return false;
-      if (/通行时间|交通路线|车程|地铁|公交|驾车|步行|热线|服务时间|选择入馆时段|(?:售票|预约)(?:时间|时段)/.test(s)) return false;
+      if (/通行时间|交通路线|车程|地铁|公交|驾车|步行|热线/.test(s)) return false;
       const label = /^(.{2,40}?(?:博物馆|博物院|纪念馆|美术馆|公园|景区))\s*:/.exec(s)?.[1];
-      const matches = mentionsOpeningPlace(s, subject, city);
-      if (!matches && !mentionsOpeningPlace(title, subject, city)) return false;
-      const otherVenue = /[\u4e00-\u9fff]{2,24}(?:博物馆|博物院|纪念馆|美术馆)/.test(s) && !matches;
-      return (!label || sameVisitName(label, subject, city)) && !otherVenue && !otherOpeningSubject(s, subject, city) && !(/它们|这些场馆|类似|参考其他/.test(s) && !matches);
-    }).flatMap((s) => /延时|试行|临时/.test(s) ? [s] : s.split(/[，,](?=\s*(?:周|星期|每周|开放|开馆|入馆|最后|最晚|《[^》]+》|\d{1,2}:[0-5]\d\s*(?:停止|截止)))/));
+      const matches = mentions(s);
+      if (!matches && !scoped.campus && !mentions(title)) return false;
+      const venueText = s.replace(/^((?:周|星期)[一二三四五六日天](?:[、，,](?:周|星期)[一二三四五六日天])*)\s*[（(][^)）]+[)）](?=\s*\d{1,2}:)/, "$1");
+      const otherVenue = /[\u4e00-\u9fff]{2,24}(?:博物馆|博物院|纪念馆|美术馆)/.test(venueText) && !matches;
+      return (!label || sameOpeningPlace(label, subject, city) || aliases.includes(label))
+        && (!/服务时间/.test(s) || matches || /^(?:馆区|场馆|景点)?服务时间\s*:/.test(s))
+        && !otherVenue && !otherOpeningSubject(s, subject, city, aliases) && !(/它们|这些场馆|类似|参考其他/.test(s) && !matches);
+    }).flatMap((s) => /延时|试行|临时|[（(]除(?:国家)?(?:法定|国定)节?假日外[，,]\s*(?:周|星期)/.test(s)
+      ? [s] : s.split(/[，,](?=\s*(?:周|星期|每周|开放|开馆|入馆|最后|最晚|《[^》]+》|\d{1,2}:[0-5]\d\s*(?:停止|截止)))/));
     const text = sentences.join("；"), citation: OpeningCitation = { title: source.title, url: source.url, quote: text, kind, observed_at: now, content_kind: source.content_kind };
     const hours: TimeRule[] = [], sessions: OpeningSession[] = [], admissions: AdmissionRule[] = [];
+    const extensions: { scope: OpeningScope; closes: string }[] = [];
     const tables = new Map<string, { scope: OpeningScope; opens: Set<string>; closes: Set<string> }>();
     let activeScope: OpeningScope = {}, unclearScope = false;
     for (const sentence of sentences) {
@@ -129,8 +179,7 @@ export function extractOpeningFacts(city: string, name: string, sources: readonl
       const ranges = [...sentence.matchAll(/(\d{1,2}:[0-5]\d)\s*[-—~至到]\s*(\d{1,2}:[0-5]\d)/g)].flatMap((m) => {
         const opens = time(m[1]!), closes = time(m[2]!); return opens && closes && opens !== "24:00" && opens !== closes ? [{ opens, closes }] : [];
       });
-      const namedOpen = /(?:开放入[馆园场]|开馆|开园|开始参观)(?:时间)?\s*:?\s*(\d{1,2}:[0-5]\d)/.exec(sentence)?.[1];
-      const namedClose = /(?:闭馆|闭园|停止开放|结束营业)(?:时间)?\s*:?\s*(\d{1,2}:[0-5]\d)/.exec(sentence)?.[1];
+      const { namedOpen, namedClose, admission } = labeledClocks(sentence);
       const event = /场次|第[一二三四五六七八九十\d]+场|开演|喷泉|水幕电影|灯光秀|(?:演出|表演)\s*(?:开放)?\s*时间|喷放时间|各一场/.test(sentence);
       const conditional = /并非|不是|不再|曾经|此前|原定|原为|旧公告|淡季|旺季|冬季|夏季|暑期|节假日|\d{1,2}月\d{1,2}日/.test(sentence);
       if (event && (conditional || /\d{4}[-年]|(?:周|星期)[一二三四五六日天]/.test(sentence) || ranges.some((r) => r.closes === "24:00"))) ambiguous.add("sessions");
@@ -138,26 +187,21 @@ export function extractOpeningFacts(city: string, name: string, sources: readonl
         if (ranges.length) sessions.push(...ranges.map((r) => ({ starts: r.opens, ends: r.closes })));
         else sessions.push(...[...sentence.matchAll(/\d{1,2}:[0-5]\d/g)].flatMap((m) => { const t = time(m[0]); return t && t !== "24:00" ? [{ starts: t }] : []; }));
       }
-      const admission = /(?:最后|最晚|停止|截止)(?:入场|入馆|入园|检票)(?:时间)?\s*:?\s*(\d{1,2}:[0-5]\d)|(\d{1,2}:[0-5]\d)\s*(?:停止|截止)(?:入场|入馆|入园|检票)/.exec(sentence);
       const hasFullDate = /\d{4}(?:-\d{1,2}-\d{1,2}|年\d{1,2}月\d{1,2}日)/.test(sentence);
-      const unsupported = /非全天|不全天|并非|不是|不再|曾经|此前|原定|原为|旧公告/.test(sentence)
-        || (!hasFullDate && /节假日|临时|调整(?!为|至)/.test(sentence))
+      const relativeSnippet = source.content_kind !== "page" && /(?:今日|明日|今天|明天|后天)\s*(?:已闭[馆园][;；，, ]*)?\s*\d{1,2}:/.test(sentence);
+      const hoursText = sentence.replace(/[（(]除(?:国家)?(?:法定|国定)节?假日外[，,]\s*(?:周|星期)[一二三四五六日天](?:休馆|闭馆)[)）]/g, "");
+      const specialHours = /特殊营业时间/.test(sentence) && !hasFullDate;
+      const unsupported = limitedNotice || relativeSnippet || specialHours || /非全天|不全天|并非|不是|不再|曾经|此前|原定|原为|旧公告/.test(sentence)
+        || (!hasFullDate && /节假日|临时|调整(?!为|至)/.test(hoursText))
         || (!hasFullDate && !activeScope.start_month_day && (/淡季|旺季|冬季|夏季|暑期|\d{1,2}月\d{1,2}日|\d{1,2}日期间/.test(sentence) || unclearScope));
       if (unsupported) {
-        if (ranges.length || namedOpen || namedClose || /全天开放|全天营业|24\s*小时(?:开放|营业)/.test(sentence)) ambiguous.add("hours");
-        if (admission) ambiguous.add("last_admission"); continue;
+        const pending = specialHours ? undatedSpecial : ambiguous;
+        if (ranges.length || namedOpen || namedClose || /全天开放|全天营业|24\s*小时(?:开放|营业)/.test(sentence)) pending.add("hours");
+        if (admission) pending.add("last_admission");
+        continue;
       }
       const dates = [...sentence.matchAll(/\d{4}(?:-\d{1,2}-\d{1,2}|年\d{1,2}月\d{1,2}日)/g)].flatMap((m) => { const d = date(m[0]); return d ? [d] : []; });
-      const weekRange = /(?:周|星期)([一二三四五六日天])\s*(?:至|到|[-—])\s*(?:周|星期)?([一二三四五六日天])/.exec(sentence);
-      const singleWeek = /(?:每周|周|星期)([一二三四五六日天])/.exec(sentence);
-      let weekdays: string[] | undefined;
-      const firstTime = sentence.search(/\d{1,2}:[0-5]\d/);
-      if (weekRange) {
-        const a = "日一二三四五六".indexOf(weekRange[1]!.replace("天", "日")), b = "日一二三四五六".indexOf(weekRange[2]!.replace("天", "日"));
-        weekdays = []; for (let i = a; ; i = (i + 1) % 7) { weekdays.push(WEEKDAYS[i]!); if (i === b) break; }
-      } else if (/周末/.test(sentence)) weekdays = ["Saturday", "Sunday"];
-      else if (/工作日/.test(sentence)) weekdays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"];
-      else if (singleWeek && (firstTime < 0 || singleWeek.index < firstTime)) weekdays = [...new Set([...sentence.slice(0, firstTime < 0 ? undefined : firstTime).matchAll(/(?:每周|周|星期)([一二三四五六日天])/g)].map((m) => WEEKDAYS["日一二三四五六".indexOf(m[1]!.replace("天", "日"))]!))];
+      const weekdays = weekdaysBeforeTime(sentence);
       if (dates.length > 2 || (dates.length === 2 && (!/至|到|—|~|\d\s*-\s*\d{4}/.test(sentence) || dates[0]! > dates[1]!))) { if (ranges.length) ambiguous.add("hours"); continue; }
       const scope: OpeningScope = { ...(dates.length ? {} : activeScope), ...(weekdays ? { weekdays } : {}), ...(dates.length ? {
         ...(!/截至|截止/.test(sentence) ? { start_date: dates[0] } : {}),
@@ -167,7 +211,10 @@ export function extractOpeningFacts(city: string, name: string, sources: readonl
       // 独立日期/星期表头约束后续行；闭馆公告中的日期和星期不能变成开放表头。
       if (!/\d{1,2}:[0-5]\d|闭馆|闭园|暂停|停止|公告|发布/.test(sentence) && (dates.length || weekdays)) { activeScope = scope; unclearScope = false; }
       if (hasFullDate && dates.length === 0) { activeScope = {}; unclearScope = true; if (ranges.length || namedOpen || namedClose) ambiguous.add("hours"); continue; }
-      if (admission) { const t = time(admission[1] ?? admission[2]!); if (t && t !== "24:00") admissions.push({ time: t, ...scope }); else ambiguous.add("last_admission"); }
+      if (admission) { const t = time(admission); if (t && t !== "24:00") admissions.push({ time: t, ...scope }); else ambiguous.add("last_admission"); }
+      const extendedUntil = /延长开放至\s*(\d{1,2}:[0-5]\d)/.exec(sentence)?.[1];
+      const extendedClose = extendedUntil && time(extendedUntil);
+      if (recurring && !weekdays && extendedClose) extensions.push({ scope, closes: extendedClose });
       if (!ranges.length && (namedOpen || namedClose)) {
         const key = scopeKey(scope), table = tables.get(key) ?? { scope, opens: new Set<string>(), closes: new Set<string>() };
         const opens = namedOpen && time(namedOpen), closes = namedClose && time(namedClose);
@@ -198,6 +245,19 @@ export function extractOpeningFacts(city: string, name: string, sources: readonl
       } else if ((table.opens.size || table.closes.size) && !hours.some((r) => scopeKey(r) === scopeKey(table.scope)
         && (table.opens.size === 0 || (table.opens.size === 1 && table.opens.has(r.opens))) && (table.closes.size === 0 || (table.closes.size === 1 && table.closes.has(r.closes))))) ambiguous.add("hours");
     }
+    // 有明确季节和唯一常规窗口的“延长开放”是替代规则。保留两个互斥的适用范围。
+    const extension = extensions.length === 1 ? extensions[0] : undefined;
+    const base = hours.length === 1 ? hours[0] : undefined;
+    if (extension && base && !hasScope(base) && clockMinutes(extension.closes) > closingMinute(base)) {
+      const start = extension.scope.start_month_day!, end = extension.scope.end_month_day!;
+      const rest = { start_month_day: adjacentMonthDay(end, 1), end_month_day: adjacentMonthDay(start, -1) };
+      if (rest.start_month_day !== start) {
+        hours.splice(0, 1, { ...base, ...rest }, { ...base, ...extension.scope, closes: extension.closes });
+        if (admissions.some((r) => scopeKey(r) === scopeKey(extension.scope))) {
+          for (const [index, rule] of admissions.entries()) if (!hasScope(rule)) admissions[index] = { ...rule, ...rest };
+        }
+      }
+    }
     const submit = <K extends OpeningField>(field: K, value: OpeningValues[K]) => {
       if (ambiguous.has(field)) return;
       if (traceable || kind === "osm") add(field, value, citation);
@@ -213,8 +273,8 @@ export function extractOpeningFacts(city: string, name: string, sources: readonl
     if (distinctAdmissions.length > 30 || distinctAdmissions.some((a, i) => distinctAdmissions.slice(i + 1).some((b) => scopeKey(a) === scopeKey(b) && a.time !== b.time))) ambiguous.add("last_admission");
     else if (distinctAdmissions.length) submit("last_admission", distinctAdmissions.length === 1 && !hasScope(distinctAdmissions[0]!) ? distinctAdmissions[0]!.time : distinctAdmissions);
     const closureText = sentences.filter((s) => !/调整为|恢复/.test(s) || /闭馆|休馆|无休/.test(s)).join("；");
-    const closure = extractClosure(name, [{ ...source, title: name, snippet: closureText }]);
-    if (closure.verified) submit("closure", { closed_on: closure.closed_on, holiday_exception: closure.holiday_exception });
+    const closure = extractClosure(name, [{ ...source, title: name, snippet: closureText }], city, aliases);
+    if (closure.verified && !limitedNotice && validScope(source.closure_scope ?? {})) submit("closure", { closed_on: closure.closed_on, holiday_exception: closure.holiday_exception, ...source.closure_scope });
     else if (closure.mentioned) ambiguous.add("closure");
     const closedDates: string[] = [], closedRanges: { start: string; end?: string }[] = [];
     for (const sentence of sentences) {
@@ -232,7 +292,7 @@ export function extractOpeningFacts(city: string, name: string, sources: readonl
       else if (/\d{1,2}月\d{1,2}日|近日|即日起|临时/.test(sentence)) ambiguous.add("notices");
     }
     if (closedDates.length || closedRanges.length) submit("notices", { closed_dates: [...new Set(closedDates)], closed_ranges: closedRanges });
-    for (const field of ambiguous) uncertain.set(field, [...uncertain.get(field) ?? [], citation]);
+    for (const field of new Set([...ambiguous, ...undatedSpecial])) uncertain.set(field, [...uncertain.get(field) ?? [], citation]);
   }
   const fields = new Set<OpeningField>([...requested, ...candidates.keys(), ...uncertain.keys()]);
   const today = chinaDate.format(now);
@@ -314,14 +374,16 @@ export function openingHoursFor(fact: OpeningFact | undefined, day?: string, adm
 export function validOpeningFact(value: unknown): value is OpeningFact {
   if (!value || typeof value !== "object") return false;
   const r = value as OpeningFact;
-  // 上一版已经取到的时段仍可用，旧开放时段冲突需要按新规则重查。
-  const compatible = r.policy_version === OPENING_POLICY_VERSION || ((r.policy_version === 5 || r.policy_version === 6 || r.policy_version === 7) && r.field !== "closure" && (r.field !== "hours" || r.status !== "conflicting"));
+  // 旧时段和入场字段可能把相邻标签绑定到错误时刻，须重新查询。
+  const compatible = r.policy_version === OPENING_POLICY_VERSION
+    || (r.policy_version === 8 && r.field === "closure")
+    || ([5, 6, 7, 8].includes(r.policy_version) && (r.field === "sessions" || r.field === "notices"));
   if (!compatible || typeof r.id !== "string" || typeof r.city !== "string" || typeof r.name !== "string" || !Number.isFinite(r.observed_at)
     || !OPENING_FIELDS.includes(r.field) || !["verified", "not_found", "conflicting", "needs_confirmation"].includes(r.status) || !Array.isArray(r.sources)
     || !r.sources.every((s) => s && ["official", "government", "platform", "amap", "osm", "search"].includes(s.kind) && typeof s.quote === "string")) return false;
   if (r.status !== "verified") return r.value === undefined;
   if (r.field === "hours") return Array.isArray(r.value) && r.value.length > 0 && r.value.every((v) => Boolean(v && time(v.opens) && v.opens !== "24:00" && time(v.closes) && v.opens !== v.closes && validScope(v)));
-  if (r.field === "closure") return Boolean(r.value && Array.isArray(r.value.closed_on) && r.value.closed_on.every((d) => (WEEKDAYS as readonly string[]).includes(d)) && typeof r.value.holiday_exception === "boolean");
+  if (r.field === "closure") return Boolean(r.value && Array.isArray(r.value.closed_on) && r.value.closed_on.every((d) => (WEEKDAYS as readonly string[]).includes(d)) && typeof r.value.holiday_exception === "boolean" && validScope(r.value));
   if (r.field === "last_admission") return typeof r.value === "string" ? Boolean(time(r.value) && r.value !== "24:00")
     : Array.isArray(r.value) && r.value.length > 0 && r.value.every((v) => v && time(v.time) && v.time !== "24:00" && validScope(v));
   if (r.field === "sessions") return Array.isArray(r.value) && r.value.every((v) => v && time(v.starts) && (!v.ends || time(v.ends)));

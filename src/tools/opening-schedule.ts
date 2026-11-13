@@ -1,4 +1,4 @@
-import { sameVisitName } from "./required-visits.ts";
+import { sameOpeningPlace } from "./opening-place.ts";
 export interface OpeningScope {
   readonly weekdays?: readonly string[];
   readonly start_date?: string;
@@ -61,17 +61,17 @@ export function validScope(value: OpeningScope): boolean {
 }
 
 /** 不同场馆/子区域有明确主语时，不把其营业或公告规则归到页面所属主景区。 */
-export function otherOpeningSubject(text: string, name: string, city?: string): boolean {
+export function otherOpeningSubject(text: string, name: string, city?: string, aliases: readonly string[] = []): boolean {
   if (!/博物馆|博物院|纪念馆|美术馆/.test(name) && !text.includes(name)
     && /[\u4e00-\u9fff]{2,24}(?:博物馆|博物院|纪念馆|美术馆)/.test(text)) return true;
   const generic = /^(?:本馆|本院|我馆|我院|全馆|全院|全园|本园|本景区|全景区)$/;
   const matches = text.matchAll(/(?:^|[\s，,:：“”"、])([\u4e00-\u9fff]{2,24}(?:博物院|博物馆|纪念馆|美术馆|展厅|景区|公园|馆|殿|宫|阁|楼|园|区域))(?=、|将于|将自|于\d|自\d|从\d|停止入|停止检票|暂停开放|停止开放|临时闭馆|临时闭园|闭馆时间|开馆时间|开放时间)/g);
   for (const match of matches) {
     const subject = match[1]!.replace(/^关于|^其中|^包括/, "").replace(/^.*(?:提供|介绍|显示)/, "");
-    if (!generic.test(subject) && !sameVisitName(subject, name, city)) return true;
+    if (!generic.test(subject) && !sameOpeningPlace(subject, name, city) && !aliases.includes(subject)) return true;
   }
   // 带景区名的体育设施也可能有独立时段。
   const sport = /([\u4e00-\u9fff]{0,16}(?:网球场|游泳场|游泳池|泳池|体育馆|体育场))[,，]?(?=的?(?:开放时间|闭馆时间|营业时间))/.exec(text)?.[1];
-  if (sport && !sameVisitName(sport.replace(/^(?:有限)?开放(?:室[内外])?/, ""), name, city)) return true;
+  if (sport && !sameOpeningPlace(sport.replace(/^(?:有限)?开放(?:室[内外])?/, ""), name, city)) return true;
   return /(?:部分|个别|局部)(?:区域|展厅|场馆|景点|园区).{0,30}(?:暂停|停止|关闭|闭馆)/.test(text);
 }

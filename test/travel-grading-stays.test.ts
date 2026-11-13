@@ -10,9 +10,9 @@ import { opportunityScore } from "../src/tools/itinerary-assessment.ts";
 import { totalCostPerPerson, validateItinerary } from "../src/tools/itinerary-validator.ts";
 import { normalizeStayReferences } from "../src/tools/stay-policy.ts";
 import { CLOSURE_POLICY_VERSION, extractClosure } from "../src/tools/closure-policy.ts";
-import { officialOpeningSource } from "../src/tools/official-opening.ts";
+import { openingPageSnippet, readOpeningPage } from "../src/tools/opening-page.ts";
 import { TravelEvidenceStore } from "../src/tools/travel-evidence.ts";
-import { createReviewsTool } from "../src/tools/reviews.ts";
+import { createVisitInfoTool } from "../src/tools/place-visit-info.ts";
 import { createSaveItineraryTool } from "../src/tools/itinerary.ts";
 import { createSaveTravelBriefTool } from "../src/tools/brief.ts";
 
@@ -40,6 +40,15 @@ test("1分钟路线差采用绝对与相对双容差，短途大比例及显式�
   assert.equal(level(20, 21, { route_tolerance_min: 0 }), "P1");
   assert.equal(level(20, 21, { route_tolerance_ratio: 0 }), "P1");
   for (const bad of [-1, NaN, 16]) assert.throws(() => parseItinerary({ ...plan([visit]), constraints: { route_tolerance_min: bad } }));
+});
+
+test("短距离实测驾车路线优先于步行估算，真实路线时长不足仍须修复", () => {
+  const a: ItineraryItem = { ...visit, name: "十里画廊", time: "09:00", end_time: "10:00", location: { latitude: 24.77, longitude: 110.44 } };
+  const b: ItineraryItem = { ...visit, id: "b", name: "遇龙河", time: "10:09", end_time: "12:00", location: { latitude: 24.7825, longitude: 110.44 } };
+  const route: ItineraryItem = { id: "r", type: "transport", name: "交通", from: a.name, to: b.name, time: "10:00", end_time: "10:09", transport_mode: "driving", route_verified: true, route_duration_min: 9 };
+  assert.equal(validateItinerary(plan([a, route, b])).issues.some((issue) => issue.code === "transfer-too-tight"), false);
+  assert.ok(validateItinerary(plan([a, { ...route, route_duration_min: 20 }, b])).issues.some((issue) => issue.code === "route-duration-too-short" && issue.level === "P1"));
+  assert.ok(validateItinerary(plan([a, { ...route, route_verified: false }, b])).issues.some((issue) => issue.code === "transfer-too-tight"));
 });
 
 test("日程参考边界允许30分钟浮动，中等缺口只提醒，明显缺失仍要求修订", () => {
@@ -95,35 +104,24 @@ test("闭馆规则保留法定假日例外；历史/否定/其他例外不能冒
   for (const snippet of ["故宫博物院此前每周一闭馆", "故宫博物院不是每周一闭馆", "故宫博物院每周一闭馆，暑期除外"]) assert.equal(extractClosure("故宫博物院", [{ title: "故宫博物院", snippet }]).verified, false);
 });
 
-test("官网闭馆正文带可追溯URL，剔除脚本与后续新闻；未知地点不任意抓URL", async () => {
-  let count = 0;
-  const request = (async () => { count++; return new Response('<script>每周二闭馆</script>开馆09:00 闭馆17:00 每周一例行闭馆，国家法定节假日除外 新闻列表无关内容'); }) as typeof fetch;
-  const source = await officialOpeningSource("中国国家博物馆", "北京市", request);
-  assert.match(source!.url!, /^https:\/\/www.chnmuseum.cn/);
-  assert.doesNotMatch(source!.snippet, /新闻|周二/);
-  assert.equal(extractClosure("中国国家博物馆", [source!]).holiday_exception, true);
-  assert.equal(await officialOpeningSource("https://example.com", "北京", request), undefined);
-  assert.equal(count, 1);
-});
-
-test("官网命中只用一次HTTP，规则与例外持久化；旧策略负缓存失效", async (t) => {
+test("搜索发现参观来源，规则与例外持久化；旧策略负缓存失效", async (t) => {
   const root = await temp(t), evidence = new TravelEvidenceStore(root); let count = 0;
-  const tool = createReviewsTool((async () => { count++; return new Response("开放时间09:00-17:00。除法定节假日外，故宫博物院全年实行周一全天闭馆的措施。"); }) as typeof fetch);
-  const output = await tool.execute({ place: "故宫博物院", city: "北京", aspect: "开放时间" }, { workspace: root, evidence });
-  assert.equal(count, 1); assert.match(output, /dpm.org.cn/);
+  const tool = createVisitInfoTool((async () => { count++; return new Response('<li class="b_algo"><h2><a href="https://museum.example/visit">故宫博物院参观指南</a></h2><p>开放时间09:00-17:00。除法定节假日外，故宫博物院全年实行周一全天闭馆的措施。</p></li>'); }) as typeof fetch);
+  const output = await tool.execute({ place: "故宫博物院", city: "北京" }, { workspace: root, evidence });
+  assert.equal(count, 1); assert.match(output, /museum.example/);
   const fresh = new TravelEvidenceStore(root); await fresh.load();
   assert.equal(fresh.bind({ ...visit, name: "故宫博物院" }, "北京").closure_holiday_exception, true);
   const record = { key: "old", tool: "get_place_reviews", city: "北京", entity: "故宫博物院", topic: "开放时间", status: "unavailable" as const, summary: "无规则", at: Date.now(), closure_policy_version: CLOSURE_POLICY_VERSION - 1 };
   await fresh.observeQuery(record); assert.equal(fresh.queryRecord("old"), undefined);
-  await fresh.observeQuery({ ...record, key: "new", closure_policy_version: undefined }); assert.ok(fresh.queryRecord("new"));
+  await fresh.observeQuery({ ...record, key: "new", tool: "get_place_visit_info", closure_policy_version: undefined }); assert.ok(fresh.queryRecord("new"));
 });
 
 test("官网同一周规则不重复搬运票价新闻，读取正文有硬字节上限", async () => {
-  const source = await officialOpeningSource("故宫博物院", "北京", (async () => new Response("除法定节假日外，故宫博物院全年实行周一全天闭馆的措施。妇女节如遇周一闭馆，提前一天优惠。")) as typeof fetch);
-  assert.doesNotMatch(source!.snippet, /妇女节|优惠/);
+  const snippet = openingPageSnippet("除法定节假日外，故宫博物院全年实行周一全天闭馆的措施。妇女节如遇周一闭馆，提前一天优惠。");
+  assert.doesNotMatch(snippet!, /妇女节|优惠/);
   let cancelled = false;
   const stream = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new TextEncoder().encode("x".repeat(512_001) + "故宫博物院每周二闭馆")); }, cancel() { cancelled = true; } });
-  assert.equal(await officialOpeningSource("故宫博物院", "北京", (async () => new Response(stream)) as typeof fetch), undefined);
+  assert.equal(openingPageSnippet(await readOpeningPage(new Response(stream))), undefined);
   assert.equal(cancelled, true);
 });
 
@@ -142,16 +140,21 @@ test("回酒店保留真实身份、复制已验证地点引用，动作另存�
   assert.notEqual(conflict.days[0].items[1].evidence_verified, true);
 });
 
-test("全程同酒店为默认约束，换酒店需明确允许，不强行改写第二家名称", () => {
+test("默认支持按行程区域换宿，只有用户明确固定酒店时阻断", () => {
   const itinerary: Itinerary = { title: "酒店", constraints: { require_accommodation: true }, days: [{ items: [visit, stay("a")] }, { items: [{ ...visit, id: "v2", name: "乙公园" }, stay("b", "乙酒店")] }] };
-  assert.ok(validateItinerary(itinerary).issues.some((i) => i.code === "hotel-change-not-allowed"));
+  assert.equal(validateItinerary(itinerary).issues.some((i) => i.code === "hotel-change-not-allowed"), false);
+  const fixed = validateItinerary({ ...itinerary, constraints: { ...itinerary.constraints, allow_hotel_changes: false } }).issues.find((i) => i.code === "hotel-change-not-allowed");
+  assert.equal(fixed?.level, "P1"); assert.match(fixed!.message, /用户要求/);
   assert.equal(validateItinerary({ ...itinerary, constraints: { ...itinerary.constraints, allow_hotel_changes: true } }).issues.some((i) => i.code === "hotel-change-not-allowed"), false);
+  const normalized = normalizeStayReferences({ ...itinerary, days: itinerary.days.map((day) => ({ ...day, items: [...day.items, stay("back", "返回酒店")] })) });
+  assert.equal(normalized.days[0].items.at(-1)!.name, "甲酒店");
+  assert.equal(normalized.days[1].items.at(-1)!.name, "乙酒店");
 });
 
 test("保存路径修复酒店动作名并绑定，增量换酒店提示，需求单策略不能被save覆盖", async (t) => {
   const root = await temp(t), evidence = new TravelEvidenceStore(root);
   await evidence.observePlaces("search_stays", "北京", "1. 甲酒店 | 参考价 ¥600 | 坐标 39.9000,116.4000", "amap");
-  await createSaveTravelBriefTool(root).execute({ title: "酒店测试", destination: "北京" });
+  await createSaveTravelBriefTool(root).execute({ title: "酒店测试", destination: "北京", allowHotelChanges: false });
   const save = createSaveItineraryTool(root), ctx = { workspace: root, evidence };
   await save.execute({ title: "酒店测试", days: [{ date: "2026-11-03", items: [stay("a", "甲酒店", "09:00"), visit, stay("b", "回到甲酒店")] }] }, ctx);
   const read = async () => JSON.parse(await readFile(join(root, "plans/酒店测试.json"), "utf8"));
@@ -162,6 +165,20 @@ test("保存路径修复酒店动作名并绑定，增量换酒店提示，需�
   stored = await read(); assert.equal(stored.constraints.allow_hotel_changes, false);
   const report = JSON.parse(await readFile(join(root, "plans/酒店测试.quality.json"), "utf8"));
   assert.ok(report.issues.some((i: { code: string }) => i.code === "hotel-change-not-allowed"));
+});
+
+test("默认需求不再锁定首家酒店，保存时清除旧版本的默认固定酒店约束", async (t) => {
+  const root = await temp(t), save = createSaveItineraryTool(root);
+  await save.execute({ title: "区域转场", constraints: { allow_hotel_changes: false, require_accommodation: true }, days: [{ date: "2026-11-03", items: [visit, stay("a")] }] });
+  const briefOutput = await createSaveTravelBriefTool(root).execute({ title: "区域转场", destination: "北京" });
+  assert.match(briefOutput, /同区域优先连住.*跨区域/);
+  await save.execute({ title: "区域转场", days: [{ date: "2026-11-04", items: [{ ...visit, id: "v2", name: "乙公园" }, stay("b", "乙酒店"), stay("back", "返回酒店", "20:00")] }] });
+  const stored = JSON.parse(await readFile(join(root, "plans/区域转场.json"), "utf8"));
+  assert.equal(stored.constraints.allow_hotel_changes, undefined);
+  assert.equal(stored.constraints.base_stay_name, undefined);
+  assert.equal(stored.days[1].items.at(-1).name, "乙酒店");
+  const report = JSON.parse(await readFile(join(root, "plans/区域转场.quality.json"), "utf8"));
+  assert.equal(report.issues.some((i: { code: string }) => i.code === "hotel-change-not-allowed"), false);
 });
 
 test("旧路线ID只在同真实端点/交通方式有新证据时重绑定，不借用另一酒店路线", async (t) => {

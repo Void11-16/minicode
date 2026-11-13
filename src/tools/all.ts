@@ -18,6 +18,8 @@ import {
 import { createBashTool } from "./bash.ts";
 import { createAttractionsTool } from "./attractions.ts";
 import { createReviewsTool } from "./reviews.ts";
+import { createVisitInfoTool } from "./place-visit-info.ts";
+import { PlaceSourceClient } from "./place-sources.ts";
 import { createFoodTool } from "./food.ts";
 import { createPlanRoutesTool } from "./transit.ts";
 import {
@@ -38,18 +40,22 @@ export interface DefaultRegistryOptions {
   readonly writeRoot?: string;
   /** 文件类工具与 bash 的默认工作区（运行时 ctx.workspace 优先）；默认 cwd */
   readonly workspace?: string;
+  /** 固定外部数据评测不开放命令工具，避免通过子进程绕过场景网络。 */
+  readonly allowCommands?: boolean;
 }
 
 export function createDefaultRegistry(options: DefaultRegistryOptions = {}): ToolRegistry {
   const workspace = options.workspace ?? process.cwd();
   const registry = new ToolRegistry(options.writeRoot ?? workspace, workspace);
+  const placeSources = new PlaceSourceClient();
   registry
     .register(catalog(createReadFileTool(workspace), "workspace", "file", ["读取", "文件", "代码", "read"]))
     .register(catalog(createWriteFileTool(workspace), "workspace", "file", ["写入", "创建", "文件", "write"]))
     .register(catalog(createEditFileTool(workspace), "workspace", "file", ["编辑", "修改", "代码", "edit"]))
     .register(catalog(createListFilesTool(workspace), "workspace", "file", ["目录", "文件列表", "浏览", "list"]))
-    .register(catalog(createGrepTool(workspace), "workspace", "file", ["搜索", "内容", "代码", "grep"]))
-    .register(catalog(createBashTool(workspace), "workspace", "command", ["命令", "测试", "构建", "shell", "bash"]))
+    .register(catalog(createGrepTool(workspace), "workspace", "file", ["搜索", "内容", "代码", "grep"]));
+  if (options.allowCommands !== false) registry.register(catalog(createBashTool(workspace), "workspace", "command", ["命令", "测试", "构建", "shell", "bash"]));
+  registry
     .register(catalog(createWeatherTool(), "travel-basics", "weather", ["天气", "温度", "降水", "预报"]))
     .register(catalog(createGeocodeTool(), "travel-basics", "place-list", ["坐标", "经纬度", "地址", "地理编码"]))
     .register(catalog(createReverseGeocodeTool(), "travel-basics", "place-list", ["反查", "坐标", "地点"]))
@@ -57,7 +63,8 @@ export function createDefaultRegistry(options: DefaultRegistryOptions = {}): Too
     .register(catalog(createRouteTool(), "routing", "route", ["路线", "耗时", "驾车", "步行", "骑行"]))
     .register(catalog(createStayTool(), "discovery", "place-list", ["住宿", "酒店", "民宿", "酒店坐标"]))
     .register(catalog(createAttractionsTool(), "discovery", "place-list", ["景点", "博物馆", "古迹", "公园", "候选"]))
-    .register(catalog(createReviewsTool(), "discovery", "place-list", ["口碑", "评价", "评分", "开放时间", "游玩时长"]))
+    .register(catalog(createReviewsTool(undefined, undefined, placeSources), "discovery", "place-list", ["口碑", "评价", "排队", "招牌菜", "人均"]))
+    .register(catalog(createVisitInfoTool(undefined, undefined, placeSources), "discovery", "place-list", ["开放时间", "闭馆", "最后入场", "场次", "公告", "游玩时长"]))
     .register(catalog(createFoodTool(), "discovery", "place-list", ["餐厅", "美食", "菜系", "人均", "本地特色"]))
     .register(catalog(createPlanRoutesTool(), "routing", "route", ["当天路线", "通勤", "公交", "远郊", "路线复核"]))
     .register(catalog(createSaveItineraryTool(options.writeRoot ?? process.cwd()), "itinerary", "itinerary", ["保存行程", "修改行程", "质量", "落盘"]))
@@ -77,5 +84,5 @@ function catalog(
   outputKind: ToolOutputKind,
   keywords: readonly string[],
 ): Tool {
-  return { ...tool, category, outputKind, keywords };
+  return { ...tool, parameters: { ...tool.parameters, additionalProperties: false }, effect: tool.effect ?? "query", category, outputKind, keywords };
 }

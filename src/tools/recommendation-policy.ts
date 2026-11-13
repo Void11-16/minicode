@@ -1,4 +1,5 @@
-import { availableDayWindow } from "./itinerary-timeline.ts";
+import { availableDayWindow, itemEndMinutes } from "./itinerary-timeline.ts";
+import { itineraryDayRole } from "./day-role.ts";
 import { convertPoint } from "./coordinates.ts";
 import type { Itinerary, ItineraryItem, MealSubtype } from "./itinerary-schema.ts";
 
@@ -36,7 +37,9 @@ export function hasRecommendationEvidence(item: ItineraryItem): boolean {
 }
 export function recommendationCoverage(itinerary: Itinerary) {
   const slots = itinerary.days.flatMap((day, index) => {
-    const [start, end] = availableDayWindow(day);
+    const [start, availableEnd] = availableDayWindow(day);
+    const scheduledEnd = Math.max(0, ...day.items.filter((item) => item.type !== "meal").map((item) => itemEndMinutes(item) ?? 0));
+    const end = itineraryDayRole(itinerary, day, index) === "departure" ? Math.min(availableEnd, scheduledEnd || availableEnd) : availableEnd;
     return (["lunch", "dinner"] as const).filter((subtype) => {
       const [opens, closes] = subtype === "lunch" ? [660, 870] : [1020, 1290];
       return start < closes && end > opens;

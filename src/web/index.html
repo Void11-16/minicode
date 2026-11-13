@@ -471,6 +471,20 @@
     .ms-title { font-size: 19px; font-weight: 800; color: var(--m-ink); letter-spacing: .2px; line-height: 1.3; }
     .ms-sub { font-size: 12.5px; color: var(--m-muted); margin-top: 5px; }
     .ms-hint { font-size: 11px; color: var(--m-muted); margin-top: 9px; }
+    .plan-quality { margin: 14px 12px 4px; padding: 13px; border: 1px solid #e5e9ef; border-radius: 13px; background: #f8fafc; color: var(--m-ink); }
+    .plan-quality.has-pending { border-color: #ecd7ae; background: #fffaf0; }
+    .plan-quality.has-errors { border-color: #edc4bf; background: #fff6f5; }
+    .pq-title { margin: 0; font-size: 13px; font-weight: 750; }
+    .pq-summary, .pq-scope { margin: 6px 0 0; font-size: 11.5px; line-height: 1.65; color: #59677d; }
+    .pq-group { margin-top: 11px; border-top: 1px solid rgba(120,132,154,.18); padding-top: 9px; }
+    .pq-group summary { min-height: 32px; cursor: pointer; font-size: 12px; font-weight: 700; line-height: 1.6; }
+    .pq-group ul { padding-left: 17px; margin: 5px 0 0; }
+    .pq-group li { padding: 3px 0; font-size: 11.5px; line-height: 1.65; overflow-wrap: anywhere; }
+    .pq-errors summary { color: #ad342d; }
+    .pq-pending summary { color: #975d10; }
+    .pq-item-label { color: #6d7890; font-size: 10.5px; margin-bottom: 2px; }
+    .tl-quality { margin-top: 7px; padding: 6px 8px; border-radius: 7px; font-size: 11px; line-height: 1.6; color: #975d10; background: #fff5df; overflow-wrap: anywhere; }
+    .tl-quality.error { color: #ad342d; background: #fff0ed; }
     .ms-day { padding: 14px 16px 2px; }
     .ms-day-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 10px; }
     .ms-day-no { font-size: 11px; font-weight: 800; letter-spacing: 1.1px; color: var(--m-accent); }
@@ -3302,6 +3316,141 @@
         return "";
       }
 
+      function qualityIssuesForDay(issues, dayIndex) {
+        return (issues ?? []).filter((issue) => dayIndex === -1 || (issue.day === undefined && !issue.date)
+          || issue.day === dayIndex + 1 || (issue.date && issue.date === currentItinerary.days[dayIndex]?.date)
+          || issue.related_days?.includes(dayIndex + 1));
+      }
+
+      function qualityIssueContext(issue) {
+        const day = issue.day === undefined ? null : currentItinerary.days[issue.day - 1];
+        const item = day?.items?.find((entry) => entry.id === issue.item_id);
+        return [day ? `第 ${issue.day} 天${day.date ? ` · ${day.date}` : ""}` : issue.date ?? "全程", item?.name].filter(Boolean).join(" · ");
+      }
+
+      function appendPlanQuality(container, dayIndex) {
+        const quality = currentItinerary.quality;
+        const panel = document.createElement("section");
+        panel.className = "plan-quality";
+        panel.setAttribute("aria-label", "行程质量问题与待确认事项");
+        const title = document.createElement("h3"); title.className = "pq-title";
+        title.textContent = "质量问题与待确认";
+        panel.appendChild(title);
+        const layers = currentItinerary.planning_layers;
+        if (layers && layers.expected_days > 0) {
+          const progress = document.createElement("p"); progress.className = "pq-summary";
+          progress.textContent = `基础安排 ${layers.basic_days}/${layers.expected_days} 天 · 可行性已查 ${layers.checked_days}/${layers.expected_days} 天 · 时间已排 ${layers.scheduled_days}/${layers.expected_days} 天 · 日内达标 ${layers.ready_days}/${layers.expected_days} 天`;
+          panel.appendChild(progress);
+          const details = document.createElement("details"); details.className = "pq-group"; details.open = layers.scheduled_days < layers.expected_days;
+          const heading = document.createElement("summary"); heading.textContent = "每日基础安排与核验进度"; details.appendChild(heading);
+          const list = document.createElement("ul");
+          for (const day of layers.days) {
+            const allocated = currentItinerary.outline?.find((entry) => entry.date === day.date);
+            const row = document.createElement("li");
+            const pending = day.visits.flatMap((visit) => visit.pending.map((item) => `${visit.name}：${item}`));
+            const conflicts = day.visits.flatMap((visit) => visit.conflicts);
+            row.textContent = `${day.date}：${allocated?.visits.map((visit) => visit.name).join("、") || "待分配"}；${day.feasibility === "conflict" ? "可行性需修改" : day.feasibility === "checked" ? "可行性已查" : "可行性待查"}；${day.schedule === "ready" ? "时间路线日内达标" : day.schedule === "draft" ? "时间路线草稿待修" : "时间路线待排"}${pending.length ? `；待确认：${pending.join("、")}` : ""}${conflicts.length ? `；冲突：${conflicts.join("、")}` : ""}`;
+            list.appendChild(row);
+          }
+          details.appendChild(list); panel.appendChild(details);
+          const note = document.createElement("p"); note.className = "pq-scope";
+          note.textContent = "基础安排保留每天去哪里；已查可能仍有未知资料。草稿不算完成，最终仍需通过全部质量检查。";
+          panel.appendChild(note);
+        }
+        const goals = currentItinerary.required_visit_goals ?? [];
+        if (goals.length) {
+          const details = document.createElement("details"); details.className = "pq-group";
+          details.open = goals.some((goal) => goal.status !== "scheduled" || !goal.identity_verified);
+          const heading = document.createElement("summary");
+          heading.textContent = `必去目标 · 已安排 ${goals.filter((goal) => goal.status === "scheduled").length}/${goals.length}`;
+          details.appendChild(heading);
+          const list = document.createElement("ul");
+          const labels = { unresolved: "待识别", identified: "已识别，待分配日期", reserved: "已预留，待保存游览", scheduled: "已安排" };
+          for (const goal of goals) {
+            const row = document.createElement("li");
+            row.textContent = `${goal.name}：${labels[goal.status] ?? "待确认"}${goal.date ? ` · ${goal.date}` : ""}${goal.relation && goal.relation !== "direct" ? ` · 由${goal.covered_by}覆盖（${goal.relation === "geographic_area" ? "区域包含" : "主子景点"}）` : ""} · ${goal.identity_verified ? "地点身份/包含关系已核验" : "地点身份待核验"}`;
+            list.appendChild(row);
+          }
+          details.appendChild(list);
+          const note = document.createElement("p"); note.className = "pq-scope";
+          note.textContent = "已安排指计划中的有效游览；地点核验不代表开放时间、预约和路线全部确认，请结合下方问题查看。";
+          details.appendChild(note); panel.appendChild(details);
+        }
+        const summary = document.createElement("p"); summary.className = "pq-summary";
+        panel.appendChild(summary);
+        container.appendChild(panel);
+        if (!quality || !Array.isArray(quality.issues)) {
+          panel.className += " has-pending";
+          summary.textContent = "当前行程暂无法完成质量检查，请在对话中请求复核。";
+          return;
+        }
+        const all = quality.issues;
+        if (quality.budget) {
+          const budget = quality.budget;
+          const amounts = document.createElement("details"); amounts.className = "pq-group"; amounts.open = true;
+          const heading = document.createElement("summary");
+          heading.textContent = `全团预算 · 预计 ¥${budget.projected} / 目标 ¥${budget.plan.target} · 上限 ¥${budget.plan.limit}`;
+          amounts.appendChild(heading);
+          const rows = document.createElement("ul");
+          for (const category of budget.categories) {
+            const row = document.createElement("li");
+            row.textContent = `${category.label} · 分配 ¥${category.target} · 已录 ¥${category.recorded} · 估算 ¥${category.estimated}`;
+            rows.appendChild(row);
+          }
+          for (const day of budget.days.filter((day) => day.gaps.length)) {
+            const row = document.createElement("li");
+            row.textContent = `${day.date || `第 ${day.day} 天`}待补 · ${day.gaps.join("、")}`;
+            rows.appendChild(row);
+          }
+          amounts.appendChild(rows); panel.appendChild(amounts);
+        }
+        const errors = (issues) => issues.filter((issue) => issue.kind === "error" || (issue.kind !== "pending" && ["P0", "P1"].includes(issue.level)));
+        const pending = (issues) => issues.filter((issue) => issue.kind === "pending");
+        const errorCount = errors(all).length, pendingCount = pending(all).length;
+        if (errorCount) panel.className += " has-errors";
+        else if (pendingCount) panel.className += " has-pending";
+        summary.textContent = errorCount
+          ? `全程 ${errorCount} 项需修订、${pendingCount} 项待确认，请先处理后再出行。`
+          : pendingCount ? `全程 ${pendingCount} 项待确认，请核实后再按相关安排出行。`
+          : all.length ? "当前没有需修订或待确认事项，仍有行程建议可查看。" : "当前规则检查未发现质量问题。";
+        const visible = qualityIssuesForDay(all, dayIndex);
+        const groups = [
+          { title: "需修订", kind: "errors", issues: errors(visible), open: true },
+          { title: "待确认", kind: "pending", issues: pending(visible), open: true },
+          { title: "行程建议", kind: "advice", issues: visible.filter((issue) => !errors([issue]).length && issue.kind !== "pending"), open: false },
+          { title: "餐饮参考", kind: "meals", issues: qualityIssuesForDay(quality.meal_notes, dayIndex), open: false },
+        ];
+        if (dayIndex !== -1) {
+          const scope = document.createElement("p"); scope.className = "pq-scope";
+          scope.textContent = `下方显示第 ${dayIndex + 1} 天及全程事项，其他日期可切换查看。`;
+          panel.appendChild(scope);
+        }
+        for (const group of groups) {
+          if (!group.issues.length) continue;
+          const details = document.createElement("details"); details.className = `pq-group pq-${group.kind}`; details.open = group.open;
+          const heading = document.createElement("summary"); heading.textContent = `${group.title} · ${group.issues.length} 项`;
+          details.appendChild(heading);
+          const list = document.createElement("ul");
+          for (const issue of group.issues) {
+            const row = document.createElement("li");
+            const label = document.createElement("div"); label.className = "pq-item-label"; label.textContent = qualityIssueContext(issue);
+            const message = document.createElement("div"); message.textContent = issue.message;
+            row.appendChild(label); row.appendChild(message); list.appendChild(row);
+          }
+          details.appendChild(list); panel.appendChild(details);
+        }
+      }
+
+      function appendItemQuality(container, item, dayNo) {
+        if (!item.id) return;
+        const issues = (currentItinerary.quality?.issues ?? []).filter((issue) => (issue.day === dayNo || issue.related_days?.includes(dayNo)) && (issue.item_id === item.id || issue.related_item_ids?.includes(item.id)) && (issue.kind === "pending" || issue.kind === "error" || ["P0", "P1"].includes(issue.level)));
+        if (!issues.length) return;
+        const notice = document.createElement("div");
+        notice.className = "tl-quality" + (issues.some((issue) => issue.kind !== "pending") ? " error" : "");
+        notice.textContent = issues.map((issue) => `${issue.kind === "pending" ? "待确认" : "需修订"}：${issue.message}`).join("；");
+        container.appendChild(notice);
+      }
+
       function renderMapSide(dayIndex) {
         const side = $("map-side");
         const scrollTop = side.scrollTop;
@@ -3321,7 +3470,7 @@
         title.textContent = currentItinerary.title ?? "未命名行程";
         head.appendChild(title);
         const dates = currentItinerary.days.map((day) => day.date).filter((date) => date !== undefined && date !== "");
-        const summary = [`共 ${currentItinerary.days.length} 天`];
+        const summary = [currentItinerary.planning_layers ? `基础安排 ${currentItinerary.planning_layers.basic_days} 天 / 详细时间 ${currentItinerary.days.length} 天` : `共 ${currentItinerary.days.length} 天`];
         if (dates.length > 0) summary.unshift(`${dates[0]}${dates.length > 1 ? ` → ${dates[dates.length - 1]}` : ""}`);
         const sub = document.createElement("div");
         sub.className = "ms-sub";
@@ -3330,7 +3479,10 @@
         if (currentItinerary.outline?.length) {
           const outline = document.createElement("div");
           outline.className = "ms-hint";
-          outline.textContent = "粗排预留（未完善的安排不计完成）：" + currentItinerary.outline.map((day) => `${day.date} ${(day.visits ?? []).map((visit) => visit.name).join("、") || "待重新分配"}`).join("；");
+          outline.textContent = "粗排预留（未完善的安排不计完成）：" + currentItinerary.outline.map((day) => {
+            const planned = currentItinerary.planning_layers?.days.find((entry) => entry.date === day.date);
+            return `${day.date} ${(day.visits ?? []).map((visit) => visit.name).join("、") || (planned?.basic ? "仅安排返程" : "待重新分配")}`;
+          }).join("；");
           head.appendChild(outline);
         }
         const hint = document.createElement("div");
@@ -3345,6 +3497,7 @@
         }
         appendRouteStatus(head, dayIndex);
         side.appendChild(head);
+        appendPlanQuality(side, dayIndex);
 
         const days = dayIndex === -1 ? currentItinerary.days : [currentItinerary.days[dayIndex]];
         // 与地图标记编号一致：只给有坐标的景点编号，单日视图沿用全计划连续编号
@@ -3398,6 +3551,7 @@
             name.className = "tl-name";
             name.textContent = item.name;
             body.appendChild(name);
+            appendItemQuality(body, item, dayNo);
 
             const duration = durationLabel(item);
             const chips = [
@@ -3436,6 +3590,11 @@
               parent.className = "tl-note";
               parent.textContent = `所属主景区：${item.parent_visit.name}`;
               body.appendChild(parent);
+            }
+            if (item.area_group?.name) {
+              const area = document.createElement("div"); area.className = "tl-note";
+              area.textContent = `所属区域：${item.area_group.name} · 本地点独立安排时间与路线`;
+              body.appendChild(area);
             }
             if (item.recommended_spots?.length) {
               const spots = document.createElement("div");
@@ -3790,6 +3949,7 @@
           const data = await res.json();
           if (controller.signal.aborted || generation !== routeGeneration) return;
           currentItinerary = useDisplayCoordinates(data);
+          if (data.quality !== undefined) planMeta.set(title, { ...planMeta.get(title), quality: data.quality });
           renderPlanMeta(title);
           currentDay = -1;
           renderDayTabs();
@@ -3888,7 +4048,7 @@
       async function refreshPlanMeta(title) {
         try {
           const data = await (await apiFetch(`${API_BASE}/api/plans`)).json();
-          for (const plan of data.plans) planMeta.set(plan.title, plan);
+          for (const plan of data.plans) planMeta.set(plan.title, { ...plan, ...(plan.title === currentPlanTitle && currentItinerary?.quality !== undefined ? { quality: currentItinerary.quality } : {}) });
           renderPlanMeta(title);
         } catch {
           // 元信息刷新失败不影响主流程

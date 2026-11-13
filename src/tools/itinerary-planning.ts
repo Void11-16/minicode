@@ -1,7 +1,8 @@
 import type { Itinerary, ItineraryDay, ItineraryItem, PlannedVisit, ItineraryOutlineDay } from "./itinerary-schema.ts";
+import { timeToMinutes } from "./itinerary-schema.ts";
 import { itemEndMinutes } from "./itinerary-timeline.ts";
 import { requiredVisitMatches } from "./required-visits.ts";
-import { scenicVisitKey } from "./scenic-area.ts";
+import { isGeographicArea, scenicVisitKey } from "./scenic-area.ts";
 import { haversineKm } from "./geo.ts";
 import { convertPoint } from "./coordinates.ts";
 import { ToolValidationError, type ToolValidationIssue } from "../core/tool-error.ts";
@@ -22,7 +23,7 @@ function samePlace(a: Visit, b: Visit, city = ""): boolean {
 }
 export function sameVisit(a: Visit, b: Visit, city = ""): boolean {
   const trusted = (v: Visit) => v.evidence_verified === true || (v.evidence_verified === undefined && v.type === undefined);
-  const parentA = trusted(a) ? a.parent_visit : undefined, parentB = trusted(b) ? b.parent_visit : undefined;
+  const parentA = trusted(a) && !isGeographicArea(a.parent_visit?.name ?? "") ? a.parent_visit : undefined, parentB = trusted(b) && !isGeographicArea(b.parent_visit?.name ?? "") ? b.parent_visit : undefined;
   const identityA = parentA?.evidence_id ?? a.evidence_id, identityB = parentB?.evidence_id ?? b.evidence_id;
   if (identityA && identityA === identityB && trusted(a) && trusted(b)) return true;
   if (a.evidence_id && a.evidence_id === b.evidence_id && trusted(a) && trusted(b)) return true;
@@ -32,10 +33,17 @@ export function sameVisit(a: Visit, b: Visit, city = ""): boolean {
 }
 export function materializedDay(day: ItineraryDay): boolean {
   return day.items.some((item) => item.type === "visit" && item.time !== undefined && itemEndMinutes(item) !== undefined)
+    || (day.day_type === "departure" && hasTimedDeparture(day))
     || ((day.day_type ?? "full") !== "full" && (day.available_start !== undefined || day.available_end !== undefined) && day.items.some((item) => item.type === "transport" && item.time !== undefined && itemEndMinutes(item) !== undefined));
 }
+export function hasTimedDeparture(day: ItineraryDay): boolean {
+  return day.items.some((item) => item.type === "transport" && item.time !== undefined && (itemEndMinutes(item) ?? 0) > timeToMinutes(item.time)
+    && Boolean(item.from && item.to && item.from !== item.to)
+    && (item.to === day.schedule_input?.return_station || /机场|航站楼|火车站|高铁站|铁路客站|客运站|长途汽车站|码头|(?:东|西|南|北)站$/.test(item.to ?? "")
+      || /^(?:train|rail|flight|ferry|coach|高铁|火车|飞机|轮渡)$/.test(item.transport_mode ?? "") || /返程|离城/.test(item.activity ?? "")));
+}
 export function visitAssignments(plan: Itinerary): VisitAssignment[] {
-  const result: VisitAssignment[] = plan.days.flatMap((day) => day.items.filter((item) => item.type === "visit").map((item) => ({ name: item.name, evidence_id: item.evidence_verified ? item.evidence_id : undefined, parent_visit: item.evidence_verified ? item.parent_visit : undefined, repeat_reason: item.repeat_reason, date: day.date ?? "日期未定", status: "saved" as const, item_id: item.id })));
+  const result: VisitAssignment[] = plan.days.flatMap((day) => day.items.filter((item) => item.type === "visit").map((item) => ({ name: item.name, evidence_id: item.evidence_verified ? item.evidence_id : undefined, parent_visit: item.evidence_verified ? item.parent_visit : undefined, area_group: item.evidence_verified ? item.area_group : undefined, repeat_reason: item.repeat_reason, date: day.date ?? "日期未定", status: "saved" as const, item_id: item.id })));
   for (const day of plan.outline ?? []) for (const visit of day.visits) if (!result.some((entry) => entry.date === day.date && sameVisit(entry, visit, plan.constraints?.destination))) result.push({ ...visit, date: day.date, status: "reserved" });
   return result;
 }

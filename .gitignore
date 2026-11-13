@@ -11,3 +11,4 @@ plans/*
 !plans/profiles/
 plans/profiles/*
 !plans/profiles/模板/
+eval/compare/

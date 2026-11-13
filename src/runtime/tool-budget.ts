@@ -3,6 +3,7 @@ import { TravelEvidenceStore, evidenceId } from "../tools/travel-evidence.ts";
 import { readFile } from "node:fs/promises";
 import { relative, resolve, sep } from "node:path";
 import type { Session } from "../core/session.ts";
+import { dayTaskCalls, dayTaskRounds } from "../core/day-tasks.ts";
 import { parseItinerary, type Itinerary } from "../tools/itinerary-schema.ts";
 import {
   validateItinerary,
@@ -158,7 +159,7 @@ export async function assessToolBudget(options: BudgetAssessmentOptions): Promis
     if (issue.code === "unverified-closure" && issue.day !== undefined && city) {
       const item = itinerary.days[issue.day - 1]?.items.find((item) => item.id === issue.item_id);
       if (item && evidence.hasVerifiedClosure(city, item.name)) override = { category: "edit", action: "已有核验闭馆依据，重新保存自动绑定；不要再次搜索" };
-      else if (item && evidence.pendingReviewPlaces([item.name], city).length === 0) override = { category: "uncertain", action: "该闭馆事项已查无可用依据，保持待确认；换词/换参数重搜不能保证解决" };
+      else if (item && evidence.pendingVisitInfoPlaces([item.name], city).length === 0) override = { category: "uncertain", action: "该闭馆事项已查无可用依据，保持待确认；换词/换参数重搜不能保证解决" };
     }
     return adviseIssue(issue, override);
   });
@@ -168,8 +169,21 @@ export async function assessToolBudget(options: BudgetAssessmentOptions): Promis
   const potentialScore = opportunityScore(itinerary, uncertain, itinerary.constraints?.expected_days ?? expectedDaysFromTitle(itinerary.title)).score;
   const unchanged = options.previousFingerprint !== undefined && fingerprint === options.previousFingerprint;
   const blockingFixable = fixable.filter((item) => item.level !== "P2");
-  const canImprove = !strictPass && !unchanged && blockingFixable.length > 0;
-  const summary = unchanged ? "上次追加后已保存内容没有变化，停止自动续期；请先处理未完成的质量项。" : repairSummary(report, blockingFixable.length, uncertain.length, canImprove, potentialScore);
+  const travel = options.session.travelState?.itinerary;
+  const tasks = travel?.title === itinerary.title ? travel.dayTasks ?? [] : [];
+  const budgetWork: BudgetIssueAdvice[] = (report.budget?.days ?? []).flatMap((day) => {
+    if (!day.date || !day.gaps.length) return [];
+    const task = tasks.find((task) => task.date === day.date && task.layer === "budget");
+    if (!task || !(task.status === "pending" && task.attempts === 0
+      || task.status === "active" && task.attempt_rounds < dayTaskRounds(task) && task.attempt_calls < dayTaskCalls(task))) return [];
+    return [{ level: "P2", code: "budget-selection-pending", day: day.day, message: day.gaps.join("、"),
+      category: "tool", action: `${day.date} ${day.gaps.join("、")}，优先复用已有候选并增量保存` }];
+  });
+  const canImprove = !unchanged && ((!strictPass && blockingFixable.length > 0) || budgetWork.length > 0);
+  const summary = unchanged ? "上次追加后已保存内容没有变化，停止自动续期；请先处理未完成的质量项。"
+    : strictPass && budgetWork.length ? `时间线已通过 strict，仍有 ${budgetWork.length} 天需要补选住宿或餐厅。`
+    : [repairSummary(report, blockingFixable.length, uncertain.length, canImprove, potentialScore),
+      ...(budgetWork.length ? [`另有 ${budgetWork.length} 天需要补选住宿或餐厅。`] : [])].join(" ");
 
   return {
     fingerprint,
@@ -193,7 +207,7 @@ export async function assessToolBudget(options: BudgetAssessmentOptions): Promis
     repair: {
       canImprove,
       summary,
-      items,
+      items: budgetWork.length ? [...items.filter((item) => item.level !== "P2"), ...budgetWork, ...items.filter((item) => item.level === "P2")] : items,
     },
   };
 }

@@ -36,10 +36,10 @@ test("真实 Registry 路径区分执行、缓存、重复拦截、无依据和�
   let httpCalls = 0;
   const fetchFn = (async () => { httpCalls++; return new Response(source); }) as typeof fetch;
   registry.register({ name: "search_attractions", description: "test", parameters: {}, execute: async (_args, ctx) => (await cancellableFetch(fetchFn, ctx?.signal)("https://example.com/search?key=do-not-log")).text() });
-  registry.register({ name: "get_place_reviews", description: "test", parameters: {}, execute: async () => "未获得可核验的简单闭馆规则" });
+  registry.register({ name: "get_place_visit_info", description: "test", parameters: {}, execute: async () => "未获得可核验的简单闭馆规则" });
   const ctx = { queryAttempts: new Map<string, number>() };
   await invoke(d, registry, call("one"), ctx); await invoke(d, registry, call("two"), ctx); await invoke(d, registry, call("three"), ctx);
-  await invoke(d, registry, call("reviews", "get_place_reviews", { place: "天坛公园", city: "北京", aspect: "闭馆时间" }), ctx);
+  await invoke(d, registry, call("reviews", "get_place_visit_info", { place: "天坛公园", city: "北京" }), ctx);
   await invoke(d, registry, { id: "bad", name: "search_attractions", arguments: "{" }, ctx);
   assert.deepEqual(d.records.map((r) => r.execution), ["executed", "cache_hit", "blocked", "executed", "executed"]);
   assert.equal(httpCalls, 1); assert.equal(d.records[0]!.http.length, 1); assert.equal(d.records[1]!.http.length, 0);

@@ -204,7 +204,7 @@ test("itinerary schema: 跨天重复 ID 自动改写为当天默认 ID（同一�
 });
 
 test("validate_itinerary: 完整行程通过核验", () => {
-  const report = validateItinerary(COMPLETE_ITINERARY, { budget_per_person_yuan: 200 });
+  const report = validateItinerary(COMPLETE_ITINERARY, { budget_per_person_yuan: 300 });
 
   assert.equal(report.status, "ok");
   assert.equal(report.score, 100);

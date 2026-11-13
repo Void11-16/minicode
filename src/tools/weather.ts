@@ -1,4 +1,5 @@
 import { cancellableFetch } from "./travel-request.ts";
+import { externalEnvironment, externalNow } from "../core/external-environment.ts";
 import type { Tool } from "./tool.ts";
 import { geocodeLocation, regionLabel, type GeoResult } from "./geocoding.ts";
 import { requireString } from "./tool.ts";
@@ -186,7 +187,9 @@ function isDateString(value: unknown): value is string {
 }
 
 function todayISO(): string {
-  const now = new Date();
+  const now = externalNow();
+  const environment = externalEnvironment();
+  if (environment) return new Intl.DateTimeFormat("en-CA", { timeZone: environment.timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).format(now);
   return isoFromParts(now.getFullYear(), now.getMonth() + 1, now.getDate());
 }
 

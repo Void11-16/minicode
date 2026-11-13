@@ -2,6 +2,13 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
 import type { ToolOutputKind } from "../tools/tool.ts";
 import { structuredToolPreview } from "./tool-preview.ts";
+import type { ToolExecutionState } from "../core/execution-state.ts";
+
+function completeItineraryRead(result: ToolResultForContext): boolean {
+  if (result.toolName !== "load_itinerary") return false;
+  if (result.output.startsWith("【行程全局概览】") || result.output.startsWith("【行程条目目录】")) return true;
+  try { return ["day", "items"].includes(JSON.parse(result.output).view); } catch { return false; }
+}
 
 /** 单条工具结果进入上下文的默认上限 */
 export const TOOL_RESULT_MAX_CHARS = 3_000;
@@ -9,6 +16,7 @@ export const TOOL_RESULT_MAX_CHARS = 3_000;
 export const TOOL_RESULT_BATCH_MAX_CHARS = 8_000;
 
 export interface ToolResultForContext {
+  readonly executionState?: ToolExecutionState;
   readonly callId: string;
   readonly toolName: string;
   readonly output: string;
@@ -89,15 +97,26 @@ async function compactToolResult(
     // tool-call/tool-result 配对，否则后续所有模型请求都会因协议错误失败。
     artifactPath = undefined;
   }
+  // 精确读取必须完整交付；不能把删字段后的预览伪装成完整条目供模型回写。
+  if (completeItineraryRead(result)) {
+    const message = `${header} truncated=true${artifactPath ? ` artifact=${artifactPath}` : " artifact=unavailable"}\n` +
+      "本次范围未完整交付，未计为已读；不是完整行程或完整条目，禁止据此整份覆盖保存。" +
+      (result.output.startsWith("【行程全局概览】") ? "请单独调用load_itinerary(title,reread=true)获取概览一次，避免并行批次挤占预算。"
+        : "请用date/day+item_ids每次只取少量条目；单个条目仍过大时按artifact分段读取完整字段。") +
+      (artifactPath ? "完整原文已落盘。" : "原文落盘失败，请缩小读取范围。");
+    return { callId: result.callId, text: message.slice(0, Math.max(0, maxChars)), ...(artifactPath ? { artifactPath } : {}), truncated: true };
+  }
   const prefix =
     artifactPath === undefined
       ? `${header} truncated=true artifact=unavailable\n` +
         "原文落盘失败；以下仅保留按重要字段裁剪的预览，请不要假设存在完整归档：\n"
       : `${header} truncated=true artifact=${artifactPath}\n` +
         (result.toolName === "load_itinerary" ? "原文已落盘；局部修改优先load_itinerary(day,item_ids)只取所需条目。确需归档时先看已读游标索引再续读。以下仅为预览：\n" : "原文已落盘；确需完整数据时先看已读索引，按返回游标续读；未读归档才用byte_offset=0。以下仅为预览：\n");
+  const projected = prefix.length >= maxChars ? undefined : structuredToolPreview(kind, result.output, maxChars - prefix.length);
+  const multiDay = kind === "itinerary" && (() => { try { return JSON.parse(result.output).days?.length > 1; } catch { return false; } })();
   const text = prefix.length >= maxChars
     ? prefix.slice(0, Math.max(0, maxChars))
-    : `${prefix}${structuredToolPreview(kind, result.output, maxChars - prefix.length) ?? preview(result.output, maxChars - prefix.length)}`;
+    : `${prefix}${projected ?? (multiDay ? "全局概览未完整交付；请单独load_itinerary获取概览，不要按前几天的片段推断全程。".slice(0, maxChars - prefix.length) : preview(result.output, maxChars - prefix.length))}`;
   return {
     callId: result.callId,
     text,

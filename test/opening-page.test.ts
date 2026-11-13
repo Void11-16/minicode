@@ -3,11 +3,11 @@ import { test, type TestContext } from "node:test";
 import { mkdtemp, readFile, rm, writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { officialOpeningSource } from "../src/tools/official-opening.ts";
-import { openingPageSnippet, isSearchChallenge } from "../src/tools/opening-page.ts";
+import { openingArticle, openingPageSnippet, isSearchChallenge } from "../src/tools/opening-page.ts";
+import { filterPlaceSources } from "../src/tools/place-search.ts";
 import { extractOpeningFacts, openingHoursFor, lastAdmissionFor, OPENING_POLICY_VERSION, validOpeningFact, type OpeningSource } from "../src/tools/opening-facts.ts";
 import { TravelEvidenceStore, evidenceId } from "../src/tools/travel-evidence.ts";
-import { createReviewsTool } from "../src/tools/reviews.ts";
+import { createVisitInfoTool } from "../src/tools/place-visit-info.ts";
 import { ToolRegistry } from "../src/tools/tool.ts";
 import { createSaveItineraryTool } from "../src/tools/itinerary.ts";
 import { parseItinerary } from "../src/tools/itinerary-schema.ts";
@@ -18,6 +18,8 @@ import { CLOSURE_POLICY_VERSION } from "../src/tools/closure-policy.ts";
 
 const name = "故宫博物院", city = "北京";
 const snapshot = () => readFile(new URL("./fixtures/palace-visit-20261103.html", import.meta.url), "utf8");
+const palaceUrl = "https://www.dpm.org.cn/Visit.html";
+const searchCard = (place: string, url = palaceUrl) => `<li class="b_algo"><h2><a href="${url}">${place}参观指南</a></h2><p>参观时段见正文。</p></li>`;
 const source = (snippet: string, title = name): OpeningSource => ({ title, snippet, kind: "official", content_kind: "page", url: "https://www.dpm.org.cn/Visit.html" });
 async function fixture(t: TestContext) {
   const root = await mkdtemp(join(tmpdir(), "opening-page-")); t.after(() => rm(root, { recursive: true, force: true }));
@@ -26,8 +28,18 @@ async function fixture(t: TestContext) {
   return { root, evidence, ctx: { workspace: root, evidence }, save: createSaveItineraryTool(root) };
 }
 
+test("景点未被搜索发现时不会直接请求固定官网", async () => {
+  const hosts: string[] = [];
+  const tool = createVisitInfoTool(async (input) => {
+    hosts.push(new URL(String(input)).hostname);
+    return new Response("没有相关结果");
+  });
+  await tool.execute({ place: name, city });
+  assert.deepEqual(hosts, ["www.bing.com", "www.baidu.com", "html.duckduckgo.com", "www.so.com"]);
+});
+
 test("真实官网DOM中的重复导航不占正文额度，保留旺淡季表格及独立闭馆规则", async () => {
-  const html = await snapshot(), result = await officialOpeningSource(name, city, (async () => new Response(html)) as typeof fetch);
+  const html = await snapshot(), result = source(openingPageSnippet(openingArticle(html))!);
   assert.ok(result); assert.ok(result.snippet.length <= 4000);
   assert.match(result.snippet, /每年4月1日至10月31日/); assert.match(result.snippet, /每年11月1日至来年3月31日/);
   assert.match(result.snippet, /开放入馆时间：\s*8:30/); assert.match(result.snippet, /闭馆时间：\s*16:30/);
@@ -39,7 +51,7 @@ test("真实官网DOM中的重复导航不占正文额度，保留旺淡季表�
 });
 
 test("按真实时刻表选择跨年季节和入馆截止，不采用内部场馆的16:10/15:40", async () => {
-  const result = await officialOpeningSource(name, city, (async () => new Response(await snapshot())) as typeof fetch);
+  const result = source(openingPageSnippet(openingArticle(await snapshot()))!);
   const facts = extractOpeningFacts(city, name, [result!], ["hours", "last_admission"]), hours = facts.find((f) => f.field === "hours"), admission = facts.find((f) => f.field === "last_admission");
   for (const [day, closes, last] of [["2026-03-31", "16:30", "15:30"], ["2026-04-01", "17:00", "16:00"], ["2026-10-31", "17:00", "16:00"], ["2026-11-01", "16:30", "15:30"], ["2027-01-05", "16:30", "15:30"], ["2028-02-29", "16:30", "15:30"]]) {
     const selected = openingHoursFor(hours, day, admission)!;
@@ -49,11 +61,11 @@ test("按真实时刻表选择跨年季节和入馆截止，不采用内部场�
   assert.equal(openingHoursFor(hours, "2027-02-29"), undefined);
 });
 
-test("真实Registry查询一次即完成，保存/重新加载保留季节规则并实际校验最后入场", async (t) => {
+test("真实Registry从搜索发现正文，保存/重新加载保留季节规则并实际校验最后入场", async (t) => {
   const f = await fixture(t); let requests = 0;
-  const registry = new ToolRegistry(f.root).register(createReviewsTool((async (input) => { requests++; assert.match(String(input), /dpm.org.cn/); return new Response(await snapshot()); }) as typeof fetch)).register(f.save);
-  const output = await registry.execute("get_place_reviews", JSON.stringify({ city, place: name, aspect: "开放时间" }), f.ctx);
-  assert.equal(requests, 1); assert.match(output, /start_month_day/);
+  const registry = new ToolRegistry(f.root).register(createVisitInfoTool((async (input) => { requests++; if (String(input).includes("bing.com")) return new Response(searchCard(name)); assert.equal(String(input), palaceUrl); return new Response(await snapshot()); }) as typeof fetch)).register(f.save);
+  const output = await registry.execute("get_place_visit_info", JSON.stringify({ city, place: name }), f.ctx);
+  assert.equal(requests, 2); assert.match(output, /start_month_day/);
   await registry.execute("save_itinerary", JSON.stringify({ title: "官网时刻表", constraints: { destination: city }, days: [{ date: "2026-11-04", items: [{ id: "palace", name, type: "visit", time: "10:00", end_time: "12:00" }] }] }), f.ctx);
   const plan = parseItinerary(JSON.parse(await readFile(join(f.root, "plans/官网时刻表.json"), "utf8"))), item = plan.days[0]!.items[0]!;
   assert.equal(item.opening_hours!.closes, "16:30"); assert.equal(item.opening_hours!.last_admission, "15:30"); assert.equal(item.opening_evidence_ids!.length, 3);
@@ -111,18 +123,18 @@ test("未知季节或无效范围仍待确认；不能把交通通行时间作�
 
 test("HTTP200验证码单列服务错误，不写30分钟无依据缓存，恢复后可在原预算内重试", async (t) => {
   const f = await fixture(t), diagnostics = new ToolDiagnostics(); let requests = 0, blocked = true;
-  const registry = new ToolRegistry(f.root).register(createReviewsTool((async () => {
+  const registry = new ToolRegistry(f.root).register(createVisitInfoTool((async (input) => {
     requests++;
-    return new Response(blocked ? '<title>访问异常页面</title><div>请完成验证</div>' : await snapshot());
+    return new Response(blocked ? '<title>访问异常页面</title><div>请完成验证</div>' : String(input).includes("bing.com") ? searchCard(name) : await snapshot());
   }) as typeof fetch));
-  const args = { city, place: name, aspect: "开放时间" }, ctx = { ...f.ctx, queryAttempts: new Map<string, number>() };
-  const output = await diagnostics.run({ id: "challenge", name: "get_place_reviews", arguments: JSON.stringify(args) }, 1, async () => ({ output: await registry.execute("get_place_reviews", JSON.stringify(args), ctx) }));
+  const args = { city, place: name }, ctx = { ...f.ctx, queryAttempts: new Map<string, number>() };
+  const output = await diagnostics.run({ id: "challenge", name: "get_place_visit_info", arguments: JSON.stringify(args) }, 1, async () => ({ output: await registry.execute("get_place_visit_info", JSON.stringify(args), ctx) }));
   assert.match(output.output, /搜索失败/); assert.equal(requests, 4);
   assert.equal(diagnostics.records[0]!.query_status, "failed"); assert.equal(diagnostics.records[0]!.provider_errors.filter((r) => r.code === "CAPTCHA").length, 4);
-  assert.equal(f.evidence.openingFactsFor(city, name).hours, undefined); assert.deepEqual(f.evidence.pendingReviewPlaces([name], city, ctx.queryAttempts), [name]);
+  assert.equal(f.evidence.openingFactsFor(city, name).hours, undefined); assert.deepEqual(f.evidence.pendingVisitInfoPlaces([name], city, ctx.queryAttempts), [name]);
   blocked = false;
-  await registry.execute("get_place_reviews", JSON.stringify(args), ctx);
-  assert.equal(requests, 5); assert.equal(f.evidence.openingFactsFor(city, name).hours!.status, "verified");
+  await registry.execute("get_place_visit_info", JSON.stringify(args), ctx);
+  assert.equal(requests, 6); assert.equal(f.evidence.openingFactsFor(city, name).hours!.status, "verified");
 });
 
 test("含验证码字样的正常信息页不误拒绝，跳转到验证域名仍识别", () => {
@@ -133,19 +145,19 @@ test("含验证码字样的正常信息页不误拒绝，跳转到验证域名�
 
 test("部分字段未找到不把其余已提取字段误报成服务失败", async (t) => {
   const f = await fixture(t), diagnostics = new ToolDiagnostics();
-  const registry = new ToolRegistry(f.root).register(createReviewsTool((async (input) => new Response(String(input).includes("dpm.org.cn") ? await snapshot() : "没有相关结果")) as typeof fetch));
-  const args = { city, place: name, aspect: "开放时间", fields: ["hours", "notices"] };
-  await diagnostics.run({ id: "partial", name: "get_place_reviews", arguments: JSON.stringify(args) }, 1, async () => ({ output: await registry.execute("get_place_reviews", JSON.stringify(args), f.ctx) }));
+  const registry = new ToolRegistry(f.root).register(createVisitInfoTool((async (input) => new Response(String(input).includes("bing.com") ? searchCard(name) : String(input).includes("dpm.org.cn") ? await snapshot() : "没有相关结果")) as typeof fetch));
+  const args = { city, place: name, fields: ["hours", "notices"] };
+  await diagnostics.run({ id: "partial", name: "get_place_visit_info", arguments: JSON.stringify(args) }, 1, async () => ({ output: await registry.execute("get_place_visit_info", JSON.stringify(args), f.ctx) }));
   assert.equal(diagnostics.records[0]!.query_status, "returned");
   assert.deepEqual(diagnostics.records[0]!.opening_fields!.extracted, ["hours"]);
 });
 
 test("旧策略的无依据缓存和主子点误归属字段不复用，损坏的月日范围不加载", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "opening-version-")); t.after(() => rm(root, { recursive: true, force: true }));
-  const args = { city, place: name, aspect: "开放时间" }, key = evidenceId(["get_place_reviews", queryKeyArgs("get_place_reviews", args)]);
+  const args = { city, place: name }, key = evidenceId(["get_place_visit_info", queryKeyArgs("get_place_visit_info", args)]);
   const fact = extractOpeningFacts(city, name, [source("09:00-17:00")], ["hours"])[0]!;
   await mkdir(join(root, ".minicode"));
-  await writeFile(join(root, ".minicode/travel-evidence.json"), JSON.stringify({ opening_facts: [{ ...fact, policy_version: 4 }], query_log: [{ key, tool: "get_place_reviews", city, entity: name, topic: "开放时间", status: "unavailable", at: Date.now(), closure_policy_version: CLOSURE_POLICY_VERSION, opening_policy_version: OPENING_POLICY_VERSION - 1 }] }));
+  await writeFile(join(root, ".minicode/travel-evidence.json"), JSON.stringify({ opening_facts: [{ ...fact, policy_version: 4 }], query_log: [{ key, tool: "get_place_visit_info", city, entity: name, topic: "开放时间", status: "unavailable", at: Date.now(), closure_policy_version: CLOSURE_POLICY_VERSION, opening_policy_version: OPENING_POLICY_VERSION - 1 }] }));
   const evidence = new TravelEvidenceStore(root); await evidence.load();
   assert.equal(evidence.queryRecord(key), undefined); assert.equal(evidence.openingFactsFor(city, name).hours, undefined);
   assert.equal(validOpeningFact({ ...fact, value: [{ opens: "09:00", closes: "17:00", start_month_day: "02-30", end_month_day: "03-31" }] }), false);
@@ -162,11 +174,11 @@ test("普通来源单条清楚时段可回填，模糊官网摘要不否定已�
 
 test("百度现代卡片结构中的摘要与落地页用于省博物馆别名回填", async () => {
   let requests = 0;
-  const tool = createReviewsTool((async () => {
+  const tool = createVisitInfoTool((async () => {
     requests++;
     return new Response(requests === 1 ? "没有结果" : '<div class="result c-container" mu="https://example.com/visit"><h3>江西博物馆参观指南</h3><!--s-data:{"summaryData":{"generalLines":[{"data":[{"text":"江西博物馆开放时间09:00-17:00，周一闭馆"}]}]}}--></div>');
   }) as typeof fetch);
-  const output = await tool.execute({ city: "南昌", place: "江西省博物馆", aspect: "开放时间" });
+  const output = await tool.execute({ city: "南昌", place: "江西省博物馆" });
   assert.equal(requests, 2);
   assert.match(output, /hours: verified/);
   assert.match(output, /closure: verified/);
@@ -174,24 +186,24 @@ test("百度现代卡片结构中的摘要与落地页用于省博物馆别名�
 
 test("摘要缺失时只读取相关正文，文章外的推荐时间不混入", async () => {
   let searches = 0, pages = 0;
-  const tool = createReviewsTool((async (input) => {
+  const tool = createVisitInfoTool((async (input) => {
     pages++;
     assert.equal(String(input), "https://example.com/visit");
     return new Response('<title>南昌测试公园参观指南</title><article><div><p>南昌测试公园开放时间09:00-17:00</p></div></article><aside>推荐其他景点，开放时间08:00-22:00</aside>');
   }) as typeof fetch, { name: "test", async search() { searches++; return [{ title: "南昌测试公园参观指南", snippet: "", url: "https://example.com/visit" }]; } });
-  const output = await tool.execute({ city: "南昌", place: "测试公园", aspect: "开放时间" });
+  const output = await tool.execute({ city: "南昌", place: "测试公园" });
   assert.equal(searches, 1); assert.equal(pages, 1);
   assert.match(output, /hours: verified/); assert.match(output, /17:00/); assert.doesNotMatch(output, /22:00/);
 });
 
 test("搜索和正文共用四次请求上限，正文最多两页", async () => {
   let searches = 0, requests = 0, pages = 0;
-  const tool = createReviewsTool((async (input) => {
+  const tool = createVisitInfoTool((async (input) => {
     requests++;
     if (String(input).startsWith("https://example.com/")) pages++;
     return new Response("没有开放信息");
   }) as typeof fetch, { name: "test", async search() { searches++; return [1, 2, 3].map((id) => ({ title: `南昌测试公园参观指南${id}`, snippet: "", url: `https://example.com/${id}` })); } });
-  await tool.execute({ city: "南昌", place: "测试公园", aspect: "开放时间" });
+  await tool.execute({ city: "南昌", place: "测试公园" });
   assert.equal(searches + requests, 4); assert.equal(pages, 2);
 });
 
@@ -238,7 +250,7 @@ test("厦门实测的双横线和全角冒号保留分季时段并选较早闭�
 
 test("同一任务验证码退避后，360跳转与正文仍计入同一个四次请求预算", async () => {
   const calls: string[] = [];
-  const tool = createReviewsTool((async (input, init) => {
+  const tool = createVisitInfoTool((async (input, init) => {
     const url = new URL(String(input)); calls.push(url.hostname);
     if (url.hostname === "www.baidu.com" || url.hostname === "html.duckduckgo.com") return new Response("<title>安全验证</title>", { status: 403 });
     if (url.hostname === "www.so.com" && url.pathname === "/link") {
@@ -253,9 +265,9 @@ test("同一任务验证码退避后，360跳转与正文仍计入同一个四�
     return new Response("没有相关结果");
   }) as typeof fetch);
   const ctx = { workspace: process.cwd(), queryAttempts: new Map<string, number>() };
-  const args = { city: "南昌", place: "测试公园", aspect: "开放时间" };
-  await tool.execute(args, ctx);
-  await tool.execute(args, ctx);
+  const args = { city: "南昌", place: "测试公园" };
+  await tool.execute({ ...args, place: "退避公园甲" }, ctx);
+  await tool.execute({ ...args, place: "退避公园乙" }, ctx);
   calls.length = 0;
   const output = await tool.execute(args, ctx);
   assert.deepEqual(calls, ["www.bing.com", "www.so.com", "www.so.com", "example.org"]);
@@ -268,13 +280,14 @@ test("同一任务验证码退避后，360跳转与正文仍计入同一个四�
 
 test("被拦截的部分开放查询保留已有字段，缺失字段不写负缓存", async (t) => {
   const f = await fixture(t), diagnostics = new ToolDiagnostics();
-  const registry = new ToolRegistry(f.root).register(createReviewsTool((async (input) => {
+  const registry = new ToolRegistry(f.root).register(createVisitInfoTool((async (input) => {
+    if (String(input).includes("bing.com")) return new Response(searchCard(name));
     if (String(input).includes("dpm.org.cn")) return new Response(await snapshot());
     return new Response("<title>安全验证</title>");
   }) as typeof fetch));
-  const args = { city, place: name, aspect: "开放时间", fields: ["hours", "notices"] };
-  const run = () => registry.execute("get_place_reviews", JSON.stringify(args), f.ctx);
-  const result = await diagnostics.run({ id: "partial-blocked", name: "get_place_reviews", arguments: JSON.stringify(args) }, 1, async () => ({ output: await run() }));
+  const args = { city, place: name, fields: ["hours", "notices"] };
+  const run = () => registry.execute("get_place_visit_info", JSON.stringify(args), f.ctx);
+  const result = await diagnostics.run({ id: "partial-blocked", name: "get_place_visit_info", arguments: JSON.stringify(args) }, 1, async () => ({ output: await run() }));
   assert.match(result.output, /开放信息查询受阻，待确认字段：notices/);
   assert.equal(diagnostics.records[0]!.query_status, "failed");
   assert.equal(f.evidence.openingFactsFor(city, name).hours?.status, "verified");
@@ -292,23 +305,25 @@ test("景区同名的室外网球场时段不能回填到整个沙面", () => {
 
 test("熊猫基地官网票务表分别回填分季闭园和最后入园", async () => {
   const place = "成都大熊猫繁育研究基地";
-  const tool = createReviewsTool((async (input) => {
-    assert.equal(String(input), "https://www.panda.org.cn/cn/service/ticket/");
+  const tool = createVisitInfoTool((async (input) => {
+    const url = "https://www.panda.org.cn/cn/service/ticket/";
+    if (String(input).includes("bing.com")) return new Response(searchCard(place, url));
+    assert.equal(String(input), url);
     return new Response("<main><p>1月、2月、11月、12月入园时间:8:00-16:30;闭园时间:17:30；</p><p>3月至10月入园时间:7:30-17:00;闭园时间:18:00</p></main>");
   }) as typeof fetch);
-  const output = await tool.execute({ city: "成都", place, aspect: "开放时间" });
+  const output = await tool.execute({ city: "成都", place });
   assert.match(output, /hours: verified .*17:30.*18:00/);
   assert.match(output, /last_admission: verified .*16:30.*17:00/);
 });
 
 test("过期时段不会结束搜索，也不会压过新结果", async () => {
   const hosts: string[] = [];
-  const tool = createReviewsTool((async (input) => {
+  const tool = createVisitInfoTool((async (input) => {
     const { hostname } = new URL(String(input)); hosts.push(hostname);
     if (hostname === "test.gov.cn") return new Response("没有更多时段");
     return new Response(hostname === "www.bing.com" ? '<li class="b_algo"><h2><a href="https://test.gov.cn/old">测试公园</a></h2><p>2001年11月7日开放时间09:00-16:00</p></li>' : '<div class="result c-container" mu="https://example.org/current"><h3>测试公园参观指南</h3><!--s-data:{"summaryData":{"generalLines":[{"data":[{"text":"测试公园开放时间09:00-18:00"}]}]}}--></div>');
   }) as typeof fetch);
-  const result = await tool.execute({ city: "成都", place: "测试公园", aspect: "开放时间" });
+  const result = await tool.execute({ city: "成都", place: "测试公园" });
   assert.ok(hosts.includes("www.baidu.com"));
   assert.match(result, /hours: verified \[\{"opens":"09:00","closes":"18:00"\}/);
 });
@@ -324,7 +339,7 @@ test("都江堰市博物馆闭馆不能回填到景区，优惠日期不限定�
 
 test("官网首页经参观指南进入开放时间，百科不抢正文预算，四次请求即完成", async () => {
   const urls: string[] = [];
-  const tool = createReviewsTool((async (input) => {
+  const tool = createVisitInfoTool((async (input) => {
     const url = String(input); urls.push(url);
     if (url.startsWith("https://www.bing.com/")) return new Response(
       '<li class="b_algo"><h2><a href="https://zh.wikipedia.org/wiki/测试公园">测试公园 - 维基百科</a></h2><p>测试公园的百科介绍。</p></li>' +
@@ -334,7 +349,7 @@ test("官网首页经参观指南进入开放时间，百科不抢正文预算�
     if (url === "https://example.com/hours") return new Response('<title>开放时间</title><article>每天开放时间09:00-17:00，16:30停止入园</article>');
     throw new Error("意外请求 " + url);
   }) as typeof fetch);
-  const output = await tool.execute({ city: "南昌", place: "测试公园", aspect: "开放时间" });
+  const output = await tool.execute({ city: "南昌", place: "测试公园" });
   assert.equal(urls.length, 4);
   assert.deepEqual(urls.slice(1), ["https://example.com/index.html", "https://example.com/guide", "https://example.com/hours"]);
   assert.match(output, /hours: verified/);
@@ -350,4 +365,162 @@ test("兵马俑官网日期块的闭馆标签优先于未标用途区间，不�
   assert.equal(openingHoursFor(hours, "2026-11-06")?.closes, "18:30");
   assert.equal(openingHoursFor(hours, "2026-11-16")?.closes, "18:00");
   assert.equal(facts.find((fact) => fact.field === "last_admission")?.status, "not_found");
+});
+
+test("国博预约摘要截断在停止入馆时，不能把相邻时间配成跨夜营业", () => {
+  const [hours, admission] = extractOpeningFacts("北京", "中国国家博物馆", [{
+    title: "中国国家博物馆参观预约", url: "https://pcticket.chnmuseum.cn/museum/",
+    snippet: "个人预约须知 开闭馆时间 09:00 开馆时间 16:30 停止入馆 …",
+  }], ["hours", "last_admission"]);
+  assert.equal(hours!.status, "needs_confirmation");
+  assert.equal(admission!.value, "16:30");
+});
+
+test("国博官网常规时段和季节延长分别回填，预约分时不变成开放窗口", async () => {
+  const tool = createVisitInfoTool(async (input) => {
+    const url = "https://www.chnmuseum.cn/cg/";
+    if (String(input).includes("bing.com")) return new Response(searchCard("中国国家博物馆", url));
+    assert.equal(String(input), url);
+    return new Response(`<article><h2>一、开放时间：</h2>
+      <p>本馆每日9:00—17:00（16:00停止入馆），周一闭馆（法定节假日除外）。</p>
+      <p>观众需求高峰期6月1日至10月31日延长开放至17:30（16:30停止入馆）。</p>
+      <p>每日分为9:00—11:00、11:00—13:30、13:30—16:00（6月1日—10月31日第三时段为13:30—16:30）三个预约入馆时段，预约放票时间为每日17:00。</p></article>`);
+  });
+  const evidence = new TravelEvidenceStore();
+  await tool.execute({ place: "中国国家博物馆", city: "北京", fields: ["hours", "closure", "last_admission"] }, { workspace: ".", evidence });
+  const facts = evidence.openingFactsFor("北京", "中国国家博物馆");
+  assert.equal(facts.hours?.sources[0]?.content_kind, "page");
+  assert.deepEqual(facts.closure?.value, { closed_on: ["Monday"], holiday_exception: true });
+  assert.deepEqual(openingHoursFor(facts.hours, "2026-11-14", facts.last_admission)?.intervals, [{ opens: "09:00", closes: "17:00" }]);
+  assert.equal(lastAdmissionFor(facts.last_admission, "2026-11-14"), "16:00");
+  assert.deepEqual(openingHoursFor(facts.hours, "2027-07-04", facts.last_admission)?.intervals, [{ opens: "09:00", closes: "17:30" }]);
+  assert.equal(lastAdmissionFor(facts.last_admission, "2027-07-04"), "16:30");
+});
+
+test("成都博物馆正文保留并列星期和截止，忽略观展高峰及停车场开放", () => {
+  const place = "成都博物馆";
+  const snippet = `开放时间
+周二—周四、周日 9:00-17:00（16:30停止入馆）
+周五、周六（周末儿童博物馆）9:00-20:30（20:00停止入馆）
+周一闭馆（法定节假日除外）
+每日10:00-12:00、14:00-16:00为观展高峰期
+天府广场设有地下停车场，24小时开放`;
+  const [hours, closure, admission] = extractOpeningFacts("成都", place,
+    [{ title: place, snippet, url: "https://www.cdmuseum.com/zhinan/", content_kind: "page" }], ["hours", "closure", "last_admission"]);
+  assert.equal(openingHoursFor(hours, "2026-11-14", admission)?.closes, "20:30");
+  assert.equal(lastAdmissionFor(admission, "2026-11-14"), "20:00");
+  assert.equal(openingHoursFor(hours, "2026-11-15", admission)?.closes, "17:00");
+  assert.equal(lastAdmissionFor(admission, "2026-11-15"), "16:30");
+  assert.deepEqual(closure!.value, { closed_on: ["Monday"], holiday_exception: true });
+});
+
+test("搜索发现的官网入口缺少时刻，首个同站链接失败后仍能读另一条参观入口", async () => {
+  const requests: string[] = [];
+  const tool = createVisitInfoTool(async (input) => {
+    const url = String(input);
+    requests.push(url);
+    if (url.includes("bing.com")) return new Response(searchCard(name));
+    if (url.endsWith("/Visit.html")) return new Response('<nav><a href="/hours">开放时间</a><a href="/guide">参观须知</a></nav>');
+    if (url.endsWith("/hours")) return new Response("下线", { status: 404 });
+    return new Response('<article><p>开放时间09:00-17:00</p><p>周一闭馆</p></article>');
+  });
+  const output = await tool.execute({ place: name, city }, { workspace: "." });
+  assert.equal(new URL(requests[0]!).hostname, "www.bing.com");
+  assert.deepEqual(requests.slice(1), [palaceUrl, "https://www.dpm.org.cn/hours", "https://www.dpm.org.cn/guide"]);
+  assert.match(output, /hours: verified/);
+  assert.match(output, /closure: verified/);
+});
+
+test("苏博搜索标题缺少馆区仍可读正文，取本馆时段及闭馆日", async () => {
+  const url = "https://www.szmuseum.com/Wap/News/Details/54c85f38-c0b0-40f0-ac8a-4b3a49102333";
+  const requests: string[] = [];
+  const tool = createVisitInfoTool(async (input) => {
+    requests.push(String(input));
+    assert.equal(String(input), url);
+    return new Response(`<title>苏州博物馆</title><article>
+      <h2>西馆</h2><p>开放时间08:00-20:00</p><p>周二闭馆</p>
+      <h2>本馆</h2><p>参观地址</p><p>苏州市东北街204号</p><p>开放时间09:00-17:00</p><p>周一闭馆</p>
+    </article>`);
+  }, { name: "test", async search() { return [
+    { title: "苏州博物馆开放时间", url: "https://example.org/visit", snippet: "开放时间见正文" },
+    { title: "苏州博物馆", url, snippet: "苏州博物馆恢复常态化开放，开放时间为9:00—17:00" },
+  ]; } });
+  const evidence = new TravelEvidenceStore();
+  const place = "苏州博物馆(本馆)", city = "苏州";
+  const output = await tool.execute({ place, city }, { workspace: ".", evidence });
+  assert.deepEqual(requests, [url]);
+  const facts = evidence.openingFactsFor(city, place);
+  assert.equal(facts.hours?.sources[0]?.content_kind, "page");
+  assert.equal(openingHoursFor(facts.hours)?.closes, "17:00");
+  assert.equal(facts.closure?.field, "closure");
+  assert.deepEqual(facts.closure.value?.closed_on, ["Monday"]);
+  assert.doesNotMatch(output, /20:00|周二闭馆/);
+});
+
+test("馆名加括号与连续写法等价，母馆和其他馆区的时段不归到目标馆区", () => {
+  const place = "苏州博物馆（本馆）", city = "苏州";
+  const facts = (title: string, snippet: string) => extractOpeningFacts(city, place, [source(snippet, title)], ["hours", "closure"]);
+  assert.equal(openingHoursFor(facts("苏州市博物馆", "苏州博物馆本馆开放时间09:00-17:00，西馆开放时间08:00-20:00")[0])?.closes, "17:00");
+  assert.equal(facts("苏州博物馆", "开放时间08:00-20:00")[0]?.status, "not_found");
+  assert.equal(facts("苏州博物馆(本馆)参观指南", "西馆\n开放时间08:00-20:00\n周二闭馆")[0]?.status, "not_found");
+  assert.equal(extractOpeningFacts(city, "苏州博物馆", [source("开放时间08:00-20:00", "杭州博物馆")], ["hours"])[0]?.status, "not_found");
+});
+
+test("简称候选的正文声明全名后可核验，只有简称的摘要不写成事实", async () => {
+  const url = "https://example.org/museum";
+  const tool = createVisitInfoTool(async (input) => {
+    assert.equal(String(input), url);
+    return new Response("<title>苏博参观指南</title><article><p>苏州博物馆（简称“苏博”）。</p><p>苏博开放时间09:00-17:00</p></article>");
+  }, { name: "test", async search() { return [{ title: "苏博参观指南", snippet: "开放时间08:00-20:00", url }]; } });
+  const evidence = new TravelEvidenceStore();
+  const output = await tool.execute({ place: "苏州博物馆", city: "苏州", fields: ["hours"] }, { workspace: ".", evidence });
+  const hours = evidence.openingFactsFor("苏州", "苏州博物馆").hours;
+  assert.equal(hours?.sources[0]?.content_kind, "page");
+  assert.equal(openingHoursFor(hours)?.closes, "17:00");
+  assert.doesNotMatch(output, /20:00/);
+});
+
+test("真实来源写法的馆区后缀与地图景区前缀用于召回和实体归属", () => {
+  const railway = source("中国铁道博物馆正阳门展馆 服务时间: 09:00—17:00 ,星期一闭馆", "中国铁道博物馆正阳门展馆- 本地宝");
+  const otherCampus = source("开馆时间09:00-16:00，周一闭馆", "中国铁道博物馆东郊展馆");
+  const name = "中国铁道博物馆正阳门馆";
+  const facts = extractOpeningFacts("北京", name, [otherCampus, railway], ["hours", "closure"]);
+  assert.equal(openingHoursFor(facts.find((f) => f.field === "hours"))?.closes, "17:00");
+  assert.deepEqual(facts.find((f) => f.field === "closure")?.value, { closed_on: ["Monday"], holiday_exception: false });
+  const excerpt = openingPageSnippet("<p>场馆名称：中国铁道博物馆正阳门展馆</p><p>开放时间：9:00-17:00（16:30停止入场）</p>", 4000, { name, city: "北京" })!;
+  const directory = extractOpeningFacts("北京", name, [source(excerpt, "博物馆展览_首都之窗")], ["hours"]);
+  assert.equal(openingHoursFor(directory[0])?.closes, "17:00");
+  const temple = source("开园时间:07:30-17:30", "杭州岳王庙参观指南");
+  const parent = source("全天开放", "杭州西湖风景名胜区参观指南");
+  const otherCity = source("开放时间09:00-16:00", "汤阴岳王庙参观指南");
+  const place = "杭州西湖风景名胜区-岳王庙";
+  assert.deepEqual(filterPlaceSources([temple, parent, otherCity], place, "杭州", true), [temple]);
+  assert.equal(openingHoursFor(extractOpeningFacts("杭州", place, [parent, otherCity, temple], ["hours"])[0])?.closes, "17:30");
+});
+
+test("上博同页时段和国定节假日例外属于相应馆区", () => {
+  const title = "上海博物馆开放时间表(人民广场馆+东馆)";
+  const snippet = "【导语】:东馆开放时间:10:00~18:00(除国定节假日外,周二闭馆);人民广场馆开放时间:9:00~17:00(除国定节假日外,周一闭馆)。";
+  const facts = extractOpeningFacts("上海", "上海博物馆(人民广场馆)", [source(snippet, title)], ["hours", "closure"]);
+  assert.equal(openingHoursFor(facts.find((f) => f.field === "hours"))?.closes, "17:00");
+  assert.deepEqual(facts.find((f) => f.field === "closure")?.value, { closed_on: ["Monday"], holiday_exception: true });
+});
+
+test("历史局部公告和相对日期摘要不能充当常规时段", () => {
+  const cases: Array<[string, string, OpeningSource]> = [
+    ["西安", "西安碑林博物馆", source("9：00开馆，17：00停止检票，17：30闭馆", "西安碑林博物馆2024年局部开放参观指南")],
+    ["西安", "西安钟楼", { title: "西安钟楼游玩攻略", snippet: "今天08:30-18:00开放 实用攻略 西安市碑林区东关炮房街49号罔极寺", url: "https://example.org/bell" }],
+    ["福州", "福建博物院", source("积翠园艺术馆和自然馆正常对外开放，开放时间如下：每周二至周日09:00-17:00", "福建博物院发布关于近期展馆对外开放的公告")],
+  ];
+  for (const [city, place, candidate] of cases) {
+    assert.equal(extractOpeningFacts(city, place, [candidate], ["hours"])[0]?.status, "needs_confirmation", candidate.title);
+  }
+});
+
+test("全年周范围和特殊营业时间分别处理", () => {
+  const title = "浙江省博物馆(孤山馆区)";
+  const [hours] = extractOpeningFacts("杭州", title,
+    [source("特殊营业时间:中秋节,国庆节 09:00-19:00开放；全年 周二–周日 09:00-17:00开放", title)], ["hours"]);
+  assert.equal(openingHoursFor(hours, "2026-11-14")?.closes, "17:00");
+  assert.equal(openingHoursFor(hours, "2026-11-16"), undefined);
 });

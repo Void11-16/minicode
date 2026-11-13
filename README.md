@@ -3,26 +3,36 @@
 [![CI](https://github.com/Void11-16/minicode/actions/workflows/ci.yml/badge.svg)](https://github.com/Void11-16/minicode/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-一个零运行时依赖、无构建步骤的 AI Agent 实现：使用 Node.js 原生 TypeScript，提供 CLI 与 Web 双端、24 个内置工具、MCP Server，以及可开关的旅行规划能力。
+一个运行时仅依赖 Ajv、无构建步骤的 AI Agent 实现：使用 Node.js 原生 TypeScript，提供 CLI 与 Web 双端、25 个业务工具、MCP Server，以及可开关的旅行规划能力。Ajv 只用于工具参数 schema 校验。
 
 旅行规划不是唯一的定位，但它是当前最完整的垂直场景：从需求单、真实数据取数、逐日排程，到坐标核验、通勤复核、质量闸门、地图编辑和离线评测，形成了一条可验证的闭环。
 
 ## 当前状态
 
-- Node.js 原生 TypeScript，运行时零依赖，无需打包
-- 24 个内置工具，同时可通过 stdio MCP 暴露
-- 48 个测试文件、410 个测试用例
+- Node.js 原生 TypeScript，无构建步骤；运行时依赖仅 Ajv（工具参数校验）
+- 25 个业务工具 + 3 个工具目录工具，同时可通过 stdio MCP 暴露
+- 88 个测试文件、865 个测试用例
 - 6 份真实行程产出纳入离线质量基线
+- 固定世界评测、版本看板与成本/延迟/成功率遥测
 - Web 端支持邮箱账号、多会话、流式输出、地图、行程编辑与旅行者档案
 - GitHub Actions CI 覆盖 Node.js 22.18 与 24，自动执行 lint、typecheck 和测试
 - 使用 [MIT License](LICENSE) 开源
+
+## 文档入口
+
+- [核心架构与模块机制](docs/core-architecture.md)
+- [上下文与工具](docs/context-and-tools.md)
+- [工具提交与恢复](docs/tool-execution-recovery.md)
+- [版本测评看板](docs/evaluation-dashboard.md)
+- [固定世界评测](docs/frozen-world-eval.md)
+- [一日旅行数据流图](docs/travel-dataflow.html)
 
 ## 快速开始
 
 需要 Node.js 22.18 或更高版本（推荐当前 LTS/Node 24）。
 
 ```bash
-npm install       # 仅类型检查、lint 和测试需要；运行本身零依赖
+npm install       # 安装 Ajv 以及类型检查、lint 和测试依赖
 npm run chat      # CLI 对话
 npm run web       # Web 界面，默认 http://localhost:3000
 ```
@@ -151,6 +161,10 @@ artifact 保存的是工具返回的文本，不包含 bash 在执行阶段已�
 当前方案用确定性状态、结构化类型、artifact 和按需工具加载解决这些问题，成本更低，也更容易
 为跨天去重写回归测试。
 
+## 工具提交与恢复
+
+行程、需求单和普通文件写入使用操作账本与提交核对；行程 JSON 为主数据，导出失败可单独重建。Bash 非零、超时和取消有独立执行状态，未知副作用不会自动重放。开发时可用 `npm run tools:recover` 核对待恢复操作，详见 [工具提交与恢复](docs/tool-execution-recovery.md)。
+
 ## 账号与本地数据
 
 Web 账号模式默认启用。账号数据库位于 `.minicode/users.db`，密码使用随机盐的
@@ -197,7 +211,8 @@ Cookie token 的 SHA-256，不保存可直接使用的 token。
 用户需求
   -> save_travel_brief（结构化需求单）
   -> search_attractions / search_restaurants / search_stays
-  -> get_place_reviews（口碑与游玩时长）
+  -> get_place_visit_info（缺失的开放/闭馆/场次/公告/时长）
+  -> get_place_reviews（按需查询口碑/排队/招牌菜/人均消费）
   -> get_weather（按行程日期查询）
   -> plan_day_routes（相邻停留点通勤）
   -> save_itinerary（可逐日 merge）
@@ -269,9 +284,9 @@ P2 提示会拉低完整度分，但 P0/P1 为 0 时已经满足 strict，继续
 - 第 8 天起标记“参考性低”，第 11 天起标记“仅供趋势参考”
 - 超出 16 天、服务失败或数据缺失时必须明确告知，不允许编造
 
-## 内置工具（24 个）
+## 内置工具（25 个）
 
-除下面 24 个业务工具外，还有 3 个不占业务工具名额的会话控制工具：
+除下面 25 个业务工具外，还有 3 个不占业务工具名额的会话控制工具：
 `find_tools`、`activate_tools`、`deactivate_tools`。
 
 **工作区与命令**
@@ -284,7 +299,7 @@ P2 提示会拉低完整度分，但 P0/P1 为 0 时已经满足 strict，继续
 
 **旅行数据**
 
-`search_attractions`、`search_restaurants`、`search_stays`、`get_place_reviews`
+`search_attractions`、`search_restaurants`、`search_stays`、`get_place_visit_info`、`get_place_reviews`
 
 **行程与需求**
 
@@ -294,11 +309,13 @@ P2 提示会拉低完整度分，但 P0/P1 为 0 时已经满足 strict，继续
 
 `list_traveler_profiles`、`load_traveler_profile`
 
+参观资料与口碑分工、共享来源预算和调用示例见 [地点工具说明](docs/place-tools.md)。
+
 新增工具只需实现 `Tool` 接口并注册到 `ToolRegistry`，Agent 与 MCP Server 会自动发现。
 
 ## MCP Server
 
-24 个工具通过 stdio MCP Server 暴露，使用手写 JSON-RPC，无运行时依赖。
+25 个工具通过 stdio MCP Server 暴露，使用手写 JSON-RPC，无运行时依赖。
 
 ```bash
 node src/mcp/main.ts
@@ -342,18 +359,53 @@ MCP 与 CLI/Web 共享 `.minicode/config.json`。行程与需求单写入项目 
 
 ```bash
 npm run eval -- --suite core         # 离线检查旧 eval/out 产出
+npm run eval -- --suite comprehensive --list # 查看新增 12 个案例和验收条件，零生成费用
 npm run eval:live -- --suite representative --run-id 20261026-representative
 npm run eval:live -- --resume 20261026-representative
+npm run eval:dashboard               # 汇总历史批次，生成可离线打开的版本对比看板
 npm run eval:plans                   # 离线重评 plans/ 下的真实产出，零生成费用
 npm run eval:plans -- --diff         # 与最新基线对比
 npm run eval:plans -- --save [name]  # 保存本轮指标为基线
+npm run eval:workflow -- --run-id <id> # W1 确定性 workflow，固定世界，无模型调用
+npm run eval:compare -- --agent <agent-run-id> --workflow <workflow-run-id>
 ```
+
+在线和固定世界评测完成后自动更新 `eval/out/dashboard.html`。打开后可切换参照与待评批次，按同一案例查看交付、质量与效率变化。指标定义和复跑方法见 [版本测评看板](docs/evaluation-dashboard.md)。
+
+### Agent vs Workflow 对照
+
+`eval:workflow` 运行 W1 基线：固定世界 + 结构化 brief + 确定性取数、排程、保存和校验。
+它复用与 Agent 相同的工具、证据仓库、行程 schema 和 validator，但不经过 Agent 循环，也不调用模型。
+
+`eval:compare` 读取两个 live 批次，按案例对齐并输出：
+
+- Strict 通过率、平均分、P0/P1/P2
+- 平均成本、单次成功成本、平均/P50/P95 耗时
+- Token、工具轮次、工具调用、失败阶段
+- 逐案分数差、成本差、耗时差和胜负结论
+
+报告写入 `eval/compare/<agent>__vs__<workflow>/report.json`、`report.md` 和可离线打开的 `report.html`。
+套件、固定世界或数据环境不一致时会给出可比性说明；Workflow 无模型调用会单独标注，成本差异属于架构差异。
+
+固定世界单案例示例（仅用于验证管线，不作为普遍结论）：
+
+| 指标 | Agent | Workflow |
+| --- | ---: | ---: |
+| Strict 通过 | 否（P1=1） | 是 |
+| 质量分 | 97 | 99 |
+| 估算成本 | ¥0.2819 | ¥0 |
+| 耗时 | 43.2s | 3.6s |
+| Tool calls | 43 | 23 |
+
+这个结果说明 workflow 在稳定、结构化场景上可以更强；下一步应扩到多案例和原始请求抽取，
+找出 Agent 在哪些异常/个性化案例上更有价值。
 
 评测分为三层：
 
-- **套件** 定义“测什么”。`eval/suites/core.json` 是完整回归集，
+- **套件** 定义“测什么”。`eval/suites/core.json` 是原有 6 个核心回归案例，
   `representative.json` 是北京三日、北京五日和赤峰七日三个代表案例；案例可用
-  `--case`、`--tag`、`--limit` 筛选。
+  `--case`、`--tag`、`--limit` 筛选。`comprehensive.json` 新增 12 个需求与边界案例，
+  覆盖亲子、老人、无障碍、预算、饮食限制、到离时间、固定住宿和远郊混排。
 - **批次** 定义“何时、用什么配置测”。每批写入独立且不可覆盖的
   `eval/runs/<run-id>/`，保存套件快照、筛选条件、模型、提示词版本、静态/自定义
   提示词哈希、价格口径、动态预算策略和汇总报告。
@@ -364,6 +416,7 @@ npm run eval:plans -- --save [name]  # 保存本轮指标为基线
 
 - 模型 Profile、Provider 和具体模型
 - 提示词版本、静态哈希、自定义提示词哈希、渲染后哈希
+- 实际执行的 `src` TypeScript 源码指纹，含未提交的本地改动
 - 模型工具轮数、单轮内工具调用次数、动态预算初始值/当前值/硬上限/续期记录
 - 输入、输出、总 Token、请求数、缓存命中 Token
 - 按配置单价估算的 CNY 成本、总耗时
@@ -378,7 +431,7 @@ npm run eval:plans -- --save [name]  # 保存本轮指标为基线
 目录内选择产物：先找标题相关的候选，再优先符合案例期望天数的完整版本，随后比较标题
 精确度、天数接近度和更新时间；损坏的 JSON 会被忽略，不会让同名旧文件冒充最终交付。
 
-strict 通过标准是：实际天数与案例要求一致、存在有效指标、P0/P1 为 0。餐饮只有显式严格策略才参与阻断，目标取行程配置。报告写入
+strict 通过标准是：实际天数与案例要求一致、存在有效指标、P0/P1 为 0，并通过案例声明的 `requirements`。新增需求检查独立于通用质量分；`review_focus` 需人工复核，不计自动通过。餐饮只有显式严格策略才参与阻断，目标取行程配置。报告写入
 `eval/runs/<run-id>/report.json` 与 `report.md`，其中同时保留批次汇总和逐 attempt 明细。
 
 质量指标包括：
@@ -392,6 +445,16 @@ strict 通过标准是：实际天数与案例要求一致、存在有效指标�
 
 旧离线检查仍写入 `eval/out/`。基线只保存指标，不保存行程正文；重新评测时需要本机保留
 对应的 `plans/` 文件，当前基线为 `eval/baselines/2026-10-15-initial.json`。
+
+覆盖盘点、新案例逐项说明、验收口径与后续缺口见 [测评覆盖与扩充](docs/evaluation-coverage.md)。
+
+Web「行程地图」的行程面板上方展示当前保存版本的质量问题与待确认事项，相关条目也显示提醒。
+打开行程或编辑后按当前行程与需求单本地重算；需修订和待确认默认展开，行程建议和餐饮参考可展开查看。
+切换日期仅展示当天、相关跨日及全程事项；没有可用检查结果时会明确提示。
+
+查看测评结果时，打开 `eval/runs/<run-id>/report.md`（可读报告）或 `report.json`（完整指标）；
+逐案例的最终行程在 `cases/<case-id>/attempt-N/final-itinerary.json`，会话与工具诊断也在同一目录。
+测评行程保存在独立批次中，不会自动加入日常 Web 工作区的 `plans/` 列表。
 
 ## 项目结构
 
@@ -408,11 +471,11 @@ src/
 ├── service/      审批策略与会话服务
 ├── storage/      会话持久化
 ├── config/       应用配置与多模型
-├── tools/        24 个工具、目录激活、质量校验与数据源适配
+├── tools/        25 个工具、目录激活、质量校验与数据源适配
 ├── mcp/          stdio MCP Server
 └── eval/         指标、基线、离线/真实产出评测
 
-test/             48 个测试文件
+test/             88 个测试文件
 plans/            本地行程、需求单与同行人档案（运行时数据，不入库）
 eval/             评测样例、基线与报告
 .minicode/        本地账号、配置、会话与缓存（不入库）

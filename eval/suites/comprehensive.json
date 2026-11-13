@@ -1,0 +1,362 @@
+{
+  "id": "comprehensive",
+  "name": "需求与边界覆盖套件",
+  "version": "2026.11.2",
+  "cases": [
+    {
+      "id": "beijing-1d-late-arrival",
+      "title": "北京一日游晚到版",
+      "days": 1,
+      "budget_per_person_yuan": 500,
+      "tags": [
+        "comprehensive",
+        "1d",
+        "arrival-departure",
+        "booking"
+      ],
+      "must_visit": [
+        "天坛"
+      ],
+      "requirements": {
+        "dates": [
+          "2026-11-14"
+        ],
+        "daily_window": {
+          "start": "13:00",
+          "end": "20:00"
+        }
+      },
+      "review_focus": [
+        "抵达车站到首个景点、末个景点到返程车站是否预留通勤和进站时间"
+      ],
+      "request": "2026年11月14日去北京一天，13点到北京南站，20点前回到北京南站，天坛必去，活动都放在13:00到20:00之间。不住宿，人均总预算500元，请保存带完整起止时间的行程。"
+    },
+    {
+      "id": "hangzhou-2d-family",
+      "title": "杭州两日游亲子版",
+      "days": 2,
+      "budget_per_person_yuan": 1500,
+      "tags": [
+        "comprehensive",
+        "2d",
+        "family",
+        "slow"
+      ],
+      "must_visit": [
+        "西湖"
+      ],
+      "requirements": {
+        "max_visits_per_day": 2,
+        "daily_window": {
+          "start": "09:00",
+          "end": "19:00"
+        },
+        "travelers": 3,
+        "room_count": 1
+      },
+      "review_focus": [
+        "4岁儿童的午休、厕所和用餐是否方便",
+        "一间房是否允许两位成人和一名儿童入住"
+      ],
+      "request": "一家三口带4岁孩子去杭州两天，西湖必去。每天最多两个主景点，所有活动在09:00到19:00之间，中午安排休息；住一间亲子房，不换城市，每人总预算1500元。请记录3位出行人、每晚1间房，保存完整起止时间。"
+    },
+    {
+      "id": "suzhou-3d-senior",
+      "title": "苏州三日游长辈版",
+      "days": 3,
+      "budget_per_person_yuan": 1800,
+      "tags": [
+        "comprehensive",
+        "3d",
+        "senior",
+        "slow",
+        "group-cost"
+      ],
+      "must_visit": [
+        "拙政园"
+      ],
+      "requirements": {
+        "max_visits_per_day": 2,
+        "travelers": 3,
+        "room_count": 2,
+        "daily_window": {
+          "start": "09:00",
+          "end": "18:30"
+        }
+      },
+      "review_focus": [
+        "两位70岁长辈的连续步行、台阶和休息安排",
+        "两间房的住宿费用是否正确分摊给三人"
+      ],
+      "request": "我带两位70岁的父母去苏州三天，共3人，每晚住2间房，每人总预算1800元。拙政园必去，每天最多两个主景点，09:00前不出发，18:30前结束活动，不爬山，少走台阶。请保存完整起止时间，记录人数和房数。"
+    },
+    {
+      "id": "shanghai-2d-low-budget",
+      "title": "上海两日游省钱版",
+      "days": 2,
+      "budget_per_person_yuan": 600,
+      "tags": [
+        "comprehensive",
+        "2d",
+        "budget",
+        "negative-preference"
+      ],
+      "must_visit": [
+        "外滩"
+      ],
+      "requirements": {
+        "forbidden_visits": [
+          "上海迪士尼乐园"
+        ],
+        "travelers": 2,
+        "room_count": 1
+      },
+      "review_focus": [
+        "600元是否覆盖餐饮、住宿、市内交通和门票，避免漏项形成假低价",
+        "市内交通以公交地铁为主"
+      ],
+      "request": "两个人去上海两天，住1间房，每人总预算600元，含住宿、吃饭、门票和市内交通，不含往返大交通。外滩必去，不去上海迪士尼乐园，尽量公共交通和免费景点。请保存行程并记录人数和房数。"
+    },
+    {
+      "id": "chengdu-3d-vegetarian",
+      "title": "成都三日游素食版",
+      "days": 3,
+      "budget_per_person_yuan": 1600,
+      "taste": "全素，不吃肉、鱼、蛋奶和动物高汤，不能吃辣",
+      "tags": [
+        "comprehensive",
+        "3d",
+        "food",
+        "dietary",
+        "negative-preference"
+      ],
+      "must_visit": [
+        "成都博物馆"
+      ],
+      "requirements": {
+        "forbidden_visits": [
+          "成都大熊猫繁育研究基地"
+        ]
+      },
+      "review_focus": [
+        "每餐有实际可用的全素且不辣选择，核实动物高汤和蛋奶",
+        "不能把缺少菜单证据的餐厅写成已经确认可用"
+      ],
+      "request": "去成都三天，每人总预算1600元，全素，不吃肉鱼蛋奶和动物高汤，也不能吃辣。成都博物馆必去，不去成都大熊猫繁育研究基地，想逛人文街区。请给实际可用的吃饭选择，无法核实菜品时明确说明并提供备选。"
+    },
+    {
+      "id": "xian-3d-monday-closure",
+      "title": "西安三日游周一闭馆版",
+      "days": 3,
+      "budget_per_person_yuan": 2000,
+      "tags": [
+        "comprehensive",
+        "3d",
+        "museum",
+        "booking",
+        "fixed-dates"
+      ],
+      "must_visit": [
+        "陕西历史博物馆",
+        "兵马俑"
+      ],
+      "requirements": {
+        "dates": [
+          "2026-11-16",
+          "2026-11-17",
+          "2026-11-18"
+        ]
+      },
+      "review_focus": [
+        "从可信来源核实闭馆和预约要求，避免照抄常见开放时间",
+        "兵马俑主景区与坑馆不重复算多个主景点"
+      ],
+      "request": "2026年11月16日到18日去西安三天，每人总预算2000元，陕西历史博物馆和兵马俑必去。注意16日是周一，请核实闭馆和预约，不要把景区里面的坑馆拆成多个独立主景点。按这三个日期保存完整行程。"
+    },
+    {
+      "id": "beijing-3d-fixed-hotel",
+      "title": "北京三日游固定住宿版",
+      "days": 3,
+      "budget_per_person_yuan": 2400,
+      "tags": [
+        "comprehensive",
+        "3d",
+        "fixed-stay",
+        "group-cost"
+      ],
+      "must_visit": [
+        "颐和园",
+        "天坛"
+      ],
+      "requirements": {
+        "fixed_stay": true,
+        "travelers": 2,
+        "room_count": 1
+      },
+      "review_focus": [
+        "同一酒店跨天出现时不重复收取同一晚房费",
+        "所有日程均考虑返回固定酒店的通勤"
+      ],
+      "request": "两个人去北京三天，每晚住1间房，人均总预算2400元。颐和园和天坛必去，全程住同一家酒店，不接受中途换酒店。请为每个过夜日保留住宿地点，正确记录2人1间房，避免重复计算同一晚房费。"
+    },
+    {
+      "id": "quzhou-2d-arrival-departure",
+      "title": "衢州两日游首尾半天版",
+      "days": 2,
+      "budget_per_person_yuan": 900,
+      "tags": [
+        "comprehensive",
+        "2d",
+        "arrival-departure",
+        "fixed-dates"
+      ],
+      "must_visit": [
+        "衢州孔氏南宗家庙"
+      ],
+      "requirements": {
+        "dates": [
+          "2026-11-14",
+          "2026-11-15"
+        ],
+        "day_windows": [
+          {
+            "day": 1,
+            "start": "14:00",
+            "end": "20:00"
+          },
+          {
+            "day": 2,
+            "start": "09:00",
+            "end": "15:00"
+          }
+        ]
+      },
+      "review_focus": [
+        "首尾两天不能按完整游玩日硬塞活动",
+        "返程车站的通勤与进站缓冲是否实际可行"
+      ],
+      "request": "2026年11月14日14点到衢州站，15日15点前回到衢州站返程，两天每人总预算900元。第一天所有活动限14:00—20:00，第二天限09:00—15:00，衢州孔氏南宗家庙必去。请记录到离日和可用时间，保存每项活动的完整起止时间。"
+    },
+    {
+      "id": "chifeng-5d-remote-mix",
+      "title": "赤峰五日游远郊混排版",
+      "days": 5,
+      "budget_per_person_yuan": 4000,
+      "tags": [
+        "comprehensive",
+        "5d",
+        "remote-day",
+        "self-drive",
+        "nature"
+      ],
+      "must_visit": [
+        "乌兰布统",
+        "达里湖"
+      ],
+      "requirements": {
+        "max_visits_per_day": 2,
+        "daily_window": {
+          "start": "08:00",
+          "end": "20:00"
+        }
+      },
+      "review_focus": [
+        "远郊主景区需足够停留时间，不能用内部子点凑景点数",
+        "逐日自驾通勤、换宿和远程数据稀缺时的说明是否合理"
+      ],
+      "request": "赤峰玩五天，自驾，乌兰布统和达里湖必去，每人总预算4000元。每天最多两个主景点，08:00前不出发，20:00前结束当天活动，可以随路线换酒店。请保存完整起止时间，并查实际车程，不要把不同远郊目的地挤在一天。"
+    },
+    {
+      "id": "hangzhou-2d-weather-backup",
+      "title": "杭州两日游天气备选版",
+      "days": 2,
+      "budget_per_person_yuan": 1200,
+      "tags": [
+        "comprehensive",
+        "2d",
+        "weather",
+        "uncertainty"
+      ],
+      "must_visit": [
+        "浙江省博物馆"
+      ],
+      "requirements": {
+        "dates": [
+          "2026-11-14",
+          "2026-11-15"
+        ],
+        "max_visits_per_day": 2
+      },
+      "review_focus": [
+        "先查指定日期天气，再决定室内外顺序",
+        "有雨时提供有依据的室内备选；无雨时不虚构降雨",
+        "预报取不到时明确不确定性"
+      ],
+      "request": "2026年11月14日和15日去杭州两天，每人总预算1200元，浙江省博物馆必去，每天最多两个主景点。先看天气，有雨就调整室内外顺序，并在备注里写清下雨备选和触发条件；天气拿不到就明确说明，别编造预报。"
+    },
+    {
+      "id": "shanghai-2d-accessible",
+      "title": "上海两日游无障碍版",
+      "days": 2,
+      "budget_per_person_yuan": 1800,
+      "tags": [
+        "comprehensive",
+        "2d",
+        "accessibility",
+        "slow"
+      ],
+      "must_visit": [
+        "外滩"
+      ],
+      "requirements": {
+        "max_visits_per_day": 2,
+        "daily_window": {
+          "start": "10:00",
+          "end": "18:00"
+        },
+        "travelers": 2,
+        "room_count": 1
+      },
+      "review_focus": [
+        "轮椅可达入口、电梯、洗手间、无障碍房需要具体证据",
+        "未核实的无障碍设施不得写成已确认",
+        "交通接驳不能默认所有站点出口都有电梯"
+      ],
+      "request": "两人去上海两天，其中一人使用轮椅，每晚住1间无障碍房，每人总预算1800元。外滩必去，每天最多两个主景点，全部活动在10:00—18:00之间。核实入口、电梯和洗手间，无法确认的设施明确标注。请保存完整起止时间，记录2人1间房。"
+    },
+    {
+      "id": "fuzhou-4d-slow-exclusions",
+      "title": "福州四日游慢逛避雷版",
+      "days": 4,
+      "budget_per_person_yuan": 2400,
+      "taste": "清淡、喜欢甜品小吃，不吃辣",
+      "tags": [
+        "comprehensive",
+        "4d",
+        "slow",
+        "negative-preference",
+        "fixed-stay"
+      ],
+      "must_visit": [
+        "三坊七巷",
+        "烟台山"
+      ],
+      "requirements": {
+        "max_visits_per_day": 2,
+        "forbidden_visits": [
+          "鼓山"
+        ],
+        "fixed_stay": true,
+        "daily_window": {
+          "start": "10:00",
+          "end": "20:00"
+        }
+      },
+      "review_focus": [
+        "慢节奏应有停留和休息，不能只把活动起止时间拉长",
+        "甜品与小吃有可用来源，不能把泛街区当成餐厅"
+      ],
+      "request": "和伴侣去福州四天，每人总预算2400元，三坊七巷和烟台山必去，不去鼓山。每天最多两个主景点，所有活动在10:00到20:00之间，全程同一家酒店，每个过夜日写清住宿地点。喜欢清淡和甜品小吃。请保存完整起止时间，不靠堆景点填满四天。"
+    }
+  ]
+}

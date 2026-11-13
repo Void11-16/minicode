@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { ToolValidationError } from "./tool-error.ts";
+import type { ToolExecutionState } from "./execution-state.ts";
 
 export type ToolExecution = "executed" | "cache_hit" | "blocked" | "denied";
 export type ToolErrorCategory = "rate_limit" | "quota" | "auth" | "timeout" | "network" | "invalid_arguments" | "validation" | "cancelled" | "other";
@@ -10,6 +11,8 @@ export interface HttpObservation {
   readonly error?: ToolErrorCategory;
 }
 export interface ToolCallObservation {
+  place_lookup?: { kind: "visit" | "reviews"; requests: number; cache_hits: number; entity_requests: number; entity_limit: number };
+  execution_state?: ToolExecutionState;
   readonly call_id: string;
   readonly tool: string;
   readonly round: number;
@@ -46,7 +49,7 @@ export function toolErrorCategory(error: unknown): ToolErrorCategory {
   if (/参数|JSON|工具不存在|缺少或非法|_truncated/i.test(value)) return "invalid_arguments";
   return "other";
 }
-export function annotateToolCall(update: Partial<Pick<ToolCallObservation, "execution" | "query_key" | "query_status" | "evidence_keys" | "new_evidence_keys" | "opening_fields" | "opening_saved_ids">>): void {
+export function annotateToolCall(update: Partial<Pick<ToolCallObservation, "execution" | "query_key" | "query_status" | "evidence_keys" | "new_evidence_keys" | "opening_fields" | "opening_saved_ids" | "place_lookup">>): void {
   const current = scope.getStore();
   if (current) Object.assign(current.record, update);
 }
@@ -82,14 +85,15 @@ export class ToolDiagnostics {
   private inFlight = 0;
   httpStarted(): void { this.inFlight++; this.peak_http_in_flight = Math.max(this.peak_http_in_flight, this.inFlight); }
   httpEnded(): void { this.inFlight--; }
-  async run<T extends { output: string; error?: string; errorCode?: string; errorCategory?: ToolErrorCategory }>(call: { id: string; name: string; arguments: string }, round: number, execute: () => Promise<T>): Promise<T> {
+  async run<T extends { output: string; error?: string; errorCode?: string; errorCategory?: ToolErrorCategory; executionState?: ToolExecutionState }>(call: { id: string; name: string; arguments: string }, round: number, execute: () => Promise<T>): Promise<T> {
     const record = this.create(call, round);
     const started = performance.now();
     try {
       const result = await scope.run({ record, collector: this }, execute);
+      record.execution_state = result.executionState;
       record.output_chars = result.output.length;
       if (result.error !== undefined) {
-        record.error = result.errorCategory ?? toolErrorCategory(result.error);
+        record.error = result.executionState?.execution_status === "cancelled" ? "cancelled" : result.errorCategory ?? toolErrorCategory(result.error);
         if (result.errorCode) record.error_code = result.errorCode;
         record.outcome = record.error === "cancelled" ? "cancelled" : "error";
       }

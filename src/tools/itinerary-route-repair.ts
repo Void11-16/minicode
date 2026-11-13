@@ -19,14 +19,12 @@ function colocated(a: ItineraryItem, b: ItineraryItem): boolean {
   return haversineKm(x.latitude, x.longitude, y.latitude, y.longitude) < .25;
 }
 
-/** 复用已查证据补齐单日交通；保留游览/用餐时长和交通方式，只将受影响的后续安排顺延。 */
-export function repairDayRoutes(day: ItineraryDay, evidence: TravelEvidenceStore, city: string, plannedItems: readonly ItineraryItem[] = day.items): { day: ItineraryDay; messages: string[] } {
+/** 按最终时间线找相邻停留点，查询和本地修复共用端点识别。 */
+export function dayRouteLegs(day: ItineraryDay) {
   const ordered = day.items.filter((item) => item.time !== undefined && item.type !== "meal").slice().sort((a, b) => timeToMinutes(a.time!) - timeToMinutes(b.time!));
   const stops = ordered.filter((item) => item.type === "visit" || item.type === "accommodation");
-  const replacements = new Map<string, ItineraryItem>(), insertions = new Map<string, ItineraryItem>(), repaired = new Set<string>(), messages: string[] = [];
-  const usedIds = new Set(day.items.map((item) => item.id));
-  const intentions = new Map(plannedItems.map((item) => [item.id, item]));
   const claimed = new Set<string>();
+  const messages: string[] = [];
   const legs: { from: ItineraryItem; to: ItineraryItem; slot?: ItineraryItem; between: ItineraryItem[] }[] = [];
   for (let i = 1; i < stops.length; i++) {
     const from = stops[i - 1]!, to = stops[i]!, begin = ordered.indexOf(from), end = ordered.indexOf(to);
@@ -46,6 +44,15 @@ export function repairDayRoutes(day: ItineraryDay, evidence: TravelEvidenceStore
     if (!from || !to) { messages.push(`${slot.id}缺少明确起终点，请补齐，无需猜测路线ID`); continue; }
     legs.push({ from, to, slot, between: [] });
   }
+  return { ordered, legs, messages };
+}
+
+/** 复用已查证据补齐单日交通；保留游览/用餐时长和交通方式，只将受影响的后续安排顺延。 */
+export function repairDayRoutes(day: ItineraryDay, evidence: TravelEvidenceStore, city: string, plannedItems: readonly ItineraryItem[] = day.items): { day: ItineraryDay; messages: string[] } {
+  const { ordered, legs, messages } = dayRouteLegs(day);
+  const replacements = new Map<string, ItineraryItem>(), insertions = new Map<string, ItineraryItem>(), repaired = new Set<string>();
+  const usedIds = new Set(day.items.map((item) => item.id));
+  const intentions = new Map(plannedItems.map((item) => [item.id, item]));
   for (const { from, to, slot, between } of legs) {
     const label = `${from.name} → ${to.name}`, intention = slot ? intentions.get(slot.id) ?? slot : undefined;
     const candidates = evidence.routesForItinerary(from.name, to.name, city);
@@ -54,10 +61,10 @@ export function repairDayRoutes(day: ItineraryDay, evidence: TravelEvidenceStore
       ?? candidates.find((route) => route.id === intention?.route_evidence_id)?.mode;
     const eligible = candidates.filter((route) => mode ? route.mode === mode : route.request_mode === undefined || route.request_mode === route.mode);
     if (eligible.length !== 1) {
-      const message = candidates.length ? `${label} 已有${candidates.map((r) => `${r.mode}(${r.id})`).join("、")}；请明确该交通条目的transport_mode后修复，未自动切换方式，无需重复查相同路线`
+      const message = candidates.length ? `${label} 已有${candidates.map((r) => `${r.mode}(${r.id})`).join("、")}；请明确该交通条目的transport_mode后修复，未自动切换方式，无需重复查相同路线${mode ? `；当前计划${mode}。${routeQueryHint(city, from.name, to.name, mode)}` : ""}`
         : `${label} 缺少当前端点的真实证据。${routeQueryHint(city, from.name, to.name, mode)}`;
       messages.push(message);
-      if (slot) replacements.set(slot.id, { ...slot, transport_mode: mode, route_evidence_id: intention?.route_evidence_id, route_verified: false, route_duration_min: undefined, distance_km: undefined, source: intention?.source, confidence: "low", route_binding_error: message });
+      if (slot) replacements.set(slot.id, { ...slot, name: label, from: from.name, to: to.name, transport_mode: mode, route_evidence_id: undefined, route_verified: false, route_duration_min: undefined, distance_km: undefined, source: undefined, confidence: "low", route_binding_error: message });
       continue;
     }
     const route = eligible[0]!, departAfter = itemEndMinutes(from) ?? (slot?.time ? timeToMinutes(slot.time) : undefined);

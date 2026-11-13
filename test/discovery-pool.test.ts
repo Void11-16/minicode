@@ -45,6 +45,22 @@ function install(t: TestContext, options: { museumFails?: boolean } = {}) {
 const ctx = () => ({ workspace: process.cwd(), queryAttempts: new Map<string, number>(), queryStats: { executed: 0, cacheHits: 0, blocked: 0 } });
 const attractionArgs = { city: "西安", location: "大雁塔", radius_km: 5, limit: 1 };
 
+test("必去主实体不被附近高分子点淹没，按城市精确取POI并复用候选池", async (t) => {
+  let targetQueries = 0;
+  setAmapKey("required-target", async (input) => {
+    const url = new URL(String(input)); const reply = (pois: AmapPoi[]) => new Response(JSON.stringify({ status: "1", infocode: "10000", pois }));
+    const parent: AmapPoi = { id: "west-lake-main", name: "杭州西湖风景名胜区", cityname: "杭州市", location: "120.10,30.24", type: "风景名胜;风景名胜区", biz_ext: { rating: "3.9" } };
+    if (url.pathname.includes("/place/text")) { targetQueries++; return reply([parent, { ...parent, id: "wrong-city", cityname: "惠州市" }]); }
+    return reply(url.searchParams.get("keywords")?.includes("博物馆") ? [] : [{ ...parent, id: "child", name: "杭州西湖风景名胜区-岳王庙", biz_ext: { rating: "4.9" } }]);
+  }); t.after(() => setAmapKey(undefined));
+  const evidence = new TravelEvidenceStore();
+  await evidence.observeDiscoveryPool({ tool: "search_attractions", city: "杭州", center: "西湖", geo: { name: "西湖", latitude: 30.24, longitude: 120.10, crs: "gcj02", country: "中国" }, keyword: "", radius_km: 5, observed_at: Date.now(), pois: [{ id: "child", name: "杭州西湖风景名胜区-岳王庙", cityname: "杭州市", location: "120.10,30.24", type: "风景名胜", biz_ext: { rating: "4.9" } }] });
+  const tool = createAttractionsTool(); const scope = { title: "西湖必去", date: "2026-11-14", layer: "required" as const, goal_name: "西湖", locked_dates: [] };
+  const output = await tool.execute({ city: "杭州", location: "西湖", radius_km: 5, limit: 1, min_rating: 4.3 }, { workspace: process.cwd(), evidence, dayPlanningScope: scope });
+  assert.match(output, /1\. 杭州西湖风景名胜区 \|/); assert.ok(evidence.bind({ id: "x", name: evidence.canonicalPlaceName("西湖", "杭州"), type: "visit" }, "杭州").evidence_verified); assert.equal(targetQueries, 1);
+  await tool.execute({ city: "杭州", location: "西湖", radius_km: 3, limit: 1 }, { workspace: process.cwd(), evidence, dayPlanningScope: scope }); assert.equal(targetQueries, 1, "精确主实体写回候选池后不重复联网");
+});
+
 test("候选池只在同城、同关键词、完整包含范围及30分钟内复用，城市前缀不误改实体", () => {
   const store = new DiscoveryPoolStore();
   store.merge([pool(), pool({ city: "北京", center: "异地中心", radius_km: 10 })]);
@@ -57,7 +73,9 @@ test("候选池只在同城、同关键词、完整包含范围及30分钟内复
   assert.equal(discoveryCenterName("西安城墙", "西安"), "西安城墙");
   assert.equal(discoveryCenterName("  西安市   大雁塔  ", "西安"), "大雁塔");
   store.merge([pool({ radius_km: 2, observed_at: Date.now() })]);
-  assert.match(store.context(["大雁塔"])[0], /5km/, "提示保留最大的仍有效范围");
+  // context 可同时展示多个城市，采集时间相同与否不能决定本断言的对象。
+  const hint = store.context(["大雁塔"]).find((line) => line.includes("西安/大雁塔"));
+  assert.match(hint ?? "", /5km/, "对应城市的提示保留最大的仍有效范围");
   const expired = new DiscoveryPoolStore();
   expired.merge([pool({ observed_at: Date.now() - QUERY_TTL_MS }), pool({ observed_at: Date.now() + 10000 }), { bad: true }]);
   assert.equal(expired.snapshot().length, 0);

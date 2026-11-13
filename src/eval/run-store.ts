@@ -80,13 +80,14 @@ export interface EvalAttemptTelemetry {
 }
 
 export interface EvalAttemptFailure {
-  readonly stage: "generation" | "quality_gate" | "evaluation" | "provider" | "interrupted";
+  readonly stage: "generation" | "quality_gate" | "evaluation" | "provider" | "interrupted" | "environment";
   readonly reason: string;
   readonly reasons: readonly string[];
 }
 
 export interface EvalAttemptRecord {
   readonly attempt: number;
+  readonly implementation_sha256?: string;
   readonly case_id: string;
   readonly status: EvalAttemptStatus;
   readonly started_at: string;
@@ -115,6 +116,22 @@ export interface EvalRunManifest {
   readonly created_at: string;
   readonly updated_at: string;
   readonly mode: "live";
+  /** 同一套评测可比较的架构实现；旧批次缺省按 agent 读取。 */
+  readonly architecture?: "agent" | "workflow";
+  /** 固定的是旅行数据；模型仍为真实模型，续跑从批次快照恢复同一世界。 */
+  readonly external_data?: {
+    readonly mode: "frozen";
+    readonly id: string;
+    readonly version: string;
+    readonly sha256: string;
+    readonly implementation_sha256: string;
+    readonly snapshot: "external-world.json";
+    readonly now: string;
+    readonly time_zone: string;
+    readonly provenance: "synthetic" | "recorded";
+    readonly cache: "cold";
+    readonly assistance: "none";
+  };
   readonly suite: {
     readonly id: string;
     readonly name: string;
@@ -366,11 +383,13 @@ function renderReport(manifest: EvalRunManifest, summary: EvalRunSummary): strin
     `# 评测批次 ${manifest.run_id}`,
     "",
     `- 状态: ${manifest.status}`,
+    `- 架构: ${manifest.architecture ?? "agent"}`,
     `- 套件: ${manifest.suite.id}@${manifest.suite.version}（${manifest.suite.name}）`,
     `- 模型: ${manifest.model.provider} / ${manifest.model.model}（${manifest.model.profile_name}）`,
     `- 提示词: ${manifest.prompt.version} · ${manifest.prompt.static_sha256.slice(0, 12)}`,
     `- 自定义提示词: ${manifest.prompt.custom_sha256.slice(0, 12)}`,
     `- 创建: ${manifest.created_at}`,
+    ...(manifest.external_data ? [`- 外部数据: 固定世界 ${manifest.external_data.id}@${manifest.external_data.version} · ${manifest.external_data.sha256.slice(0, 12)} · ${manifest.external_data.provenance}`, `- 实现指纹: ${manifest.external_data.implementation_sha256.slice(0, 12)}（含未提交源码）`, `- 场景时间: ${manifest.external_data.now} (${manifest.external_data.time_zone}) · 冷缓存 · 不自动救援；模型仍为真实模型`] : []),
     `- 更新: ${manifest.updated_at}`,
     `- 案例: ${summary.cases} · 通过 ${summary.passed} · 未通过 ${summary.failed} · 运行中 ${summary.running}`,
     `- 累计 attempt: ${summary.attempts} · 工具轮次 ${summary.tool_rounds} · 工具调用 ${summary.tool_calls}`,
@@ -396,6 +415,7 @@ function renderReport(manifest: EvalRunManifest, summary: EvalRunSummary): strin
       continue;
     }
     lines.push(`### ${item.eval_case.id}`, "");
+    if (item.eval_case.review_focus?.length) lines.push(`人工复核（不计自动通过）：${item.eval_case.review_focus.join("；")}`, "");
     for (const attempt of item.attempts) {
       lines.push(
         `- attempt-${attempt.attempt}: ${attempt.status} · ${formatDuration(attempt.telemetry.duration_ms)} · ` +
@@ -405,6 +425,7 @@ function renderReport(manifest: EvalRunManifest, summary: EvalRunSummary): strin
         `${attempt.telemetry.tokens.total} tokens · ¥${attempt.telemetry.estimated_cost_yuan.toFixed(4)}` +
         (attempt.failure === undefined ? "" : ` · ${attempt.failure.reason}`),
       );
+      for (const check of attempt.metrics?.requirementChecks ?? []) lines.push(`  - ${check.passed ? "通过" : "未通过"} ${check.code}: ${check.message}`);
       if (attempt.telemetry.tool_diagnostics) lines.push("", renderToolDiagnostics(attempt.telemetry.tool_diagnostics), "");
     }
     lines.push("");
@@ -419,7 +440,7 @@ function issueCounts(metrics: ItineraryEvalMetrics | undefined): string {
 
 function dayCounts(metrics: ItineraryEvalMetrics | undefined): string {
   if (metrics === undefined) return "—";
-  return `${metrics.days}/${metrics.expectedDays}`;
+  return `${metrics.days}/${metrics.expectedDays}${metrics.basicDays === undefined ? "" : `（基础${metrics.basicDays}，核验${metrics.checkedDays ?? 0}，日内达标${metrics.readyDays ?? 0}）`}`;
 }
 
 function formatDuration(durationMs: number): string {

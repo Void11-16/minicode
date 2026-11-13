@@ -362,7 +362,7 @@ test("无进展检索会恢复提示并停止；成功空结果不能重置无�
   const registry = new ToolRegistry(root);
   registry.register({ name: "save_travel_brief", description: "test", parameters: {}, execute: async () => "已保存" });
   registry.register({ name: "search_attractions", description: "test", parameters: {}, execute: async () => "未找到地点" });
-  const provider = new Script([call("save_travel_brief", { title: "北京三日游", destination: "北京" }), ...Array.from({ length: 20 }, (_, i) => call("search_attractions", { location: `变化查询${i}` }, `q${i}`))]);
+  const provider = new Script([call("save_travel_brief", { title: "北京一日游", destination: "北京" }), ...Array.from({ length: 20 }, (_, i) => call("search_attractions", { location: `变化查询${i}` }, `q${i}`))]);
   const budget: CumulativeToolBudget = { rounds: 0, calls: 0, tokens: 0, maxRounds: 100, maxCalls: 300 };
   const agent = new ChatAgent(new Session(), provider, registry, root);
   // Stop without another LLM call: model cannot manufacture a saved version.

@@ -119,26 +119,34 @@ test("骨架与纯休息不提升有效日期，定向恢复每个阶段一次�
   assert.equal(planningProgress(restState).count, 0); assert.equal(planningProgress(restState).remaining, 5);
 });
 
-test("真实Agent从软停滞续接按缺失日期保存，共享原预算，不再困在第一天", async (t) => {
-  const root = await temp(t), title = "北京五日游", save = createSaveItineraryTool(root);
-  await save.execute({ title, outline, days: [day(0)] }); const plan = await load(root, title);
-  const state = updateTravelStateFromSnapshot(updateTravelStateFromBrief(undefined, { title, destination: "北京", durationDays: 5 }), { itinerary: plan, report: validateItinerary(plan), file: "plan" });
+test("真实Agent按层恢复软停滞，保留预算并最终补齐缺失日期", async (t) => {
+  const root = await temp(t), title = "北京五日游", save = createSaveItineraryTool(root), registry = new ToolRegistry(root).register(save);
+  await registry.evidence.observePlaces("search_attractions", "北京", names.map((name, i) => `${name} | 坐标 ${(39.9 + i * .001).toFixed(4)},116.4000 | 开放时间 09:00-20:00`).join("\n"), "amap");
+  for (const name of names) await registry.evidence.observeOpening("北京", name, [{ title: name + "参观", snippet: "开放时间09:00-20:00，每周一闭馆", kind: "official", url: "https://example.test/visit" }], ["hours", "closure"]);
+  await save.execute({ title, constraints: { destination: "北京" }, outline, days: [day(0)] }); const plan = await load(root, title);
+  const state = updateTravelStateFromSnapshot(updateTravelStateFromBrief(undefined, { title, destination: "北京", durationDays: 5, requireAccommodation: false }), { itinerary: plan, report: validateItinerary(plan), file: "plan" });
   const session = new Session(); session.setTravelMode(true); session.setTravelState(state);
   const b = budget(); b.rounds = 10; b.calls = 63; b.tokens = 1234; b.stagnantRounds = 12; b.blockedKind = "no_progress"; b.blockedReason = "局部循环";
-  let requests = 0, sawRecovery = false;
+  let requests = 0, savedRequests = 0, sawRecovery = false;
+  const trace: unknown[] = [];
   const provider: ChatProvider = { name: "planning-recovery", chat: async () => "完成", chatWithTools: async (history): Promise<LLMResult> => {
-    requests++; sawRecovery ||= history.some((m) => m.role === "system" && m.content.includes("定向恢复"));
+    requests++; sawRecovery ||= history.some((m) => m.role === "system" && m.content.includes("独立日期任务"));
     const progress = planningProgress(session.travelState);
+    trace.push({ active: session.travelState?.itinerary?.dayTasks?.find((task) => task.status === "active"), missing: progress.missing });
     if (progress.remaining === 0) return { type: "text", content: "已补齐，保留质量待修项" };
-    const index = outline.findIndex((slot) => slot.date === progress.missing[0]); assert.ok(index > 0);
+    const active = session.travelState?.itinerary?.dayTasks?.find((task) => task.status === "active");
+    if (session.travelState?.itinerary?.daySummaries?.some((day) => day.date === active?.date)) return { type: "text", content: "本日已有时间草稿，资料不足保持待修" };
+    const index = outline.findIndex((slot) => slot.date === active?.date); assert.ok(index > 0);
+    savedRequests++;
     return { type: "tool_calls", toolCalls: [{ id: `save-${index}`, name: "save_itinerary", arguments: JSON.stringify({ title, merge: true, days: [day(index)] }) }] };
   } };
-  await new ChatAgent(session, provider, new ToolRegistry(root).register(save), root).run("评测自动续跑：补齐缺失日期", { cumulativeBudget: b, maxToolRounds: 10 });
-  assert.ok(sawRecovery); assert.equal((await load(root, title)).days.length, 5); assert.equal(planningProgress(session.travelState).remaining, 0);
-  assert.equal(b.calls, 67); assert.equal(b.rounds, 14); assert.ok(b.tokens >= 1234); assert.equal(requests, 5);
+  const reply = await new ChatAgent(session, provider, registry, root).run("评测自动续跑：补齐缺失日期", { cumulativeBudget: b, maxToolRounds: 10 });
+  assert.ok(sawRecovery); assert.equal((await load(root, title)).days.length, 5, JSON.stringify(trace)); assert.equal(planningProgress(session.travelState).remaining, 0);
+  assert.equal(savedRequests, 4); assert.ok(b.calls >= 67); assert.ok(b.rounds >= 14); assert.ok(b.tokens >= 1234); assert.ok(requests <= 10);
+  assert.match(reply, /strict 未通过/);
 });
 
-test("Agent按保存阶段暴露参数，粗排后能逐日保存，有实际条目后能局部修订", async (t) => {
+test("Agent按保存阶段暴露参数，粗排后按当前日期保存，已保存日期不再暴露修订参数", async (t) => {
   const root = await temp(t), title = "北京五日游", session = new Session();
   session.setTravelMode(true);
   session.setTravelState(updateTravelStateFromBrief(undefined, { title, destination: "北京", durationDays: 5 }));
@@ -152,20 +160,21 @@ test("Agent按保存阶段暴露参数，粗排后能逐日保存，有实际条
       assert.deepEqual(Object.keys(props).sort(), ["expected_revision", "outline", "title"]);
       return { type: "tool_calls", toolCalls: [{ id: "outline", name: "save_itinerary", arguments: JSON.stringify({ title, outline }) }] };
     }
-    assert.equal((definition.parameters.required as string[]).includes("outline"), false);
+    assert.ok(props.outline, "可行性层使用基础安排，时间层也能显式回退基础安排");
     if (requests === 2) {
       assert.equal(session.travelState?.itinerary?.materializedDays, 0);
-      assert.ok(props.days);
-      assert.equal(props.edits, undefined);
-      assert.equal(props.repair_routes, undefined);
-      return { type: "tool_calls", toolCalls: [{ id: "day-one", name: "save_itinerary", arguments: JSON.stringify({ title, merge: true, days: [day(0)] }) }] };
+      const schedule = props.schedule as { properties: { date: { enum: string[] } } };
+      assert.deepEqual(schedule.properties.date.enum, [outline[0]!.date], "先补首个缺失日期，再核验");
+      return { type: "text", content: "资料暂无法取得" };
     }
-    assert.ok(props.days && props.edits && props.repair_routes, "补齐阶段也能修复阻碍下一天的已有条目");
+    assert.ok(props.outline);
     return { type: "text", content: "第一天已保存" };
   } };
-  await new ChatAgent(session, provider, new ToolRegistry(root).register(createSaveItineraryTool(root)), root).run("先粗排再逐日保存", { maxToolRounds: 4 });
-  assert.equal(requests, 3);
-  assert.equal((await load(root, title)).days.length, 1);
+  const reply = await new ChatAgent(session, provider, new ToolRegistry(root).register(createSaveItineraryTool(root)), root).run("先粗排再逐日保存", { maxToolRounds: 4 });
+  assert.equal(requests, 4);
+  assert.match(reply, /strict 未通过/);
+  assert.equal((await load(root, title)).days.length, 0);
+  assert.equal((await load(root, title)).planning_layers?.basic_days, 5);
 });
 
 test("候选摘要排除其他日期占用，必要事实仍明确标记且酒店可复用", async () => {

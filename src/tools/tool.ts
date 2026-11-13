@@ -1,16 +1,21 @@
-import { annotateToolCall } from "../core/tool-diagnostics.ts";
+import { externalNow } from "../core/external-environment.ts";
+import { normalizeToolArguments, parseToolInput, validateToolArguments } from "./tool-contract.ts";
+import { attachExecutionState, executionStateOf, reportExecution, type ExecutionContext, type ToolExecutionState } from "../core/execution-state.ts";
+import { recoverManagedOperations } from "../storage/managed-operation.ts";
+import { annotateToolCall, toolErrorCategory } from "../core/tool-diagnostics.ts";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { ToolDefinition, ToolParameters } from "../llm/provider.ts";
 import { isCompactedToolArguments } from "../core/message.ts";
 import { TravelEvidenceStore, evidenceId } from "./travel-evidence.ts";
 import type { Itinerary } from "./itinerary-schema.ts";
 import type { ItineraryQualityReport } from "./itinerary-validator.ts";
-import { attractionMinRating, TRAVEL_ATTRACTION_MIN_RATING, TRAVEL_QUERY_TOOLS, normalizeReviewArgs, queryFields, queryKeyArgs, querySummary, type QueryStatus } from "./travel-query.ts";
+import { attractionMinRating, TRAVEL_ATTRACTION_MIN_RATING, TRAVEL_QUERY_TOOLS, normalizeReviewArgs, normalizeVisitInfoArgs, queryFields, queryKeyArgs, querySummary, type QueryStatus } from "./travel-query.ts";
 import type { ToolQueryStats } from "../core/usage.ts";
-import { requestedOpeningFields, isHistoricalOpening } from "./opening-facts.ts";
+import { isHistoricalOpening } from "./opening-facts.ts";
 import { discoveryCenterName, DiscoveryBudgetError, type DiscoveryTool } from "./discovery-pool.ts";
 import { convertPoint } from "./coordinates.ts";
 import type { GeoResult } from "./geocoding.ts";
+import { briefBudgetPlan } from "./brief.ts";
 
 export interface ItinerarySnapshot {
   readonly itinerary: Itinerary;
@@ -50,7 +55,10 @@ export function assertInsideRoot(rootDir: string, absolute: string): void {
 }
 
 /** 单次工具调用的运行上下文：工作区（文件/命令的根）与中断信号 */
-export interface ToolContext {
+export interface ToolContext extends ExecutionContext {
+  readonly onArgumentsPrepared?: (args: Record<string, unknown>, corrections: readonly string[]) => void;
+  readonly basicPlanning?: boolean;
+  readonly dayPlanningScope?: import("../core/day-tasks.ts").DayPlanningScope;
   /** 本次调用所属会话的工作区；文件类工具与 bash 以此为根 */
   readonly workspace: string;
   /** 中断信号（/stop）：长任务（如 bash）应立即终止 */
@@ -61,6 +69,7 @@ export interface ToolContext {
   /** 宿主提供的原始用户消息；不接受工具参数中的自报授权。 */
   readonly userRequests?: readonly import("./repeat-visit-policy.ts").UserRequest[];
   readonly evidence?: TravelEvidenceStore;
+  readonly onBrief?: (brief: import("./brief.ts").TravelBrief) => void;
   readonly onItinerary?: (snapshot: ItinerarySnapshot) => void;
   readonly readVersions?: Map<string, string>;
   /** 已读范围只在对应工具结果完整交付后生效。 */
@@ -71,10 +80,18 @@ export interface ToolContext {
   readonly beforeDiscoveryFetch?: (geo?: GeoResult) => void;
   /** 本地重筛不占联网次数，缓存时间沿用原始采集时间。 */
   readonly onDiscoveryReuse?: (observedAt: number) => void;
+  /** 两种地点资料工具复用来源时，保留原采集时间和缓存统计。 */
+  readonly onQueryReuse?: (observedAt: number) => void;
 }
 
 export interface Tool {
+  /** 调度与恢复元数据；当前仍串行执行，不据此擅自推断数据依赖。 */
+  readonly effect?: "query" | "managed_write" | "command";
+  /** 业务产物根可能与会话命令工作区不同，恢复时必须同时核对。 */
+  readonly operationRoot?: string;
   readonly recordsPlaceEvidence?: boolean;
+  readonly supportsRoutineVisitInfo?: boolean;
+  readonly supportsRoutineRouteQuery?: boolean;
   readonly usesDiscoveryPool?: boolean;
   readonly name: string;
   /** 给 LLM 看的描述：决定模型何时、如何使用这个工具 */
@@ -130,12 +147,39 @@ export type ToolOutputKind =
   | "generic";
 
 export class ToolRegistry {
+  private readonly recovery = new Map<string, Promise<unknown>>();
   private readonly pendingQueries = new Map<string, { promise: Promise<string>; signal?: AbortSignal; evidence: TravelEvidenceStore }>();
   private readonly pendingDiscovery = new Map<string, { promise: Promise<string>; signal?: AbortSignal; evidence: TravelEvidenceStore }>();
   private readonly tools = new Map<string, Tool>();
   readonly evidence: TravelEvidenceStore;
   private readonly defaultWorkspace: string;
-  constructor(root?: string, workspace?: string) { this.evidence = new TravelEvidenceStore(root); this.defaultWorkspace = workspace ?? root ?? process.cwd(); }
+  private readonly persistenceRoot: string;
+  constructor(root?: string, workspace?: string) { this.evidence = new TravelEvidenceStore(root); this.defaultWorkspace = workspace ?? root ?? process.cwd(); this.persistenceRoot = root ?? process.cwd(); }
+
+  operationRoots(workspace = this.defaultWorkspace): string[] {
+    return [...new Set([workspace, this.persistenceRoot, ...this.list().flatMap((tool) => tool.operationRoot ? [tool.operationRoot] : [])].map((root) => resolve(root)))];
+  }
+
+  /** 兼容原有字符串工具；Agent/MCP 使用此入口取得统一执行与副作用状态。 */
+  async executeDetailed(name: string, argsJson: string, ctx?: Omit<ToolContext, "workspace"> & { workspace?: string }): Promise<{ output: string; error?: string; executionState?: ToolExecutionState }> {
+    let state: ToolExecutionState | undefined;
+    try {
+      const output = await this.execute(name, argsJson, { workspace: ctx?.workspace ?? this.defaultWorkspace, ...ctx,
+        onExecution: (value) => { state = value; reportExecution(ctx, value); },
+      });
+      state ??= { execution_status: "succeeded", effect_status: this.get(name)?.effect === "managed_write" || this.get(name)?.effect === "command" ? "unknown" : "none", recovery_action: "none" };
+      return { output, ...(state ? { executionState: state } : {}), ...(state && state.execution_status !== "succeeded" ? { error: state.message ?? state.code ?? "工具执行失败" } : {}) };
+    } catch (error) {
+      state ??= executionStateOf(error);
+      if (!state) {
+        const category = toolErrorCategory(error), tool = this.get(name), invalid = ["invalid_arguments", "validation"].includes(category);
+        state = { execution_status: category === "cancelled" ? "cancelled" : "failed",
+          effect_status: invalid ? "not_committed" : tool?.effect === "managed_write" || tool?.effect === "command" ? "unknown" : "none",
+          recovery_action: invalid ? /版本冲突/.test(String(error)) ? "reread" : "fix_arguments" : ["network", "timeout", "rate_limit"].includes(category) && tool?.effect !== "managed_write" && tool?.effect !== "command" ? "retry" : "manual_review" };
+      }
+      attachExecutionState(error, state); throw error;
+    }
+  }
 
   register(tool: Tool): this {
     if (this.tools.has(tool.name)) {
@@ -177,16 +221,9 @@ export class ToolRegistry {
     if (tool === undefined) {
       throw new Error(`工具不存在: ${name}（可用: ${[...this.tools.keys()].join(", ")}）`);
     }
-
-    let args: Record<string, unknown>;
-    try {
-      args = JSON.parse(argsJson === "" ? "{}" : argsJson) as Record<string, unknown>;
-    } catch {
-      throw new Error(`参数不是合法 JSON: ${argsJson.slice(0, 200)}`);
-    }
-    if (typeof args !== "object" || args === null || Array.isArray(args)) {
-      throw new Error("参数必须是 JSON 对象");
-    }
+    const workspace = resolve(ctx?.workspace ?? this.defaultWorkspace);
+    const prepared = normalizeToolArguments(name, parseToolInput(argsJson));
+    let args = prepared.args;
     if (args._truncated === true) {
       throw new Error(
         "参数是会话历史压缩占位符（_truncated），工具未执行；" +
@@ -194,16 +231,36 @@ export class ToolRegistry {
       );
     }
     if (name === "get_place_reviews") args = normalizeReviewArgs(args);
+    if (name === "get_place_visit_info") args = normalizeVisitInfoArgs(args);
 
     ctx?.signal?.throwIfAborted();
     const context = { workspace: ctx?.workspace ?? this.defaultWorkspace, ...ctx, evidence: ctx?.evidence ?? this.evidence };
     const destination = context.destination;
     if (destination !== undefined) {
-      if (name === "search_attractions" || name === "get_place_reviews") args.city = destination;
+      if (name === "search_attractions" || name === "get_place_reviews" || name === "get_place_visit_info") args.city = destination;
       if (name === "search_stays" || name === "search_restaurants") args.region = destination;
-      if (name === "geocode" || name === "plan_day_routes" || name === "get_weather") args.city = destination;
+      if (name === "geocode" || name === "plan_day_routes") args.city = destination;
     }
-    if (name === "search_attractions" && context.travelMode && args.min_rating === undefined) args.min_rating = TRAVEL_ATTRACTION_MIN_RATING;
+    if (name === "search_stays" || name === "search_restaurants" || name === "search_attractions") {
+      const budget = context.brief ? briefBudgetPlan(context.brief) : undefined;
+      if (name === "search_attractions" && context.travelMode && args.min_rating === undefined) args.min_rating = budget?.economy ? 0 : TRAVEL_ATTRACTION_MIN_RATING;
+      if (name === "search_stays" && budget?.economy && args.economy === undefined) args.economy = true;
+      const field = name === "search_stays" ? "max_room_price" : name === "search_attractions" ? "max_visit_cost" : "max_cost";
+      const planned = name === "search_stays" ? budget?.roomPerNight : name === "search_attractions" ? budget?.visitsPerPersonDay : budget?.mealPerPerson;
+      const explicit = args[field];
+      if (explicit === undefined || typeof explicit === "number") {
+        const userCap = name === "search_restaurants" ? context.brief?.budgetPerMealYuan : undefined;
+        const flexible = context.dayPlanningScope?.layer === "budget" && explicit !== undefined;
+        const cap = Math.min(explicit ?? Infinity, userCap ?? Infinity, flexible ? Infinity : planned ?? Infinity);
+        if (Number.isFinite(cap)) args[field] = cap;
+      }
+    }
+    validateToolArguments(tool.parameters, args);
+    context.onArgumentsPrepared?.(args, prepared.corrections);
+    for (const root of this.operationRoots(workspace)) {
+      if (!this.recovery.has(root)) this.recovery.set(root, recoverManagedOperations(root));
+      await this.recovery.get(root);
+    }
     const cacheable = TRAVEL_QUERY_TOOLS.includes(name);
     await context.evidence.load();
     const pooledDiscovery = tool.usesDiscoveryPool === true && (name === "search_attractions" || name === "search_restaurants");
@@ -212,11 +269,13 @@ export class ToolRegistry {
       const field = name === "search_attractions" ? "location" : "city";
       if (typeof args[field] === "string") args[field] = context.evidence.canonicalPlaceName(discoveryCenterName(args[field], discoveryCity), discoveryCity);
     }
-    if (name === "get_place_reviews" && typeof args.place === "string" && typeof args.city === "string") args.place = context.evidence.canonicalPlaceName(args.place, args.city);
-    if (name === "get_place_reviews" && args.aspect === "开放时间" && args.refresh !== true) {
-      const requested = requestedOpeningFields(args);
-      const missing = context.evidence.missingOpeningFields(String(args.city ?? ""), String(args.place ?? ""), requested);
-      if (args.visit_date && !missing.includes("notices")) missing.push("notices");
+    if (["get_place_reviews", "get_place_visit_info"].includes(name) && typeof args.place === "string" && typeof args.city === "string") args.place = context.evidence.canonicalPlaceName(args.place, args.city);
+    if (name === "get_place_visit_info" && args.refresh !== true) {
+      const requested = args.fields as string[];
+      const opening = requested.filter((field): field is import("./opening-facts.ts").OpeningField => field !== "visit_duration");
+      const missing: string[] = context.evidence.missingOpeningFields(String(args.city ?? ""), String(args.place ?? ""), opening, typeof args.visit_date === "string" ? args.visit_date : undefined);
+      if (requested.includes("visit_duration") && !context.evidence.visitInfoFacts(String(args.city ?? ""), String(args.place ?? ""), ["visit_duration"])) missing.push("visit_duration");
+      if (args.visit_date && requested.includes("notices") && !missing.includes("notices")) missing.push("notices");
       if (missing.length && missing.length < requested.length) args.fields = missing;
     }
     if (name === "plan_day_routes" && Array.isArray(args.stops) && typeof args.city === "string") args.stops = args.stops.map((stop) => typeof stop === "string" ? context.evidence.canonicalPlaceName(stop.trim(), String(args.city)) : stop);
@@ -226,7 +285,7 @@ export class ToolRegistry {
     const key = evidenceId([name, queryKeyArgs(name, args), ...(routePoints === undefined ? [] : [routePoints]), ...(protectedVisits.length ? [protectedVisits] : [])]);
     annotateToolCall({ query_key: key });
     const beforeEvidence = new Set(context.evidence.diagnosticEvidenceKeys());
-    const openingFields = name === "get_place_reviews" && args.aspect === "开放时间" ? requestedOpeningFields(args) : undefined;
+    const openingFields = name === "get_place_visit_info" ? (args.fields as string[]).filter((f): f is import("./opening-facts.ts").OpeningField => f !== "visit_duration") : undefined;
     const attemptKey = openingFields ? evidenceId(["opening-attempt", args.city, args.place]) : key;
     const count = cacheable && context.queryAttempts ? (context.queryAttempts.get(attemptKey) ?? 0) + 1 : 1;
     if (cacheable) { context.queryAttempts?.set(attemptKey, count); if (attemptKey !== key) context.queryAttempts?.set(key, count); }
@@ -236,11 +295,12 @@ export class ToolRegistry {
       if (context.queryStats) context.queryStats.blocked++;
       return `同一任务该事项已查询/复用两次，本次未执行：${previous ? querySummary(previous) : name}。请保存缺失日期或修订具体问题，不要原样或换词重试。`;
     }
-    const knownOpening = openingFields ? context.evidence.openingFactsFor(String(args.city ?? ""), String(args.place ?? "")) : {};
-    const verifiedFields = openingFields?.filter((field) => (knownOpening[field]?.status === "verified" && !isHistoricalOpening(knownOpening[field])) || (field === "closure" && context.evidence.hasVerifiedClosure(String(args.city ?? ""), String(args.place ?? "")))) ?? [];
-    const sharedFact = name === "get_place_reviews" && args.refresh !== true && !args.visit_date ? context.evidence.reviewFacts(String(args.city ?? ""), String(args.place ?? ""), String(args.aspect), openingFields) : undefined;
+    const visitDate = typeof args.visit_date === "string" ? args.visit_date : undefined;
+    const knownOpening = openingFields ? context.evidence.openingFactsFor(String(args.city ?? ""), String(args.place ?? ""), visitDate) : {};
+    const verifiedFields = openingFields?.filter((field) => (knownOpening[field]?.status === "verified" && !isHistoricalOpening(knownOpening[field])) || (field === "closure" && context.evidence.hasVerifiedClosure(String(args.city ?? ""), String(args.place ?? ""), visitDate))) ?? [];
+    const sharedFact = name === "get_place_visit_info" && args.refresh !== true && !(visitDate && (args.fields as string[]).includes("notices")) ? context.evidence.visitInfoFacts(String(args.city ?? ""), String(args.place ?? ""), args.fields as string[], visitDate) : undefined;
     if (sharedFact !== undefined) {
-      const status = openingFields && verifiedFields.length === openingFields.length ? "verified" : "returned";
+      const status = openingFields && openingFields.length > 0 && !(args.fields as string[]).includes("visit_duration") && verifiedFields.length === openingFields.length ? "verified" : "returned";
       annotateToolCall({ execution: "cache_hit", query_status: status, evidence_keys: context.evidence.diagnosticEvidenceKeys(sharedFact) });
       if (context.queryStats) context.queryStats.cacheHits++;
       return sharedFact;
@@ -275,8 +335,9 @@ export class ToolRegistry {
       return `同一中心两次未能核验坐标，本次未执行：${name} · ${discoveryCity}/${String(args.location ?? args.city)}。不要通过改半径、数量或预算重试；保留待确认并推进其他地点。`;
     }
     const execute = async (): Promise<string> => {
-      const startedAt = Date.now();
+      const startedAt = externalNow().getTime();
       let sourceAt: number | undefined;
+      let sourceReused = false;
       let discoveryStarted = false;
       let discoveryReused = false;
       const beforeDiscoveryFetch = (geo?: GeoResult) => {
@@ -306,8 +367,13 @@ export class ToolRegistry {
         if (context.queryStats) context.queryStats.cacheHits++;
       };
       if (cacheable && !pooledDiscovery && context.queryStats) context.queryStats.executed++;
+      const onQueryReuse = (at: number) => {
+        sourceAt = at;
+        if (!sourceReused && context.queryStats) { context.queryStats.executed--; context.queryStats.cacheHits++; }
+        sourceReused = true; annotateToolCall({ execution: "cache_hit" });
+      };
       let output: string;
-      try { output = await tool.execute(args, pooledDiscovery ? { ...context, beforeDiscoveryFetch, onDiscoveryReuse } : context); }
+      try { output = await tool.execute(args, pooledDiscovery ? { ...context, beforeDiscoveryFetch, onDiscoveryReuse } : { ...context, onQueryReuse }); }
       catch (error) { if (error instanceof DiscoveryBudgetError) return error.message; throw error; }
       if (pooledDiscovery && !discoveryStarted && !discoveryReused && context.queryStats) context.queryStats.executed++;
       context.signal?.throwIfAborted();
@@ -315,17 +381,20 @@ export class ToolRegistry {
         const city = String(args.region ?? (name === "search_attractions" ? args.city : destination) ?? args.city ?? args.location ?? "");
         output = await context.evidence.observePlaces(name, city, output);
       }
-      if (cacheable && !/仅历史参考|开放信息查询受阻|未找到|失败|不可用|没有.*(?:餐厅|景点)/.test(output)) context.evidence.cache(key, output, sourceAt ?? startedAt);
+      if (cacheable && !/仅历史参考|开放信息查询受阻|评价信息查询受阻|未找到|失败|不可用|没有.*(?:餐厅|景点)/.test(output)) context.evidence.cache(key, output, sourceAt ?? startedAt);
       if (cacheable) {
         const fields = queryFields(name, args);
         const status: QueryStatus = openingFields ? (/搜索失败|仅历史参考|开放信息查询受阻/.test(output) ? "failed" : (() => {
-          const known = context.evidence.openingFactsFor(fields.city, fields.entity);
-          const verified = openingFields.filter((f) => (known[f]?.status === "verified" && !isHistoricalOpening(known[f])) || (f === "closure" && context.evidence.hasVerifiedClosure(fields.city, fields.entity))).length;
-          return verified === openingFields.length ? "verified" : verified ? "returned" : "unavailable";
+          const known = context.evidence.openingFactsFor(fields.city, fields.entity, visitDate);
+          const verified = openingFields.filter((f) => (known[f]?.status === "verified" && !isHistoricalOpening(known[f])) || (f === "closure" && context.evidence.hasVerifiedClosure(fields.city, fields.entity, visitDate))).length;
+          const duration = (args.fields as string[]).includes("visit_duration");
+          return verified === openingFields.length && !duration ? "verified" : verified || (duration && output.includes("⏱")) ? "returned" : "unavailable";
         })())
+          : name === "get_place_reviews" && /评价信息查询受阻/.test(output) ? "failed"
+          : name === "get_place_reviews" && /未找到明确的/.test(output) ? "unavailable"
           : /搜索失败|未找到|未能|不可用/.test(output) ? "failed"
           : /没有搜到|没有.*(?:餐厅|景点)/.test(output) ? "unavailable"
-          : name === "get_place_reviews" && args.aspect === "游玩时长" && !output.includes("⏱") ? "unavailable" : "returned";
+          : "returned";
         annotateToolCall({ query_status: status });
         await context.evidence.observeQuery({ ...fields, key, status, at: sourceAt ?? startedAt });
       }

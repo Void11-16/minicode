@@ -192,7 +192,7 @@ test("save_itinerary: 景点误用 subtype 时转为 place_type，不阻断保�
     }],
   });
 
-  const parsed = JSON.parse(await load.execute({ title: "北京三日游" }) as string);
+  const parsed = JSON.parse(await load.execute({ title: "北京三日游", summary: false }) as string);
   assert.equal(parsed.days[0].items[0].type, "visit");
   assert.equal(parsed.days[0].items[0].subtype, undefined);
   assert.equal(parsed.days[0].items[0].place_type, "博物馆");
@@ -206,14 +206,14 @@ test("save/load/list 往返：增量修改的基础", async () => {
 
   await save.execute({ title: "上海一日", days: [{ items: [{ name: "外滩" }] }] });
 
-  const loaded = await load.execute({ title: "上海一日" });
+  const loaded = await load.execute({ title: "上海一日", summary: false });
   const parsed = JSON.parse(loaded as string);
   assert.equal(parsed.days[0].items[0].name, "外滩");
 
   // 只改一条再保存（模拟增量修改工作流）
   parsed.days[0].items.push({ time: "18:00", type: "晚餐", name: "老正兴" });
   await save.execute(parsed);
-  const updated = JSON.parse(await load.execute({ title: "上海一日" }) as string);
+  const updated = JSON.parse(await load.execute({ title: "上海一日", summary: false }) as string);
   assert.equal(updated.days[0].items.length, 2);
 
   const listed = await list.execute({});
@@ -241,7 +241,7 @@ test("save_itinerary: merge=true 按 date 合并（分天保存，其余天保�
     days: [{ date: "2026-10-11", items: [{ type: "visit", name: "新B" }] }],
   });
   assert.match(output, /合并保存/);
-  const merged = JSON.parse(await load.execute({ title: "合并测试" }) as string);
+  const merged = JSON.parse(await load.execute({ title: "合并测试", summary: false }) as string);
   assert.equal(merged.days.length, 2);
   assert.equal(merged.days[0].items[0].name, "旧A");
   assert.equal(merged.days[1].items[0].name, "新B");
@@ -252,7 +252,7 @@ test("save_itinerary: merge=true 按 date 合并（分天保存，其余天保�
     merge: true,
     days: [{ date: "2026-10-12", items: [{ type: "visit", name: "新C" }] }],
   });
-  const appended = JSON.parse(await load.execute({ title: "合并测试" }) as string);
+  const appended = JSON.parse(await load.execute({ title: "合并测试", summary: false }) as string);
   assert.equal(appended.days.length, 3);
   assert.equal(appended.days[2].items[0].name, "新C");
 
@@ -262,7 +262,7 @@ test("save_itinerary: merge=true 按 date 合并（分天保存，其余天保�
     merge: true,
     days: [{ date: "2026-10-10", items: [{ type: "visit", name: "X" }] }],
   });
-  const fresh = JSON.parse(await load.execute({ title: "全新合并" }) as string);
+  const fresh = JSON.parse(await load.execute({ title: "全新合并", summary: false }) as string);
   assert.equal(fresh.days.length, 1);
   assert.equal(fresh.days[0].items[0].name, "X");
 });
@@ -286,11 +286,11 @@ test("save_itinerary: 保存质量报告，strict 只拦截行程类 P1（餐饮
   const save = createSaveItineraryTool(root);
   const validate = createValidateItineraryTool(root);
 
-  const output = await save.execute({ title: "杭州一日", days: COMPLETE_DAYS, budget_per_person_yuan: 200 });
+  const output = await save.execute({ title: "杭州一日", days: COMPLETE_DAYS, budget_per_person_yuan: 300 });
   assert.match(output, /质量: 100 \/ 100/);
   assert.match(output, /P0 0 \/ P1 0 \/ P2 0/);
   assert.match(await readFile(join(root, "plans", "杭州一日.quality.md"), "utf8"), /状态: 通过/);
-  assert.match(await validate.execute({ title: "杭州一日", strict: true, budget_per_person_yuan: 200 }), /状态: 通过/);
+  assert.match(await validate.execute({ title: "杭州一日", strict: true, budget_per_person_yuan: 300 }), /状态: 通过/);
 
   // 只有餐饮问题（没有午餐/晚餐推荐）：strict 不拦截，单列"餐饮参考"
   const mealOnly = {
@@ -359,7 +359,7 @@ test("load_itinerary: 不存在时提示用 list 查看", async () => {
   assert.match(output, /list_itineraries/);
 });
 
-test("load_itinerary: summary 只返回紧凑目录，day=N 只返回单日完整 JSON", async () => {
+test("load_itinerary: 全局概览与单日目录分开，day=N返回完整字段", async () => {
   const root = await mkdtemp(join(tmpdir(), "minicode-itin-read-"));
   const save = createSaveItineraryTool(root);
   const load = createLoadItineraryTool(root);
@@ -395,9 +395,12 @@ test("load_itinerary: summary 只返回紧凑目录，day=N 只返回单日完�
   const summary = await load.execute({ title: "北京读法", summary: true });
   assert.doesNotMatch(summary, /^\{/);
   assert.match(summary, /Day 1 · 2026-11-01/);
-  assert.match(summary, /\[visit\/古迹\] 故宫/);
-  assert.match(summary, /\[visit\/博物馆\] 国家博物馆/);
-  assert.match(summary, /id=forbidden-city/);
+  assert.match(summary, /景点1.*故宫/);
+  assert.match(summary, /景点1.*国家博物馆/);
+  assert.doesNotMatch(summary, /id=forbidden-city/);
+  const directory = await load.execute({ title: "北京读法", day: 1, summary: true });
+  assert.match(directory, /\[visit\/古迹\] 故宫/);
+  assert.match(directory, /id=forbidden-city/);
 
   const secondDay = JSON.parse(
     await load.execute({ title: "北京读法", day: 2 }) as string,

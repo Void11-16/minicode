@@ -2,6 +2,8 @@ import { spawn } from "node:child_process";
 import type { Tool } from "./tool.ts";
 import { requireString } from "./tool.ts";
 import { CommandOutputBuffer } from "./command-output.ts";
+import { runRecordedCommand } from "../storage/managed-operation.ts";
+import type { ToolExecutionState } from "../core/execution-state.ts";
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_TIMEOUT_MS = 600_000;
@@ -83,6 +85,7 @@ export function matchesBashApprovalKey(command: string, key: string): boolean {
 export function createBashTool(defaultWorkspace: string = process.cwd()): Tool {
   return {
     name: "bash",
+    effect: "command",
     description:
       "在工作区执行 shell 命令（默认登录 shell，继承用户 PATH），返回退出码与输出。用于跑测试、构建、git 操作、装依赖等。" +
       "只读命令（ls/cat/git status 等）自动放行；含管道/重定向/命令链接的命令与变更类命令会先请求确认。" +
@@ -113,7 +116,7 @@ export function createBashTool(defaultWorkspace: string = process.cwd()): Tool {
         Math.max(1000, Math.floor(typeof args.timeout_ms === "number" ? args.timeout_ms : DEFAULT_TIMEOUT_MS)),
       );
 
-      return await new Promise<string>((resolvePromise) => {
+      return runRecordedCommand({ root: workspace, request: { command, timeoutMs }, ...ctx }, (report) => new Promise<string>((resolvePromise) => {
         const child = spawn(process.env.SHELL ?? "/bin/sh", ["-lc", command], {
           cwd: workspace,
           env: process.env,
@@ -139,7 +142,7 @@ export function createBashTool(defaultWorkspace: string = process.cwd()): Tool {
           }
         };
 
-        const finish = (note: string) => {
+        const finish = (note: string, state: ToolExecutionState) => {
           if (settled) return;
           settled = true;
           clearTimeout(timer);
@@ -147,6 +150,7 @@ export function createBashTool(defaultWorkspace: string = process.cwd()): Tool {
           const out = stdout.finish();
           const err = stderr.finish();
           const body = `${out}${err === "" ? "" : `\n[stderr]\n${err}`}`;
+          report(state);
           resolvePromise(`$ ${command}\n${note}\n---\n${body}`);
         };
 
@@ -173,20 +177,22 @@ export function createBashTool(defaultWorkspace: string = process.cwd()): Tool {
           stderr.append(chunk);
         });
         child.on("error", (error) => {
-          finish(`启动失败: ${error.message}`);
+          finish(`启动失败: ${error.message}`, { execution_status: "failed", effect_status: "not_committed", recovery_action: "fix_arguments", code: "BASH_SPAWN_FAILED", message: error.message });
         });
         child.on("close", (code, signal) => {
           if (aborted) {
-            finish("（命令已被用户中断）");
+            finish("（命令已被用户中断）", { execution_status: "cancelled", effect_status: "unknown", recovery_action: "manual_review", code: "BASH_CANCELLED", message: "命令已中断，已产生的外部修改没有自动撤销，需核对实际状态。" });
             return;
           }
           if (timedOut) {
-            finish(`（超时 ${Math.round(timeoutMs / 1000)} 秒，已终止）退出码: ${code ?? `信号 ${String(signal)}`}`);
+            finish(`（超时 ${Math.round(timeoutMs / 1000)} 秒，已终止）退出码: ${code ?? `信号 ${String(signal)}`}`, { execution_status: "failed", effect_status: "unknown", recovery_action: "manual_review", code: "BASH_TIMEOUT", message: "命令超时，副作用结果未知，不能自动原样重放。" });
             return;
           }
-          finish(code === 0 ? "退出码 0" : `退出码 ${code ?? `信号 ${String(signal)}`}`);
+          finish(code === 0 ? "退出码 0" : `退出码 ${code ?? `信号 ${String(signal)}`}`, code === 0
+            ? { execution_status: "succeeded", effect_status: isReadOnlyCommand(command) ? "none" : "committed", recovery_action: "none" }
+            : { execution_status: "failed", effect_status: "unknown", recovery_action: "manual_review", code: "BASH_EXIT_NONZERO", message: `命令退出码 ${code ?? signal}；已执行的部分不自动回滚，请核对后决定补救。` });
         });
-      });
+      }));
     },
   };
 }

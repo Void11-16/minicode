@@ -3,6 +3,7 @@
  * 这个文件不依赖任何其他模块。
  */
 
+import type { ToolExecutionState } from "./execution-state.ts";
 export type Role = "system" | "user" | "assistant" | "tool";
 
 /** LLM 发起的一次工具调用请求 */
@@ -14,6 +15,7 @@ export interface ToolCall {
 }
 
 export interface MessageExtra {
+  readonly toolExecution?: ToolExecutionState;
   /** assistant 消息发起的工具调用 */
   readonly toolCalls?: readonly ToolCall[];
   /** tool 消息对应的调用 id */
@@ -32,6 +34,8 @@ export interface PromptMessage {
 }
 
 export interface Message {
+  /** 本地执行回执，不随普通 Prompt 发送；模型使用工具正文中的状态说明。 */
+  readonly toolExecution?: ToolExecutionState;
   readonly id: string;
   readonly role: Role;
   readonly content: string;

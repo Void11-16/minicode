@@ -4,6 +4,7 @@ import { test } from "node:test";
 import { ToolRegistry } from "../src/tools/tool.ts";
 import { createAttractionsTool } from "../src/tools/attractions.ts";
 import { setAmapKey } from "../src/tools/amap-access.ts";
+import { createVisitInfoTool } from "../src/tools/place-visit-info.ts";
 import { createReviewsTool } from "../src/tools/reviews.ts";
 import { overpassFallback, overpassQuery } from "../src/tools/overpass.ts";
 import { geocodeLocation } from "../src/tools/geocoding.ts";
@@ -146,7 +147,7 @@ test("get_place_reviews: aspect 参数调整查询词", async () => {
   assert.ok(queries.some((q) => q.includes("灵隐寺") && q.includes("点评 评价 值得去吗")));
 });
 
-test("get_place_reviews: 提取游玩时长参考（含噪声过滤与来源标注）", async () => {
+test("get_place_visit_info: 提取游玩时长参考（含噪声过滤与来源标注）", async () => {
   const fetchFn = (async (url: string | URL) => {
     if (String(url).includes("bing.com")) {
       return new Response(
@@ -161,8 +162,8 @@ test("get_place_reviews: 提取游玩时长参考（含噪声过滤与来源标�
     return new Response("<html><body>没有结果</body></html>", { status: 200, headers: { "Content-Type": "text/html" } });
   }) as typeof fetch;
 
-  const tool = createReviewsTool(fetchFn);
-  const output = await tool.execute({ place: "三坊七巷", city: "福州", aspect: "游玩时长" });
+  const tool = createVisitInfoTool(fetchFn);
+  const output = await tool.execute({ place: "三坊七巷", city: "福州", fields: ["visit_duration"] });
 
   assert.match(output, /游玩时长参考/);
   assert.match(output, /一般游玩 2 到 4 小时/);

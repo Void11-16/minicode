@@ -5,14 +5,19 @@ import type { AppConfig } from "../config/config.ts";
 import { resolvePricing, type ModelPricing } from "../config/pricing.ts";
 
 export interface CumulativeToolBudget {
+  basicDiscoveryCalls?: Map<string, number>;
+  dayTaskAttemptBaselines?: Map<string, number>;
+  operationRecovery?: import("./execution-state.ts").ToolExecutionState;
   rounds: number;
   calls: number;
   tokens: number;
   stagnantRounds?: number;
   deliveryStagnantRounds?: number;
-  deliveryProgress?: { days: number; P0: number; P1: number; passed: number };
+  deliveryProgress?: { basicComplete?: number; requiredCovered?: number; basic?: number; checked?: number; ready?: number; days: number; P0: number; P1: number; passed: number };
   observedEvidence?: Set<string>;
   allowAdvisoryReviews?: boolean;
+  /** 显式参观资料/时长查询可超出当前日缺口，不连带开放一般口碑。 */
+  allowVisitInfoQueries?: boolean;
   redundantCalls?: number;
   redundantRounds?: number;
   readVersions?: Map<string, string>;

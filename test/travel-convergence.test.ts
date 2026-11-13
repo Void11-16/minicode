@@ -11,7 +11,7 @@ import { requiredVisitMatches } from "../src/tools/required-visits.ts";
 import { CLOSURE_POLICY_VERSION, extractClosure } from "../src/tools/closure-policy.ts";
 import { TravelEvidenceStore } from "../src/tools/travel-evidence.ts";
 import { ToolRegistry } from "../src/tools/tool.ts";
-import { createReviewsTool } from "../src/tools/reviews.ts";
+import { createVisitInfoTool } from "../src/tools/place-visit-info.ts";
 import { computeItineraryMetrics } from "../src/eval/metrics.ts";
 import { recordDeliveryProgress, focusedEvidenceDefinitions, isDeferredEvidenceCall } from "../src/agent/travel-progress.ts";
 import { ChatAgent } from "../src/agent/agent.ts";
@@ -97,50 +97,50 @@ test("旧闭馆缓存跨重启失效，旧行程的无休标记不能严格通�
   assert.equal(e.bind(item, "北京").closure_verified, false);
 });
 
-test("原生口碑工具只观察抓取结果，规范化 place 和 aspect 阻止查询回显自证", async () => {
+test("原生参观工具只观察抓取结果，规范化 place 和 fields 阻止查询回显自证", async () => {
   let requests = 0;
   const fetchFn: typeof fetch = async () => { requests++; return new Response('<html>' + [1, 2, 3].map((n) => `<li class="b_algo"><h2><a>中国国家博物馆服务${n}</a></h2><p>馆藏介绍，没有闭馆规则</p></li>`).join('') + '</html>'); };
-  const registry = new ToolRegistry().register(createReviewsTool(fetchFn));
+  const registry = new ToolRegistry().register(createVisitInfoTool(fetchFn));
   const ctx = { workspace: tmpdir(), destination: "北京", queryAttempts: new Map<string, number>(), queryStats: { executed: 0, cacheHits: 0, blocked: 0 } };
-  await registry.execute("get_place_reviews", JSON.stringify({ place: "中国国家博物馆 开放时间 周一闭馆", aspect: "闭馆时间" }), ctx);
+  await registry.execute("get_place_visit_info", JSON.stringify({ place: "中国国家博物馆 开放时间 周一闭馆" }), ctx);
   const before = requests;
-  const cached = await registry.execute("get_place_reviews", JSON.stringify({ place: "中国国家博物馆", city: "北京", aspect: "开放时间", ignored: "extra" }), ctx);
+  const cached = await registry.execute("get_place_visit_info", JSON.stringify({ place: "中国国家博物馆", city: "北京", ignored: "extra" }), ctx);
   assert.equal(requests, before); assert.equal(registry.evidence.hasVerifiedClosure("北京", "中国国家博物馆"), false);
   assert.match(cached, /未联网|复用缓存/);
   assert.match(cached, /未找到/);
   assert.doesNotMatch(registry.evidence.queryContext(["中国国家博物馆"]), /周一闭馆/);
-  assert.match(await registry.execute("get_place_reviews", JSON.stringify({ place: "中国国家博物馆", aspect: "闭馆时间", refresh: true }), ctx), /本次未执行/);
+  assert.match(await registry.execute("get_place_visit_info", JSON.stringify({ place: "中国国家博物馆", refresh: true }), ctx), /本次未执行/);
   assert.deepEqual(ctx.queryStats, { executed: 1, cacheHits: 1, blocked: 1 });
 });
 
 test("负查询状态持久化、缓存命中不刷新时间，明确刷新有同任务上限", async (t) => {
   const root = await temp(t); let executions = 0;
-  const tool = { name: "get_place_reviews", description: "test", parameters: {}, execute: async () => { executions++; return "没有搜到相关评价内容"; } };
+  const tool = { name: "get_place_visit_info", description: "test", parameters: {}, execute: async () => { executions++; return "没有搜到相关评价内容"; } };
   let r = new ToolRegistry(root).register(tool);
-  await r.execute(tool.name, '{"place":"故宫","aspect":"闭馆时间","city":"北京"}');
+  await r.execute(tool.name, '{"place":"故宫","city":"北京"}');
   r = new ToolRegistry(root).register(tool);
   const ctx = { workspace: root, queryAttempts: new Map<string, number>() };
-  assert.match(await r.execute(tool.name, '{"place":"故宫","aspect":"开放时间","city":"北京"}', ctx), /复用已查状态/);
+  assert.match(await r.execute(tool.name, '{"place":"故宫","city":"北京"}', ctx), /复用已查状态/);
   assert.equal(executions, 1);
-  await r.execute(tool.name, '{"place":"故宫","aspect":"开放时间","city":"北京","refresh":true}', ctx);
+  await r.execute(tool.name, '{"place":"故宫","city":"北京","refresh":true}', ctx);
   assert.equal(executions, 2);
-  assert.match(await r.execute(tool.name, '{"place":"故宫","aspect":"开放时间","city":"北京","refresh":true}', ctx), /本次未执行/);
+  assert.match(await r.execute(tool.name, '{"place":"故宫","city":"北京","refresh":true}', ctx), /本次未执行/);
   assert.equal(executions, 2);
   assert.match(r.evidence.queryContext(["故宫"]), /已查询但未找到/);
 });
 
 test("负查询缓存 30 分钟失效，读索引和缓存复用均不延长有效期", async (t) => {
   let now = 1_000_000, executions = 0; t.mock.method(Date, "now", () => now);
-  const r = new ToolRegistry().register({ name: "get_place_reviews", description: "test", parameters: {}, execute: async () => { executions++; return "没有搜到相关评价内容"; } });
-  const args = '{"place":"故宫","city":"北京","aspect":"闭馆时间"}';
-  await r.execute("get_place_reviews", args);
+  const r = new ToolRegistry().register({ name: "get_place_visit_info", description: "test", parameters: {}, execute: async () => { executions++; return "没有搜到相关评价内容"; } });
+  const args = '{"place":"故宫","city":"北京"}';
+  await r.execute("get_place_visit_info", args);
   now += 30 * 60_000 - 1;
-  assert.match(await r.execute("get_place_reviews", args), /复用已查状态|没有搜到/);
+  assert.match(await r.execute("get_place_visit_info", args), /复用已查状态|没有搜到/);
   assert.match(r.evidence.queryContext(["故宫"]), /已查询但未找到/);
   assert.equal(executions, 1);
   now++;
   assert.equal(r.evidence.queryContext(["故宫"]), "");
-  await r.execute("get_place_reviews", args);
+  await r.execute("get_place_visit_info", args);
   assert.equal(executions, 2);
 });
 
@@ -174,7 +174,7 @@ test("实际 Agent 链：无关新候选不能刷新停滞；自动续跑复用�
   const provider: ChatProvider = { name: "endless", chat: async () => "结束", chatWithTools: async (): Promise<LLMResult> => {
     requests++; return { type: "tool_calls", toolCalls: [{ id: `c${requests}`, name: "search_attractions", arguments: JSON.stringify({ location: `变化${requests}` }) }] };
   } };
-  const s = new Session(); s.setTravelMode(true); s.setTravelState(updateTravelStateFromBrief(undefined, { title: "北京三日游", destination: "北京", mustVisit: ["故宫"] }));
+  const s = new Session(); s.setTravelMode(true); s.setTravelState(updateTravelStateFromBrief(undefined, { title: "北京一日游", destination: "北京", mustVisit: ["故宫"] }));
   const agent = new ChatAgent(s, provider, r, root), b = budget();
   assert.match(await agent.run("规划", { cumulativeBudget: b, maxToolRounds: 100 }), /无实际进展|累计预算/);
   assert.ok(requests <= 13); assert.equal(b.stagnantRounds, 12);
@@ -188,7 +188,7 @@ test("实际 Agent 链：即使持续增加目标地点证据，也不能无限�
   r.register({ name: "search_attractions", alwaysActive: true, description: "test", parameters: {}, execute: async () => `高德数据\n1. 故宫 | 坐标 ${(39 + (++number) / 10000).toFixed(4)},116.4000` });
   let requests = 0;
   const provider: ChatProvider = { name: "novel-data", chat: async () => "结束", chatWithTools: async (): Promise<LLMResult> => ({ type: "tool_calls", toolCalls: [{ id: `c${++requests}`, name: "search_attractions", arguments: JSON.stringify({ location: `故宫${requests}` }) }] }) };
-  const s = new Session(); s.setTravelMode(true); s.setTravelState(updateTravelStateFromBrief(undefined, { title: "北京三日游", destination: "北京", mustVisit: ["故宫"] }));
+  const s = new Session(); s.setTravelMode(true); s.setTravelState(updateTravelStateFromBrief(undefined, { title: "北京一日游", destination: "北京", mustVisit: ["故宫"] }));
   const b = budget();
   assert.match(await new ChatAgent(s, provider, r, root).run("规划", { cumulativeBudget: b, maxToolRounds: 100 }), /连续 20 轮/);
   assert.equal(requests, 20); assert.equal(b.deliveryStagnantRounds, 20);
@@ -197,17 +197,17 @@ test("实际 Agent 链：即使持续增加目标地点证据，也不能无限�
 test("实际 Agent 链：旧工具消息移出后查询结论仍在，暂停取证同时约束工具定义与执行", async (t) => {
   const root = await temp(t), r = new ToolRegistry(root);
   let executions = 0, requests = 0, sawIndex = false, sawPaused = false;
-  r.register({ name: "get_place_reviews", alwaysActive: true, description: "test", parameters: {}, execute: async () => { executions++; return "没有搜到相关评价内容"; } });
+  r.register({ name: "get_place_visit_info", alwaysActive: true, description: "test", parameters: {}, execute: async () => { executions++; return "没有搜到相关评价内容"; } });
   const provider: ChatProvider = { name: "repeat-query", chat: async () => "结束", chatWithTools: async (history, tools): Promise<LLMResult> => {
     requests++;
     if (requests >= 2) {
       sawIndex ||= history.some((m) => m.content.includes("已查事项索引") && m.content.includes("已查询但未找到"));
       assert.equal(history.some((m) => m.toolCallId === "c1"), false);
     }
-    if (requests >= 2) { assert.equal(tools.some((tool) => tool.name === "get_place_reviews"), false); sawPaused = true; }
-    return { type: "tool_calls", toolCalls: [{ id: `c${requests}`, name: "get_place_reviews", arguments: JSON.stringify({ place: "故宫", aspect: requests === 1 ? "开放时间" : "口碑" }) }] };
+    if (requests >= 2) { assert.equal(tools.some((tool) => tool.name === "get_place_visit_info"), false); sawPaused = true; }
+    return { type: "tool_calls", toolCalls: [{ id: `c${requests}`, name: "get_place_visit_info", arguments: JSON.stringify({ place: "故宫" }) }] };
   } };
-  const s = new Session(); s.setTravelMode(true); s.setTravelState(updateTravelStateFromBrief(undefined, { title: "北京三日游", destination: "北京", mustVisit: ["故宫"] }));
+  const s = new Session(); s.setTravelMode(true); s.setTravelState(updateTravelStateFromBrief(undefined, { title: "北京一日游", destination: "北京", mustVisit: ["故宫"] }));
   const b = budget(); recordDeliveryProgress(s.travelState, b); b.deliveryStagnantRounds = 7;
   await new ChatAgent(s, provider, r, root).run("规划", { cumulativeBudget: b, maxToolRounds: 100,
     onCheckpoint: () => { if (s.history.some((m) => m.toolCallId === "c1")) s.replaceHistory(s.history.filter((m) => m.toolCallId !== "c1" && !m.toolCalls?.some((c) => c.id === "c1")), 0); },
@@ -216,9 +216,9 @@ test("实际 Agent 链：旧工具消息移出后查询结论仍在，暂停取�
 });
 
 test("收敛限制保留新的必要规则查询与用户严格餐饮，不通过停用硬约束工具凑停止条件", () => {
-  assert.equal(isDeferredEvidenceCall("get_place_reviews", '{"aspect":"闭馆时间"}', false), false);
-  assert.equal(isDeferredEvidenceCall("get_place_reviews", '{"aspect":"开放时间"}', false), false);
-  assert.equal(isDeferredEvidenceCall("get_place_reviews", '{"aspect":"游玩时长"}', false), false);
+  assert.equal(isDeferredEvidenceCall("get_place_visit_info", '{"fields":["closure"]}', false), false);
+  assert.equal(isDeferredEvidenceCall("get_place_visit_info", '{"fields":["hours"]}', false), false);
+  assert.equal(isDeferredEvidenceCall("get_place_visit_info", '{"fields":["visit_duration"]}', false), false);
   assert.equal(isDeferredEvidenceCall("get_place_reviews", '{"aspect":"口碑"}', false), true);
   assert.equal(isDeferredEvidenceCall("search_restaurants", '{}', true), false);
   const tools = [{ name: "search_restaurants", description: "餐厅", parameters: {} }];

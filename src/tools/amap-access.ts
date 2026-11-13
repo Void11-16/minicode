@@ -1,4 +1,5 @@
 import { AmapClient } from "./amap.ts";
+import { externalEnvironment, externalState } from "../core/external-environment.ts";
 
 type FetchLike = typeof fetch;
 
@@ -10,5 +11,8 @@ export function setAmapKey(key: string | undefined, fetchFn: FetchLike = fetch):
 }
 
 export function getAmapClient(signal?: AbortSignal): AmapClient | undefined {
-  return signal === undefined ? amapClient : amapClient?.withSignal(signal);
+  const environment = externalEnvironment();
+  const client = environment ? externalState("amap-client", undefined as AmapClient | undefined,
+    () => new AmapClient({ apiKey: environment.amapKey, fetchFn: environment.fetch, sharedRateGate: false })) : amapClient;
+  return signal === undefined ? client : client?.withSignal(signal);
 }

@@ -24,7 +24,7 @@ export async function probeTravelTools(rootDir: string, onProgress: (message: st
     { name: "search_attractions", args: attractionArgs },
     { name: "search_stays", args: { city: "故宫博物院", region: "北京", radius_km: 2, limit: 3 } },
     { name: "search_restaurants", args: { city: "故宫博物院", region: "北京", radius_km: 2, limit: 3, max_cost: 100 } },
-    { name: "get_place_reviews", args: { place: "故宫博物院", city: "北京", aspect: "开放时间" } },
+    { name: "get_place_visit_info", args: { place: "故宫博物院", city: "北京", fields: ["hours", "closure"] } },
     { name: "plan_day_routes", args: routeArgs },
     { name: "plan_day_routes", args: routeArgs },
   ];

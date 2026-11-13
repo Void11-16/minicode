@@ -1,5 +1,5 @@
 import { scenicVisitKey } from "./scenic-area.ts";
-export const QUALITY_SCORING_VERSION = "opportunity-v9" as const;
+export const QUALITY_SCORING_VERSION = "opportunity-v14" as const;
 import type { Itinerary, ItineraryItem } from "./itinerary-schema.ts";
 import type { QualityIssue, ItineraryQualityStatus, QualityIssueLevel } from "./itinerary-validator.ts";
 
@@ -48,7 +48,7 @@ const COMPLETENESS_CODES = new Set(["title-day-mismatch", "missing-requested-dat
 function dimensionFor(issue: QualityIssue): keyof OpportunityScore["dimensions"] {
   if (PENDING_CODES.has(issue.code) && !LEG_CODES.has(issue.code)) return "evidence";
   if (LEG_CODES.has(issue.code) || /route|transport|transfer|spatial|remote-day/.test(issue.code)) return "routing";
-  if (/duplicate|budget|required-visit|unexpected.*date|day-role|allocation|outline|unfulfilled-reservation|excluded-visit/.test(issue.code)) return "consistency";
+  if (/duplicate|budget|required-visit|unexpected.*date|day-role|allocation|outline|unfulfilled-reservation|excluded-visit|forbidden-visit|daily-visit-limit|traveler-count|room-count/.test(issue.code)) return "consistency";
   return "schedule";
 }
 function itemKey(day: number, item: ItineraryItem): string {
@@ -78,7 +78,7 @@ export function opportunityScore(itinerary: Itinerary, issues: readonly QualityI
   const severity: Record<QualityIssueLevel, number> = { P0: 1, P1: 0.5, P2: 0.1 };
   for (const issue of issues) {
     if (issue.level === "P2" && ["incomplete-day-start", "incomplete-day-end", "day-too-long"].includes(issue.code)) continue; // 节奏参考不当作确定缺陷扣分。
-    if (["unverified-closure", "closure-exception-check"].includes(issue.code)) continue; // 资料确认项单列，不从规划分扣减。
+    if (["unverified-closure", "closure-exception-check", "economy-stay-price-pending"].includes(issue.code)) continue; // 资料确认项单列，不从规划分扣减。
     if (COMPLETENESS_CODES.has(issue.code)) continue; // 完整度只乘一次，不再逐个缺失日期重复扣分。
     const dimension = dimensionFor(issue);
     const item = issue.day === undefined ? undefined : itinerary.days[issue.day - 1]?.items.find((entry) => entry.id === issue.item_id);

@@ -1,3 +1,6 @@
+import { parseDaySchedule, type DayScheduleInput } from "./day-schedule.ts";
+import { parseRequirements, type TravelRequirements } from "./travel-requirements.ts";
+import { parsePlanningLayers, type PlanningLayers } from "../core/planning-layers.ts";
 import type { RecommendationMode } from "./recommendation-policy.ts";
 import type { CoordinateSystem } from "./coordinates.ts";
 
@@ -42,6 +45,10 @@ export interface ItineraryItem {
   readonly repeat_reason?: string;
   /** 程序根据地点证据回填的包含关系；不是第二个独立游览安排。 */
   readonly parent_visit?: ScenicParent;
+  /** 仅由地点证据回填；区域归纳不合并独立地点的时间和路线。 */
+  readonly area_group?: ScenicParent;
+  /** 已取证的下位地点，用于主景点覆盖子目标；不采用模型的推荐文字。 */
+  readonly covered_visits?: readonly CoveredVisit[];
   readonly closure_holiday_exception?: boolean;
   /** 主景区内部可选地点，不单独计数、不生成路线停留点。 */
   readonly recommended_spots?: readonly string[];
@@ -91,6 +98,7 @@ export interface ItineraryOpeningHours {
 
 export type ItineraryDayType = "full" | "arrival" | "departure" | "transfer";
 export interface ItineraryDay {
+  readonly schedule_input?: DayScheduleInput;
   readonly day_type?: ItineraryDayType;
   readonly available_start?: string;
   readonly available_end?: string;
@@ -100,11 +108,13 @@ export interface ItineraryDay {
 }
 
 export interface Itinerary {
+  readonly planning_layers?: PlanningLayers;
   readonly title: string;
   readonly days: readonly ItineraryDay[];
   readonly itinerary_id?: string;
   readonly revision?: number;
   readonly budget_per_person_yuan?: number;
+  readonly budget_overrun_ratio?: number;
   readonly budget_source?: "brief" | "explicit";
   readonly travelers?: number;
   readonly room_count?: number;
@@ -112,20 +122,38 @@ export interface Itinerary {
   /** 粗排预留不计入已完成日期；实际安排仍以days为准。 */
   readonly outline?: readonly ItineraryOutlineDay[];
   readonly excluded_visits?: readonly ExcludedVisit[];
+  /** 程序重算的必去目标台账，模型不能通过填写状态使目标通过。 */
+  readonly required_visit_goals?: readonly RequiredVisitGoal[];
 }
 
 export interface ScenicParent { readonly name: string; readonly evidence_id?: string }
+export interface CoveredVisit extends ScenicParent { readonly relation: "scenic_child" | "geographic_area" }
+export interface RequiredVisitGoal {
+  readonly id: string;
+  readonly name: string;
+  readonly status: "unresolved" | "identified" | "reserved" | "scheduled";
+  /** 只表示地点身份及包含关系核验，不代表预约、开放时间和路线全部通过。 */
+  readonly identity_verified: boolean;
+  readonly evidence_id?: string;
+  readonly date?: string;
+  readonly item_id?: string;
+  readonly covered_by?: string;
+  readonly relation?: "direct" | CoveredVisit["relation"];
+}
 export interface RepeatVisitPermission { readonly name: string; readonly user_message_id: string; readonly user_quote: string }
-export interface PlannedVisit { readonly name: string; readonly evidence_id?: string; readonly repeat_reason?: string; readonly parent_visit?: ScenicParent }
+export interface PlannedVisit { readonly name: string; readonly evidence_id?: string; readonly repeat_reason?: string; readonly parent_visit?: ScenicParent; readonly area_group?: ScenicParent; readonly covered_visits?: readonly CoveredVisit[] }
 export interface ItineraryOutlineDay { readonly date: string; readonly theme?: string; readonly visits: readonly PlannedVisit[] }
 export interface ExcludedVisit extends PlannedVisit { readonly reason: string }
 
 export interface ItineraryConstraints {
+  readonly requirement_version?: string;
+  readonly requirements?: TravelRequirements;
   /** 仅由宿主根据真实用户消息生成；保存工具不接受模型提供的授权。 */
   readonly repeat_visit_permissions?: readonly RepeatVisitPermission[];
   readonly must_visit?: readonly string[];
   readonly route_tolerance_min?: number;
   readonly route_tolerance_ratio?: number;
+  /** 省略时按后续行程区域灵活换宿；false仅用于用户明确要求全程固定酒店。 */
   readonly allow_hotel_changes?: boolean;
   readonly base_stay_name?: string;
   /** 远郊日单段交通上限，分钟；默认 240，普通城市日仍为 150。 */
@@ -137,6 +165,7 @@ export interface ItineraryConstraints {
   readonly day_start?: string;
   readonly day_end?: string;
   readonly require_accommodation?: boolean;
+  readonly return_last_day?: boolean;
   readonly require_routes?: boolean;
   readonly require_place_evidence?: boolean;
   readonly recommendations?: boolean;
@@ -262,6 +291,8 @@ export function parseItinerary(raw: unknown): Itinerary {
   if (constraints?.meal_candidates_target !== undefined && (!Number.isInteger(constraints.meal_candidates_target) || Number(constraints.meal_candidates_target) < 1 || Number(constraints.meal_candidates_target) > 20)) throw new Error("meal_candidates_target 需要 1-20 的整数");
   if (source.budget_source !== undefined && !["brief", "explicit"].includes(String(source.budget_source))) throw new Error("budget_source 不合法");
   return { title, days,
+    ...(source.planning_layers === undefined ? {} : { planning_layers: parsePlanningLayers(source.planning_layers) }),
+    ...(source.required_visit_goals === undefined ? {} : { required_visit_goals: parseRequiredVisitGoals(source.required_visit_goals) }),
     ...(outline === undefined ? {} : { outline }),
     ...(source.excluded_visits === undefined ? {} : { excluded_visits: parseExcludedVisits(source.excluded_visits) }),
     ...(source.budget_source === undefined ? {} : { budget_source: source.budget_source as "brief" | "explicit" }),
@@ -270,10 +301,13 @@ export function parseItinerary(raw: unknown): Itinerary {
     ...(source.itinerary_id === undefined ? {} : { itinerary_id: optionalString(source.itinerary_id) }),
     ...(source.revision === undefined ? {} : { revision: positiveNumber(source.revision, "revision") }),
     ...(source.budget_per_person_yuan === undefined ? {} : { budget_per_person_yuan: nonNegativeNumber(source.budget_per_person_yuan, "budget_per_person_yuan") }),
+    ...(source.budget_overrun_ratio === undefined ? {} : { budget_overrun_ratio: boundedNumber(source.budget_overrun_ratio, "budget_overrun_ratio", 0, .2) }),
     ...(constraints === null ? {} : { constraints: {
       ...(constraints.repeat_visit_permissions === undefined ? {} : { repeat_visit_permissions: parseRepeatPermissions(constraints.repeat_visit_permissions) }),
       ...(constraints.must_visit === undefined ? {} : { must_visit: [...new Set((constraints.must_visit as string[]).map((v) => v.trim()))] }),
       ...(constraints.expected_days === undefined ? {} : { expected_days: positiveNumber(constraints.expected_days, "expected_days") }),
+      ...(constraints.requirement_version === undefined ? {} : { requirement_version: optionalString(constraints.requirement_version) }),
+      ...(constraints.requirements === undefined ? {} : { requirements: parseRequirements(constraints.requirements, constraints.expected_days as number | undefined, title) }),
       ...(constraints.route_tolerance_min === undefined ? {} : { route_tolerance_min: Number(constraints.route_tolerance_min) }),
       ...(constraints.route_tolerance_ratio === undefined ? {} : { route_tolerance_ratio: Number(constraints.route_tolerance_ratio) }),
       ...(constraints.allow_hotel_changes === undefined ? {} : { allow_hotel_changes: parseBoolean(constraints.allow_hotel_changes, "allow_hotel_changes") }),
@@ -287,7 +321,7 @@ export function parseItinerary(raw: unknown): Itinerary {
       ...(constraints.recommendation_mode === undefined ? {} : { recommendation_mode: constraints.recommendation_mode as RecommendationMode }),
       ...(constraints.meal_candidates_target === undefined ? {} : { meal_candidates_target: Number(constraints.meal_candidates_target) }),
       ...(constraints.meal_evidence_target === undefined ? {} : { meal_evidence_target: boundedNumber(constraints.meal_evidence_target, "meal_evidence_target", 0, 1) }),
-      ...Object.fromEntries(["require_accommodation", "require_routes", "require_place_evidence", "recommendations"].flatMap((key) => constraints[key] === undefined ? [] : [[key, parseBoolean(constraints[key], key)]])),
+      ...Object.fromEntries(["require_accommodation", "return_last_day", "require_routes", "require_place_evidence", "recommendations"].flatMap((key) => constraints[key] === undefined ? [] : [[key, parseBoolean(constraints[key], key)]])),
     } }),
   };
 }
@@ -295,7 +329,33 @@ export function parseItinerary(raw: unknown): Itinerary {
 function parsePlannedVisit(raw: unknown): PlannedVisit {
   const source = objectOf(raw), name = optionalString(source?.name);
   if (!source || !name || name.length > 200) throw new Error("粗排景点需要不超过200字的name");
-  return { name, ...(source.evidence_id === undefined ? {} : { evidence_id: optionalString(source.evidence_id) }), ...(source.repeat_reason === undefined ? {} : { repeat_reason: optionalString(source.repeat_reason) }), ...(source.parent_visit === undefined ? {} : { parent_visit: parseScenicParent(source.parent_visit) }) };
+  return { name, ...(source.evidence_id === undefined ? {} : { evidence_id: optionalString(source.evidence_id) }), ...(source.repeat_reason === undefined ? {} : { repeat_reason: optionalString(source.repeat_reason) }), ...parseVisitRelations(source) };
+}
+
+function parseVisitRelations(source: Record<string, unknown>): Pick<PlannedVisit, "parent_visit" | "area_group" | "covered_visits"> {
+  if (source.covered_visits !== undefined && (!Array.isArray(source.covered_visits) || source.covered_visits.length > 200)) throw new Error("covered_visits最多200项");
+  return {
+    ...(source.parent_visit === undefined ? {} : { parent_visit: parseScenicParent(source.parent_visit) }),
+    ...(source.area_group === undefined ? {} : { area_group: parseScenicParent(source.area_group) }),
+    ...(source.covered_visits === undefined ? {} : { covered_visits: (source.covered_visits as unknown[]).map((raw) => {
+      const value = objectOf(raw);
+      if (!value || !["scenic_child", "geographic_area"].includes(String(value.relation))) throw new Error("景点包含关系类型不合法");
+      return { ...parseScenicParent(value), relation: value.relation as CoveredVisit["relation"] };
+    }) }),
+  };
+}
+
+export function parseRequiredVisitGoals(raw: unknown): RequiredVisitGoal[] {
+  if (!Array.isArray(raw) || raw.length > 200) throw new Error("required_visit_goals最多200项");
+  return raw.map((value) => {
+    const row = objectOf(value), id = optionalString(row?.id), name = optionalString(row?.name);
+    if (!row || !id || !name || !["unresolved", "identified", "reserved", "scheduled"].includes(String(row.status))) throw new Error("必去目标状态不合法");
+    if (row.relation !== undefined && !["direct", "scenic_child", "geographic_area"].includes(String(row.relation))) throw new Error("必去目标覆盖方式不合法");
+    return { id, name, status: row.status as RequiredVisitGoal["status"], identity_verified: parseBoolean(row.identity_verified, "identity_verified"),
+      ...Object.fromEntries(["evidence_id", "date", "item_id", "covered_by"].flatMap((key) => row[key] === undefined ? [] : [[key, optionalString(row[key])]])),
+      ...(row.relation === undefined ? {} : { relation: row.relation as RequiredVisitGoal["relation"] }),
+    };
+  });
 }
 
 function parseScenicParent(raw: unknown): ScenicParent {
@@ -342,6 +402,7 @@ function parseDay(raw: unknown, dayIndex: number, ids: Map<string, number>): Iti
   const availableStart = optionalTime(source.available_start, "available_start"), availableEnd = optionalTime(source.available_end, "available_end");
   if (availableStart !== undefined && availableEnd !== undefined && timeToMinutes(availableStart) >= timeToMinutes(availableEnd)) throw new Error("当天可用时段必须先开始后结束");
   return {
+    ...(source.schedule_input === undefined ? {} : { schedule_input: parseDaySchedule(source.schedule_input) }),
     ...(source.day_type === undefined ? {} : { day_type: source.day_type as ItineraryDayType }),
     ...(availableStart === undefined ? {} : { available_start: availableStart }),
     ...(availableEnd === undefined ? {} : { available_end: availableEnd }),
@@ -379,7 +440,7 @@ export function itineraryItemName(source: Record<string, unknown>): string | und
     if (from && to) return `${from} → ${to}`;
     if (optionalString(source.route_evidence_id)) return "交通";
   }
-  return ["rest", "free_time", "note"].includes(type ?? "") ? optionalString(source.activity) : undefined;
+  return ["rest", "free_time", "note"].includes(type ?? "") ? optionalString(source.activity) ?? optionalString(source.note) ?? ({ rest: "休息", free_time: "自由活动", note: "备注" } as Record<string, string>)[type!] : undefined;
 }
 
 function parseItem(raw: unknown, defaultId: string, ids: Map<string, number>, dayIndex: number): ItineraryItem {
@@ -438,7 +499,7 @@ function parseItem(raw: unknown, defaultId: string, ids: Map<string, number>, da
     name,
     ...(source.activity === undefined ? {} : { activity: optionalString(source.activity) }),
     ...(source.repeat_reason === undefined ? {} : { repeat_reason: optionalString(source.repeat_reason) }),
-    ...(source.parent_visit === undefined ? {} : { parent_visit: parseScenicParent(source.parent_visit) }),
+    ...parseVisitRelations(source),
     ...(source.closure_holiday_exception === undefined ? {} : { closure_holiday_exception: parseBoolean(source.closure_holiday_exception, "closure_holiday_exception") }),
     ...(source.recommended_spots === undefined ? {} : { recommended_spots: [...new Set((source.recommended_spots as string[]).map((v) => v.trim()))] }),
     ...(source.location === undefined ? {} : { location: parseLocation(source.location) }),
