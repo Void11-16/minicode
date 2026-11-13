@@ -207,7 +207,7 @@ export async function assessToolBudget(options: BudgetAssessmentOptions): Promis
     repair: {
       canImprove,
       summary,
-      items: budgetWork.length ? [...items.filter((item) => item.level !== "P2"), ...budgetWork, ...items.filter((item) => item.level === "P2")] : items,
+      items: [...items, ...budgetWork].sort((a, b) => a.level.localeCompare(b.level)),
     },
   };
 }
@@ -219,10 +219,11 @@ export function budgetGuidance(assessment: ToolBudgetAssessment): string {
       `P0 ${assessment.quality.issue_count?.P0 ?? 0} / P1 ${assessment.quality.issue_count?.P1 ?? 0} / P2 ${assessment.quality.issue_count?.P2 ?? 0}；` +
       `${assessment.quality.strict_pass === true ? "strict 已通过" : "strict 未通过"}。`
     : `当前没有可评估的已保存行程。${assessment.quality.unavailable_reason ?? ""}`;
-  const priorities = assessment.repair.items
-    .filter((item) => item.category !== "uncertain")
+  const actionable = assessment.repair.items.filter((item) => item.category !== "uncertain");
+  const blocking = actionable.filter((item) => item.level !== "P2");
+  const priorities = (blocking.length ? blocking : actionable)
     .slice(0, 8)
-    .map((item, index) => `${index + 1}. [${item.level}] ${item.action}（${item.code}）`);
+    .map((item, index) => `${index + 1}. [${item.level}] ${item.day === undefined ? "" : `Day ${item.day} · `}${item.message} ${item.action}（${item.code}）`);
   return [
     "【用户已授权追加工具轮次】",
     quality,
@@ -374,6 +375,8 @@ const REPAIR_RULES: Record<string, RepairRule> = {
   "time-overlap": { category: "edit", action: "顺延或缩短冲突条目" },
   "missing-duration": { category: "edit", action: "补停留/交通时长并复核当天总时长" },
   "transfer-too-tight": { category: "tool", action: "用路线工具核对通勤时间并留足余量" },
+  "unverified-route": { category: "edit", action: "优先用 repair_routes 绑定已查证据；若重排失败，按冲突调整本日时间或景点，保留硬时间窗" },
+  "missing-route-leg": { category: "tool", action: "按报告核对该段端点与交通方式，复用已有路线证据并保存本日" },
   "long-transport": {
     category: "tool",
     action: "确认远郊/跨区路线耗时已留出缓冲；超过 150 分钟再拆分行程、换交通方式或更换住宿",

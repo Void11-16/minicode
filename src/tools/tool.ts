@@ -59,6 +59,9 @@ export interface ToolContext extends ExecutionContext {
   readonly onArgumentsPrepared?: (args: Record<string, unknown>, corrections: readonly string[]) => void;
   readonly basicPlanning?: boolean;
   readonly dayPlanningScope?: import("../core/day-tasks.ts").DayPlanningScope;
+  /** 当前会话正在创建行程，不能以标题碰撞隐式选中旧行程。 */
+  readonly newTravelPlan?: boolean;
+  readonly isolateDisjointTripDates?: boolean;
   /** 本次调用所属会话的工作区；文件类工具与 bash 以此为根 */
   readonly workspace: string;
   /** 中断信号（/stop）：长任务（如 bash）应立即终止 */
@@ -235,6 +238,12 @@ export class ToolRegistry {
 
     ctx?.signal?.throwIfAborted();
     const context = { workspace: ctx?.workspace ?? this.defaultWorkspace, ...ctx, evidence: ctx?.evidence ?? this.evidence };
+    const brief = context.brief;
+    if (["save_itinerary", "load_itinerary", "validate_itinerary", "load_travel_brief", "save_travel_brief"].includes(name)
+      && brief?.requestedTitle && typeof args.title === "string" && args.title.trim() === brief.requestedTitle && !context.newTravelPlan) {
+      args.title = brief.title;
+      prepared.corrections.push(`title 使用本次行程「${brief.title}」`);
+    }
     const destination = context.destination;
     if (destination !== undefined) {
       if (name === "search_attractions" || name === "get_place_reviews" || name === "get_place_visit_info") args.city = destination;

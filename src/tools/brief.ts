@@ -6,8 +6,8 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import type { Tool } from "./tool.ts";
 import { requireString } from "./tool.ts";
-import { planFileFor } from "./plan-files.ts";
-import { runManagedOperation } from "../storage/managed-operation.ts";
+import { planFileFor, withTripTitleLock } from "./plan-files.ts";
+import { managedOperationTarget, runManagedOperation } from "../storage/managed-operation.ts";
 import { loadProfile, mergeProfiles } from "./profiles.ts";
 import { allocateTripBudget, BUDGET_OVERRUN, budgetPlanText } from "./trip-budget.ts";
 import type { UserRequest } from "./repeat-visit-policy.ts";
@@ -17,6 +17,7 @@ export const DEFAULT_TRAVELERS = 2;
 export interface TravelBrief {
   readonly durationDays?: number;
   readonly title: string;
+  readonly requestedTitle?: string;
   readonly destination: string;
   readonly startDate?: string;
   readonly endDate?: string;
@@ -127,33 +128,71 @@ export function createSaveTravelBriefTool(rootDir: string = process.cwd()): Tool
       required: ["title", "destination"],
     },
     async execute(args, ctx) {
-      let brief: TravelBrief;
+      let parsed: TravelBrief;
       try {
-        const parsed = parseBrief(args);
-        const savedRatio = ctx?.brief?.title === parsed.title ? ctx.brief.budgetOverrunRatio : undefined;
-        const budgetOverrunRatio = ctx?.userRequests?.length ? userBudgetOverrun(ctx.userRequests) ?? savedRatio : parsed.budgetOverrunRatio;
-        brief = await resolveBrief(rootDir, { ...parsed, budgetOverrunRatio });
+        parsed = parseBrief(args);
       } catch (error) {
         throw new ToolValidationError([{ code: "TRAVEL_BRIEF_INVALID", path: "brief", message: error instanceof Error ? error.message : String(error), hint: "按参数定义修正后重试；mustVisit/avoid须传字符串数组，而不是JSON字符串。当前尚未进入任何写入。" }]);
       }
-      const file = planFileFor(rootDir, "plans/briefs", brief.title, "json");
-
-      return runManagedOperation({ root: rootDir, file, tool: "save_travel_brief", request: args, ...ctx,
-        onReplay: async () => {
-          const saved = await loadBriefForTitle(rootDir, brief.title);
-          if (saved) ctx?.onBrief?.(saved);
-        },
-      }, async (commit) => {
-        await commit.commit(JSON.stringify(brief, null, 2));
-        ctx?.onBrief?.(brief);
-        return (
-        `需求单已保存: ${file}\n${summarizeBrief(brief)}\n` +
-        "空缺项按默认值处理。不要再保存第二份需求单，先用少量候选保存覆盖全部日期、无跨日重复的outline基础安排，再逐日核验和细排；" +
-        "后续保存行程沿用本次标题。"
-      );
-      });
+      // 标题分配和需求单提交使用同一把工作区锁，并行会话不能同时占用同一路径。
+      return withTripTitleLock(rootDir, async () => {
+        const operationTarget = ctx?.operationId ? await managedOperationTarget(rootDir, ctx.operationId, "save_travel_brief", args) : null;
+        const isolate = operationTarget !== null || ctx?.newTravelPlan || (ctx?.isolateDisjointTripDates && await hasDisjointItineraryDates(rootDir, parsed));
+        const title = isolate ? await availableBriefTitle(rootDir, parsed, operationTarget) : parsed.title;
+        const file = planFileFor(rootDir, "plans/briefs", title, "json");
+        const current = ctx?.brief?.title === title ? ctx.brief : ctx?.newTravelPlan ? undefined : await loadBriefForTitle(rootDir, title);
+        const requestedTitle = title !== parsed.title ? parsed.title : current?.requestedTitle;
+        const savedRatio = ctx?.brief?.title === title ? ctx.brief.budgetOverrunRatio : undefined;
+        const budgetOverrunRatio = ctx?.userRequests?.length ? userBudgetOverrun(ctx.userRequests) ?? savedRatio : parsed.budgetOverrunRatio;
+        const brief = await resolveBrief(rootDir, { ...parsed, title, requestedTitle, budgetOverrunRatio });
+        return runManagedOperation({ root: rootDir, file, tool: "save_travel_brief", request: args, ...ctx,
+          onReplay: async () => {
+            const saved = await loadBriefForTitle(rootDir, title);
+            if (saved) ctx?.onBrief?.(saved);
+          },
+        }, async (commit) => {
+          await commit.commit(JSON.stringify(brief, null, 2));
+          ctx?.onBrief?.(brief);
+          const assigned = title === parsed.title ? "" : `同名行程已存在，本次独立标题为「${title}」。后续行程工具使用该标题。\n`;
+          return `需求单已保存: ${file}\n${assigned}${summarizeBrief(brief)}\n` +
+            "空缺项按默认值处理。不要再保存第二份需求单，先用少量候选保存覆盖全部日期、无跨日重复的outline基础安排，再逐日核验和细排；" +
+            "后续保存行程沿用本次标题。";
+        });
+      }, ctx?.signal);
     },
   };
+}
+
+async function hasDisjointItineraryDates(root: string, brief: TravelBrief): Promise<boolean> {
+  if (!brief.startDate && !brief.endDate) return false;
+  const file = planFileFor(root, "plans", brief.title, "json");
+  const raw = await readFile(file, "utf8").catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; return null; });
+  if (raw === null) return false;
+  try {
+    const saved = JSON.parse(raw);
+    if (saved === null || typeof saved !== "object" || !Array.isArray(saved.days)) return true;
+    const dates = [...saved.days, ...(Array.isArray(saved.outline) ? saved.outline : [])].map((day) => day?.date).filter(validTravelDate).sort();
+    if (dates.length === 0) return false;
+    return (brief.startDate !== undefined && brief.startDate > dates.at(-1)!) || (brief.endDate !== undefined && brief.endDate < dates[0]!);
+  } catch (error) {
+    if (error instanceof SyntaxError) return true;
+    throw error;
+  }
+}
+
+async function availableBriefTitle(root: string, brief: TravelBrief, target: string | null): Promise<string> {
+  const alternate = `${brief.title}（${brief.startDate ? `${brief.startDate} 出发` : "新行程"}）`;
+  for (let suffix = 0; suffix < 1000; suffix++) {
+    const title = suffix === 0 ? brief.title : suffix === 1 ? alternate : `${alternate} ${suffix}`;
+    const file = planFileFor(root, "plans/briefs", title, "json");
+    if (target) { if (target === file) return title; continue; }
+    const occupied = await Promise.all([file, planFileFor(root, "plans", title, "json")].map(async (path) => {
+      try { await stat(path); return true; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
+    }));
+    if (!occupied.some(Boolean)) return title;
+  }
+  throw new Error("无法为本次行程分配独立标题，请检查行程目录或使用其他标题");
 }
 
 function userBudgetOverrun(requests: readonly UserRequest[]): number | undefined {

@@ -74,6 +74,17 @@ async function claimOperation(root: string, id: string, resource: string, tool: 
     if (existing === null) await atomicWrite(file, JSON.stringify(claim), 0o600);
   }, signal);
 }
+
+/** Recover the resource chosen for an earlier attempt before allocating a new path. */
+export async function managedOperationTarget(root: string, id: string, tool: string, request: unknown): Promise<string | null> {
+  const text = await optionalText(join(root, ".minicode", "operations", "ids", `${digest(id)}.json`));
+  if (text === null) return null;
+  const claim = JSON.parse(text) as { resource: string; tool: string; request_hash: string };
+  if (claim.tool !== tool || claim.request_hash !== operationRequestHash(request)) throw new ToolExecutionError({
+    operation_id: id, execution_status: "failed", effect_status: "not_committed", recovery_action: "fix_arguments", code: "OPERATION_ID_CONFLICT", message: "同一 operation_id 已用于不同工具或参数；新意图需要新 ID。",
+  });
+  return inside(root, claim.resource);
+}
 function stateFor(record: OperationRecord, effect: ToolExecutionState["effect_status"], code?: string): ToolExecutionState {
   return { operation_id: record.operation_id, execution_status: effect === "committed" ? "succeeded" : "failed", effect_status: effect,
     recovery_action: effect === "committed" ? "none" : effect === "not_committed" ? "retry" : "manual_review", ...(code ? { code } : {}) };

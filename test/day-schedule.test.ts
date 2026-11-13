@@ -201,6 +201,23 @@ test("路线超时/固定预约冲突拒绝候选，正式文件逐字保留", a
   await assert.rejects(() => f.save.execute({ title, schedule: { date, visits: [{ name: "甲园" }, { name: "乙园" }, { name: "甲园" }] } }, f.ctx), /甲园.*重复选中/);
   assert.equal(await readFile(f.file, "utf8"), before);
 });
+test("真实路线使返店晚于18点时顺延保存，明确最晚时间仍拦截", async (t) => {
+  const f = await fixture(t), hotel = "甲酒店";
+  const start = "10:00", visits = [{ name: "甲园", duration_min: 210 }, { name: "乙园", duration_min: 150 }];
+  await f.evidence.observePlaces("search_stays", "杭州", `${hotel} | 坐标 30.1900,120.1000`, "amap");
+  const brief = updateTravelStateFromBrief(undefined, { title, destination: "杭州", startDate: date, endDate: next, durationDays: 2 }).brief;
+  const ctx = { ...f.ctx, brief };
+  await f.save.execute({ title, schedule: { date, start, visits, end_place: hotel } }, ctx);
+  await f.route(60);
+  await f.evidence.observeRoutes([{ city: "杭州", from: "乙园", to: hotel, mode: "transit", duration_min: 42, distance_km: 2, estimated: false,
+    from_point: f.evidence.point("乙园", "杭州")!, to_point: f.evidence.point(hotel, "杭州")! }]);
+  await f.save.execute({ title, repair_routes: [date] }, f.ctx);
+  const plan = await f.load();
+  assert.equal(plan.constraints?.day_end, "18:00");
+  assert.equal(plan.days[0]?.items.at(-1)?.time, "18:27");
+  assert.ok(plan.days[0]?.items.filter((item) => item.type === "transport").every((item) => item.route_verified));
+  assert.throws(() => buildDaySchedule(plan, { date, start, visits, end_place: hotel, available_end: "18:00" }, f.evidence), /结束上限18:00/);
+});
 test("修改粗排只标记本日草稿，不删除已交付日程，也不退回全局粗排", async (t) => {
   const f = await fixture(t);
   await f.save.execute({ title, schedule: { date } }, f.ctx);

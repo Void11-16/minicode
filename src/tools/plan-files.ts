@@ -12,6 +12,11 @@ export function planFileFor(rootDir: string, subDir: string, title: string, exte
   return file;
 }
 
+/** 新行程及需求单共享标题命名空间。 */
+export function withTripTitleLock<T>(rootDir: string, action: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  return withPlanLock(join(rootDir, ".minicode", "brief-titles"), action, signal);
+}
+
 /** 锁覆盖完整读改写过程，也保护同目录的其他 Node 进程。活进程的锁不会超时被抢占。 */
 export async function withPlanLock<T>(file: string, action: () => Promise<T>, signal?: AbortSignal): Promise<T> {
   await ensureDirectory(dirname(file));

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -8,6 +8,7 @@ import {
   BRIEF_TEMPLATE,
   createLoadTravelBriefTool,
   createSaveTravelBriefTool,
+  loadBriefForTitle,
   listTravelBriefs,
   toolRoundsForBrief,
 } from "../src/tools/brief.ts";
@@ -62,6 +63,44 @@ test("save/load 往返：缺省字段给默认值提示", async () => {
   assert.equal(loaded.title, "说走就走");
   assert.equal(loaded.destination, "上海");
   assert.equal(loaded.mustVisit, undefined);
+});
+
+test("同名新需求并行保存分配独立路径，同一操作重放仍指向原需求单", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "minicode-brief-identity-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const save = createSaveTravelBriefTool(root);
+  const first = { workspace: root, newTravelPlan: true, operationId: "first" };
+  const second = { ...first, operationId: "second" };
+  const outputs = await Promise.all([save.execute(BRIEF, first), save.execute(BRIEF, second)]);
+  assert.notEqual(outputs[0], outputs[1]);
+  const briefs = await listTravelBriefs(root);
+  assert.equal(briefs.length, 2);
+  const split = briefs.find((brief) => brief.requestedTitle === BRIEF.title)!;
+  assert.ok(split.title.includes("2026-10-01"));
+  assert.deepEqual(await Promise.all([save.execute(BRIEF, first), save.execute(BRIEF, second)]), outputs);
+  assert.equal((await listTravelBriefs(root)).length, 2);
+  await save.execute({ ...BRIEF, title: split.title, budgetTotalYuan: 1500 }, {
+    workspace: root, brief: { ...split, mustVisit: [], avoid: [] }, operationId: "edit-split",
+  });
+  assert.equal((await loadBriefForTitle(root, split.title))?.requestedTitle, BRIEF.title);
+  assert.equal((await loadBriefForTitle(root, split.title))?.budgetTotalYuan, 1500);
+  assert.equal((await loadBriefForTitle(root, BRIEF.title))?.budgetTotalYuan, 3000);
+});
+
+test("已有同名旧行程时，普通规划的全新日期自动分开，明确编辑仍更新原需求", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "minicode-brief-date-identity-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const save = createSaveTravelBriefTool(root);
+  await save.execute(BRIEF);
+  const old = await loadBriefForTitle(root, BRIEF.title);
+  await mkdir(join(root, "plans"), { recursive: true });
+  await writeFile(join(root, "plans", `${BRIEF.title}.json`), JSON.stringify({ title: BRIEF.title, days: [{ date: BRIEF.startDate }] }));
+  const next = { ...BRIEF, startDate: "2026-11-16", endDate: "2026-11-17" };
+  await save.execute(next, { workspace: root, isolateDisjointTripDates: true });
+  assert.deepEqual(await loadBriefForTitle(root, BRIEF.title), old);
+  assert.ok((await listTravelBriefs(root)).some((brief) => brief.requestedTitle === BRIEF.title && brief.startDate === next.startDate));
+  await save.execute(next, { workspace: root });
+  assert.equal((await loadBriefForTitle(root, BRIEF.title))?.startDate, next.startDate);
 });
 
 test("save_travel_brief: 校验日期格式与正数", async () => {

@@ -86,7 +86,9 @@ export function updateTravelStateFromBrief(
 ): TravelState {
   const state = current ?? emptyTravelState(now);
   const brief = normalizeBrief(args);
-  return brief === undefined ? state : { ...state, brief, updatedAt: now };
+  if (brief === undefined) return state;
+  if (state.itinerary && state.itinerary.title !== brief.title) return { brief, places: [], updatedAt: now };
+  return { ...state, brief, updatedAt: now };
 }
 
 export function updateTravelStateFromItinerary(
@@ -389,6 +391,7 @@ function normalizeBrief(raw: Record<string, unknown>): TravelBriefState | undefi
   return {
     ...optional("durationDays", positiveNumber(raw.durationDays)),
     title,
+    ...optional("requestedTitle", stringValue(raw.requestedTitle)),
     destination,
     ...optional("startDate", stringValue(raw.startDate)),
     ...optional("endDate", stringValue(raw.endDate)),

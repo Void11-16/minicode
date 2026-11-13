@@ -67,7 +67,7 @@ class EndlessToolProvider implements ChatProvider {
 
   async chatWithTools(): Promise<LLMResult> {
     this.toolCalls += 1;
-    return { type: "tool_calls", toolCalls: [{ id: `c${this.toolCalls}`, name: "echo", arguments: "{}" }] };
+    return { type: "tool_calls", toolCalls: [{ id: `c${this.toolCalls}`, name: "echo", arguments: '{"text":"测试结果"}' }] };
   }
 }
 
@@ -309,7 +309,8 @@ test("Agent 工具循环: 工具出错时错误回传给模型", async () => {
   const events: AgentEvent[] = [];
   const reply = await agent.run("测试", { onEvent: (e) => events.push(e) });
 
-  assert.equal(reply, "那个工具不可用，我直接回答");
+  assert.match(reply, /那个工具不可用，我直接回答/);
+  assert.match(reply, /工具不存在: no_such_tool/);
   assert.match(agent.history[2].content, /工具执行失败: 工具不存在/);
   assert.equal(events[1].type, "tool_error");
 });
@@ -408,7 +409,9 @@ test("Agent 工具循环: 历史压缩占位符被拒绝，不会触发真实工
   });
   const agent = new ChatAgent(new Session(), provider, registry);
 
-  assert.equal(await agent.run("继续修改"), "我会重新读取行程后再修改");
+  const reply = await agent.run("继续修改");
+  assert.match(reply, /本轮尚未保存行程/);
+  assert.match(reply, /参数是会话历史压缩占位符/);
   assert.equal(executed, false);
   assert.match(agent.history[2].content, /历史压缩占位符/);
   assert.match(agent.history[2].content, /工具未执行/);
@@ -438,7 +441,8 @@ test("Agent 工具循环: 同一工具错误连续出现时熔断，不空跑到
 
   const reply = await agent.run("测试", { maxToolRounds: 12 });
 
-  assert.equal(reply, "连续失败已熔断，当前行程尚未完成。");
+  assert.match(reply, /连续失败已熔断，当前行程尚未完成。/);
+  assert.match(reply, /同一参数无法执行（重复 5 次）/);
   assert.equal(provider.toolCalls, 5, "第 5 次相同失败后应停止继续请求工具");
   assert.equal(executions, 5);
   assert.match(
@@ -451,16 +455,54 @@ test("Agent 工具循环: 同一工具错误连续出现时熔断，不空跑到
   );
 });
 
-test("Agent 工具循环: 超过最大轮数且收尾失败时抛错（兜底路径）", async () => {
+test("Agent 工具循环: 工具与收尾请求全部失败时保存实际原因", async () => {
   const endless: LLMResponse = { type: "tool_calls", toolCalls: [{ id: "c", name: "echo", arguments: "{}" }] };
   const provider = new ScriptedProvider([endless, endless, endless]);
   const registry = new ToolRegistry();
   registry.register(echoTool());
   const agent = new ChatAgent(new Session(), provider, registry);
 
-  // ScriptedProvider 的 chat 会抛错 → 收尾请求失败 → 回落到原始错误
-  await assert.rejects(() => agent.run("测试", { maxToolRounds: 3 }), /超过 3 轮上限/);
+  const deltas: string[] = [];
+  let checkpoint = "";
+  const reply = await agent.run("测试", {
+    maxToolRounds: 3,
+    onTextDelta: (delta) => deltas.push(delta),
+    onCheckpoint: () => { checkpoint = agent.history.at(-1)?.content ?? ""; },
+  });
+  assert.match(reply, /已用完本轮 3 轮工具额度/);
+  assert.match(reply, /模型未能生成收尾回复/);
+  assert.match(reply, /非法参数 \/text.*重复 3 次/);
+  assert.equal(deltas.join(""), reply);
+  assert.equal(agent.history.at(-1)?.role, "assistant");
+  assert.equal(checkpoint, reply);
 });
+
+for (const [outcome, content, expected] of [
+  ["空回复", " ", /模型返回了空回复/],
+  ["后续请求失败", undefined, /工具执行后的模型请求未完成/],
+  ["模型误称保存成功", "已保存 v14", /本轮未保存新的行程版本/],
+] as const) {
+  test(`Agent 工具循环: ${outcome}时保留最近已保存版本和写入失败原因`, async () => {
+    const failedSave: LLMResponse = { type: "tool_calls", toolCalls: [{ id: "bad-save", name: "save_itinerary", arguments: "{}" }] };
+    const provider = new ScriptedProvider(content === undefined ? [failedSave] : [failedSave, { type: "text", content }]);
+    const session = new Session();
+    session.setTravelState({ updatedAt: 1, places: [], itinerary: { title: "北京三日游", revision: 13, dayCount: 3, itemCount: 12, issues: [] } });
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "save_itinerary", description: "测试写入", parameters: { type: "object" },
+      execute: async () => { throw new Error("[DAY_SCHEDULE_CONFLICT] 返店需要 42 分钟，当前仅剩 3 分钟"); },
+    });
+    const agent = new ChatAgent(session, provider, registry);
+
+    const reply = await agent.run("在第二天加一个景点");
+    assert.match(reply, /本轮未保存新的行程版本。最近已保存「北京三日游」 v13/);
+    assert.match(reply, /返店需要 42 分钟，当前仅剩 3 分钟/);
+    assert.match(reply, /请告诉我新增景点的优先顺序/);
+    assert.match(reply, expected);
+    assert.doesNotMatch(reply, /已保存 v14/);
+    assert.equal(session.history.at(-1)?.content, reply);
+  });
+}
 
 test("Agent 工具循环: 打满轮次后自动收尾给出最终回答", async () => {
   const provider = new EndlessToolProvider("收尾总结：整合已获得的数据如下…");
@@ -527,7 +569,7 @@ test("Agent 工具循环: 异步动态预算生效，onToolRound 统计模型轮
 });
 
 test("Agent 工具循环: 剩余轮数不足时注入收尾提醒（不写入会话历史）", async () => {
-  const endless: LLMResponse = { type: "tool_calls", toolCalls: [{ id: "c", name: "echo", arguments: "{}" }] };
+  const endless: LLMResponse = { type: "tool_calls", toolCalls: [{ id: "c", name: "echo", arguments: '{"text":"测试结果"}' }] };
   const provider = new ScriptedProvider([
     endless,
     endless,
@@ -636,7 +678,8 @@ test("Agent 权限: 需确认工具被拒绝时不执行，拒绝原因回传模
     },
   });
 
-  assert.equal(reply, "好的，那我不写文件了");
+  assert.match(reply, /好的，那我不写文件了/);
+  assert.match(reply, /用户拒绝授权执行此工具/);
   assert.equal(executed, false, "被拒绝的工具不应执行");
   assert.deepEqual(permissionRequests, [{ tool: "write_file", message: "写入文件 x.md" }]);
   assert.match(agent.history[2].content, /用户拒绝授权/);

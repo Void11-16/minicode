@@ -26,7 +26,7 @@ const timeSchema = { type: "string", pattern: "^(?:[01]\\d|2[0-3]):[0-5]\\d$" };
 const modeSchema = { type: "string", enum: ["walking", "transit", "driving"] };
 export const dayScheduleSchema = {
   type: "object", additionalProperties: false, required: ["date"],
-  description: "程序生成单日时间线。visits仅提供景点顺序、可选时长和固定开始时刻；省略则采用本日outline。自动排交通、午餐和等待。普通游玩日未填酒店起终点时，沿用行程已选的唯一酒店。未知路线为估算，真实路线查询后用repair_routes重排；超出时间窗则拒绝，保留旧日程。",
+  description: "程序生成单日时间线。visits提供景点顺序、可选时长和固定开始时刻，省略则采用本日outline。自动排交通、午餐和等待。普通游玩日未填酒店起终点时，沿用行程已选的唯一酒店。未知路线为估算，真实路线查询后用repair_routes重排。参考节奏时间可顺延，超出明确时间窗则拒绝并保留旧日程。",
   properties: {
     date: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$" },
     visits: { type: "array", maxItems: 20, items: { type: "object", additionalProperties: false, required: ["name"], properties: {
@@ -82,7 +82,8 @@ export function buildDaySchedule(plan: Itinerary, input: DayScheduleInput, evide
   const hardEnds = [availableEnd, ...windows.map((w) => w.end)].filter((time): time is string => !!time);
   const defaultStart = departure && visits.length === 0 && !hardEnds.some((time) => time <= "12:00") ? "12:00" : c?.day_start ?? "10:00";
   const start = Math.max(...[old?.available_start, ...windows.map((w) => w.start)].filter((t): t is string => !!t).map(minutes), minutes(input.start ?? defaultStart));
-  const end = Math.min(...hardEnds.map(minutes), minutes(input.end ?? c?.day_end ?? "18:00"));
+  // day_end 只用于节奏评分。路线耗时增加时可以自然顺延返店，硬边界仍由已知窗口控制。
+  const end = Math.min(...hardEnds.map(minutes), minutes(input.end ?? "23:59"));
   if (start >= end) fail("没有可用时间窗");
   if (!visits.length && (!departure || !station || !(input.start_place ?? previousStay))) return fail("缺少本日景点；仅返程日可以用实际出发地点和return_station安排交通");
   const names = new Set<string>();

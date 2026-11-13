@@ -7,6 +7,49 @@ import { startWebServer } from "../src/web/server.ts";
 import { createSaveTravelBriefTool } from "../src/tools/brief.ts";
 import { qualitySourceSignature, validateItinerary } from "../src/tools/itinerary-validator.ts";
 import { parseItinerary } from "../src/tools/itinerary-schema.ts";
+import type { ChatProvider, LLMResult } from "../src/llm/provider.ts";
+
+test("Web 同名新行程独立保存，地图可分别读取新旧行程", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "minicode-web-trip-identity-"));
+  const title = "北京三日游";
+  const oldDates = ["2026-10-21", "2026-10-22", "2026-10-23"];
+  const dates = ["2026-11-16", "2026-11-17", "2026-11-18"];
+  const places = ["天安门广场", "故宫博物院", "景山公园"];
+  const days = (list: string[]) => list.map((date, index) => ({ date, items: [{ type: "visit", name: places[index], time: "10:00", end_time: "13:00" }] }));
+  const old = JSON.stringify({ title, itinerary_id: "old-plan", days: days(oldDates) });
+  const oldFile = join(root, "plans", `${title}.json`);
+  const oldBriefFile = join(root, "plans", "briefs", `${title}.json`);
+  const oldBrief = JSON.stringify({ title, destination: "北京", startDate: oldDates[0], endDate: oldDates.at(-1) });
+  await mkdir(join(root, "plans", "briefs"), { recursive: true });
+  await writeFile(oldFile, old);
+  await writeFile(oldBriefFile, oldBrief);
+  const call = (id: string, name: string, args: object): LLMResult => ({ type: "tool_calls", toolCalls: [{ id, name, arguments: JSON.stringify(args) }] });
+  const script = [
+    call("blocked", "save_itinerary", { title, merge: false, days: days(dates) }),
+    call("brief", "save_travel_brief", { title, destination: "北京", startDate: dates[0], endDate: dates.at(-1), requireAccommodation: false }),
+    call("outline", "save_itinerary", { title, outline: dates.map((date, index) => ({ date, visits: [{ name: places[index] }] })) }),
+    ...dates.map((date, index) => call(`day-${index}`, "save_itinerary", { title, schedule: { date, visits: [{ name: places[index], duration_min: 180 }] } })),
+  ];
+  const provider: ChatProvider = { name: "same-title", chat: async () => "已处理", chatWithTools: async () => script.shift() ?? { type: "text", content: "已处理" } };
+  const server = await startWebServer({ rootDir: root, auth: false, port: 0, providerOverride: provider, maxToolRounds: 24 });
+  t.after(async () => { await server.close(); await rm(root, { recursive: true, force: true }); });
+  const base = `http://127.0.0.1:${server.port}`;
+  const run = await fetch(`${base}/api/chat`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: "北京三天其他默认，替我规划" }), signal: AbortSignal.timeout(15_000) });
+  assert.equal(run.status, 200);
+  const stream = await run.text();
+  assert.match(stream, /ITINERARY_TITLE_OCCUPIED/);
+  const list = await (await fetch(`${base}/api/plans`)).json() as { plans: { title: string }[] };
+  assert.equal(list.plans.length, 2, stream.slice(-1800));
+  const newTitle = list.plans.find((plan) => plan.title !== title)!.title;
+  assert.match(newTitle, /2026-11-16/);
+  const [older, newer] = await Promise.all([title, newTitle].map(async (name) => (await fetch(`${base}/api/plans/${encodeURIComponent(name)}`)).json()));
+  assert.equal(older.itinerary_id, "old-plan");
+  assert.ok(newer.itinerary_id && newer.itinerary_id !== older.itinerary_id);
+  assert.deepEqual(older.days.map((day: { date: string }) => day.date), oldDates);
+  assert.deepEqual(newer.days.map((day: { date: string }) => day.date), dates);
+  assert.equal(await readFile(oldFile, "utf8"), old);
+  assert.equal(await readFile(oldBriefFile, "utf8"), oldBrief);
+});
 
 test("Web 列表不展示旧公式或旧行程内容对应的评分；重算只调用本地规则", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "minicode-quality-report-"));

@@ -6,7 +6,7 @@ import type { ToolExecutionState } from "../core/execution-state.ts";
 import { findOperation, recoverManagedOperations } from "../storage/managed-operation.ts";
 import { parseItinerary } from "../tools/itinerary-schema.ts";
 import { validateItinerary } from "../tools/itinerary-validator.ts";
-import { updateTravelStateFromSnapshot } from "../core/travel-state.ts";
+import { updateTravelStateFromBrief, updateTravelStateFromSnapshot } from "../core/travel-state.ts";
 
 /**
  * 恢复消息协议与提交事实，不恢复任意指令的执行现场。
@@ -36,6 +36,10 @@ export async function recoverInterruptedToolCalls(session: Session, tools: ToolR
       if (record?.tool === "save_itinerary" && state.effect_status === "committed") {
         try { const plan = parseItinerary(JSON.parse(await readFile(record.resource, "utf8"))); session.setTravelState(updateTravelStateFromSnapshot(session.travelState, { itinerary: plan, report: validateItinerary(plan), file: record.resource })); }
         catch { /* 主文件可能后来被人工移除；回执保留，不用旧快照覆盖当前数据。 */ }
+      }
+      if (record?.tool === "save_travel_brief" && state.effect_status === "committed") {
+        try { session.setTravelState(updateTravelStateFromBrief(session.travelState, JSON.parse(await readFile(record.resource, "utf8")))); }
+        catch { /* 需求单可能后来被移除；保留提交回执。 */ }
       }
       recovered = true;
     }

@@ -23,7 +23,7 @@ import { convertPoint } from "../tools/coordinates.ts";
 import type { ItinerarySnapshot } from "../tools/tool.ts";
 import { updateTravelStateFromSnapshot } from "../core/travel-state.ts";
 import { Session } from "../core/session.ts";
-import { ChatAgent, TurnAbortedError, type BudgetExhaustedDecision } from "../agent/agent.ts";
+import { ChatAgent, describeTurnError, type BudgetExhaustedDecision } from "../agent/agent.ts";
 import { composeSystemPrompt, readWorkspaceRules } from "../agent/prompt.ts";
 import { createProvider, createProviderFromProfile } from "../llm/factory.ts";
 import type { AppConfig } from "../config/config.ts";
@@ -365,7 +365,7 @@ async function startSingleUserWebServer(options: WebServerOptions): Promise<Runn
       onTurnEnd: (sessionId, reply) => {
         const agent = runtime.getAgent(sessionId);
         if (agent !== undefined) {
-          // reply 事件：非流式 Provider 的兜底显示（流式时前端已有 delta，会忽略）
+          // reply 携带最终持久化的文本，前端用它校准流式预览。
           write(sessionId, { type: "reply", text: reply });
           write(sessionId, { type: "usage", text: sessionUsage(agent.session).usageText });
           void sessionService.persist(agent.session);
@@ -375,7 +375,15 @@ async function startSingleUserWebServer(options: WebServerOptions): Promise<Runn
         write(sessionId, { type: "aborted", text: "已中断当前轮，会话状态已保留" });
       },
       onTurnError: (sessionId, error) => {
-        write(sessionId, { type: "error", message: error instanceof Error ? error.message : String(error) });
+        const reason = describeTurnError(error);
+        const reply = `本轮执行中断。原因是 ${reason}\n\n可以先查看当前已保存的结果，再重新发送请求。`;
+        const agent = runtime.getAgent(sessionId);
+        if (agent) {
+          agent.session.add("assistant", reply);
+          void sessionService.persist(agent.session).catch(() => {});
+        }
+        write(sessionId, { type: "reply", text: reply });
+        write(sessionId, { type: "error", message: reason });
       },
     };
   }
@@ -1357,14 +1365,10 @@ async function startSingleUserWebServer(options: WebServerOptions): Promise<Runn
         while (runtime.hasActiveTurn(turnSession.id)) {
           await new Promise((resolve) => setTimeout(resolve, 120));
         }
-        streams.get(turnSession.id)?.({ type: "done" });
-      } catch (error) {
-        // 中断已由 onTurnAborted 通知，不重复报错
-        if (!(error instanceof TurnAbortedError)) {
-          streams.get(turnSession.id)?.({ type: "error", message: error instanceof Error ? error.message : String(error) });
-        }
-        streams.get(turnSession.id)?.({ type: "done" });
+      } catch {
+        // Runtime 已发送失败回复或主动中断事件。
       } finally {
+        streams.get(turnSession.id)?.({ type: "done" });
         streams.delete(turnSession.id);
         await sessionService.persist(turnSession).catch(() => {});
         res.end();

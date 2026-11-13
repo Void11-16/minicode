@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { ChatAgent } from "../src/agent/agent.ts";
 import { Session } from "../src/core/session.ts";
 import { updateTravelStateFromBrief, updateTravelStateFromSnapshot } from "../src/core/travel-state.ts";
-import { activeDayTask, blockDayTask, selectDayTask, recordDayTaskRound, dayTaskScope, DAY_TASK_ROUNDS, DAY_TASK_CALLS } from "../src/core/day-tasks.ts";
+import { activeDayTask, blockDayTask, selectDayTask, extendDayTaskAttempts, recordDayTaskRound, dayTaskScope, DAY_TASK_ROUNDS, DAY_TASK_CALLS } from "../src/core/day-tasks.ts";
 import type { CumulativeToolBudget } from "../src/core/execution-budget.ts";
 import { createSaveTravelBriefTool } from "../src/tools/brief.ts";
 import { createSaveItineraryTool } from "../src/tools/itinerary.ts";
@@ -48,6 +48,13 @@ test("单日队列先遍历未尝试日期，再重试失败日期；各日轮�
   f.session.setTravelState(state); const restored = Session.fromData(f.session.toData()).travelState!;
   assert.deepEqual(restored.itinerary?.dayTasks, state.itinerary?.dayTasks);
   assert.equal(b.rounds, 20); assert.equal(b.calls, 50); assert.equal(b.tokens, 5000);
+  extendDayTaskAttempts(restored, b);
+  const retried = selectDayTask(restored, b);
+  assert.equal(retried.task?.date, dates[1]);
+  assert.equal(retried.task?.attempts, 3);
+  assert.equal(retried.task?.attempt_rounds, 0);
+  assert.equal(retried.state.itinerary?.dayTasks?.find((task) => task.date === dates[0])?.status, "saved");
+  assert.deepEqual([b.rounds, b.calls, b.tokens], [20, 50, 5000]);
 });
 
 test("保存层锁定旧日：整份覆盖、改名另存、旧日编辑和移动不能绕过，真实重复仍拒绝", async (t) => {
@@ -107,6 +114,35 @@ test("只给文字收尾也会切换日期，两次失败后有界停止，不�
   assert.deepEqual(seen, [dates[1], dates[2], dates[1], dates[2]]);
   assert.equal((await f.load()).days.length, 1); assert.equal(b.rounds, 4); assert.equal(b.calls, 0);
   assert.match(reply, /未完成|待处理/); assert.ok(!reply.includes("完整行程已完成"));
+});
+
+test("到达总轮次上限时，续期重新开放已耗尽的日期并落盘", async (t) => {
+  const f = await fixture(t, [day(0)], 2), b = budget();
+  f.session.setTravelState(updateTravelStateFromBrief(f.session.travelState, { title: f.title, destination: "北京", startDate: dates[0], durationDays: 2, requireAccommodation: false }));
+  let limit = 2;
+  const attempts: number[] = [];
+  const provider: ChatProvider = { name: "resume-exhausted-date", chat: async () => "不应调用", chatWithTools: async () => {
+    const task = activeDayTask(f.session.travelState)!;
+    assert.equal(task.date, dates[1]);
+    attempts.push(task.attempts);
+    if (task.attempts < 3) return { type: "text", content: "暂未修复" };
+    return toolCall("save-after-extension", { title: f.title, schedule: { date: dates[1], visits: [{ name: names[1], duration_min: 420 }] } });
+  } };
+  const reply = await new ChatAgent(f.session, provider, f.registry, f.root).run("继续补齐缺失日期", {
+    cumulativeBudget: b,
+    maxToolRounds: () => limit,
+    onBudgetExhausted: (rounds) => {
+      assert.equal(rounds, 2);
+      limit += 15;
+      return true;
+    },
+  });
+  assert.deepEqual(attempts, [1, 2, 3]);
+  assert.equal(b.rounds, 3);
+  const plan = await f.load();
+  assert.deepEqual(plan.days[0], f.plan.days[0]);
+  assert.equal(plan.days[1]?.date, dates[1]);
+  assert.match(reply, /追加了 15 轮，实际使用 1 轮/);
 });
 
 test("单日软额度耗尽后切换日期，硬额度耗尽仍停止；用户指定修改可编辑已保存日期", async (t) => {

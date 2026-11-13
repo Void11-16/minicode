@@ -7,6 +7,9 @@ import type { PromptMessage } from "./message.ts";
 import type { ToolDefinition } from "../llm/provider.ts";
 import { requiredVisitCoverage, requiredVisitMatches } from "../tools/required-visits.ts";
 import { ToolValidationError } from "./tool-error.ts";
+import { sameVisitName } from "../tools/required-visits.ts";
+import { itemEndMinutes } from "../tools/itinerary-timeline.ts";
+import { timeToMinutes } from "../tools/itinerary-schema.ts";
 
 export const DAY_TASK_MAX_ATTEMPTS = 2;
 export const DAY_TASK_ROUNDS = 8;
@@ -43,7 +46,11 @@ export interface DayPlanningScope {
   readonly date: string;
   readonly locked_dates: readonly string[];
   readonly day_number?: number;
+  readonly edit?: "append_visit" | "update";
+  readonly revision?: number;
 }
+
+const ADD_VISIT = /(?:追加|补上|补充|加上|加(?:个|一个|几个|一处|些|点|入|安排)|增加|多安排|再(?:安排|排|去|加)).{0,18}(?:景点|地方|去处|逛|参观|游览|活动|公园|博物馆|长城)|(?:给|在|把)?第\s*[一二三四五六七八九十两\d]+\s*天.{0,30}(?:追加|加上|加入|增加|多安排|再加|再安排)/;
 
 export function taskDates(state: TravelState): string[] {
   const brief = state.brief, plan = state.itinerary;
@@ -107,16 +114,29 @@ export function normalizeDayTasks(raw: unknown): DayTask[] {
 export function setDayTasks(state: TravelState, tasks: readonly DayTask[]): TravelState {
   return state.itinerary ? { ...state, itinerary: { ...state.itinerary, dayTasks: tasks } } : state;
 }
+
+const taskBudgetKey = (state: TravelState, task: DayTask) => `${state.itinerary?.itineraryId ?? state.itinerary?.title}:${task.layer === "required" ? task.goal_id : task.date}:${task.layer ?? "legacy"}:${task.requirement_version ?? ""}`;
+const taskAttemptLimit = (task: DayTask) => task.layer === "budget" ? 1 : DAY_TASK_MAX_ATTEMPTS;
+
+/** 已授权续期可给未解决且已耗尽的日期任务一次新尝试。已完成项和历史计数保留。 */
+export function extendDayTaskAttempts(state: TravelState, budget: CumulativeToolBudget): void {
+  const baselines = budget.dayTaskAttemptBaselines;
+  if (!baselines || budget.blockedKind === "dependency") return;
+  for (const task of reconcileDayTasks(state)) {
+    if (task.status !== "blocked" && task.status !== "pending") continue;
+    const key = taskBudgetKey(state, task), baseline = baselines.get(key);
+    if (baseline !== undefined && task.attempts >= baseline + taskAttemptLimit(task)) baselines.set(key, task.attempts - taskAttemptLimit(task) + 1);
+  }
+}
 /** 单日软额度只影响该日，先遍历所有未尝试日期，再重试失败日；硬总预算始终累计。 */
 export function selectDayTask(state: TravelState, budget: CumulativeToolBudget): { state: TravelState; task?: DayTask } {
   let tasks = reconcileDayTasks(state);
-  const taskKey = (task: DayTask) => `${state.itinerary?.itineraryId ?? state.itinerary?.title}:${task.layer === "required" ? task.goal_id : task.date}:${task.layer ?? "legacy"}:${task.requirement_version ?? ""}`;
   budget.dayTaskAttemptBaselines ??= new Map();
   for (const task of tasks) {
-    const key = taskKey(task);
+    const key = taskBudgetKey(state, task);
     if (!budget.dayTaskAttemptBaselines.has(key)) budget.dayTaskAttemptBaselines.set(key, task.attempts - (task.status === "active" ? 1 : 0));
   }
-  const allowed = (task: DayTask) => task.attempts < budget.dayTaskAttemptBaselines!.get(taskKey(task))! + (task.layer === "budget" ? 1 : DAY_TASK_MAX_ATTEMPTS);
+  const allowed = (task: DayTask) => task.attempts < budget.dayTaskAttemptBaselines!.get(taskBudgetKey(state, task))! + taskAttemptLimit(task);
   const verifyPending = tasks.some((t) => t.layer === "feasibility" && t.status !== "saved" && (t.status === "active" || allowed(t)));
   const requiredPending = tasks.some((t) => t.layer === "required" && t.status !== "saved" && (t.status === "active" || allowed(t)));
   const missingSchedule = (t: DayTask) => t.layer === "schedule" && state.itinerary?.planningLayers?.days.find((day) => day.date === t.date)?.schedule === "missing";
@@ -150,7 +170,31 @@ export function dayTaskScope(state: TravelState | undefined, date?: string): Day
 export function isExplicitPlanEdit(input: string): boolean {
   if (/评测自动续跑/.test(input)) return false;
   if (/重新规划|重做行程|重新生成/.test(input)) return true;
-  return /^(?:请|帮我|麻烦)?(?:把|将).{0,40}(?:改|换成|删除|调整|替换)/.test(input) || /修改需求|更新需求|更改需求/.test(input) || /^(?:请|帮我|麻烦|把|将|我想|我需要)?\s*(?:修改|修复|修订|重排|调整|替换|删除|调换)/.test(input) || /第\s*[一二三四五六七八九十\d]+\s*天.{0,20}(?:改为|换成|调整|删除|修改)/.test(input);
+  return ADD_VISIT.test(input) || /^(?:请|帮我|麻烦)?(?:把|将).{0,40}(?:改|换成|删除|调整|替换|缩短)/.test(input) || /修改需求|更新需求|更改需求/.test(input) || /^(?:请|帮我|麻烦|把|将|我想|我需要)?\s*(?:修改|修复|修订|重排|调整|替换|删除|调换|缩短)/.test(input) || /第\s*[一二三四五六七八九十两\d]+\s*天.{0,20}(?:改为|换成|调整|删除|修改|缩短)/.test(input);
+}
+
+export function requestedTravelDays(input: string): number[] {
+  const digits: Record<string, number> = { 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+  return [...new Set(Array.from(input.matchAll(/(?:第\s*([一二三四五六七八九十两\d]{1,3})\s*天|\bday\s*(\d+))/gi), ([, chinese, numeric]) => {
+    const label = chinese ?? numeric ?? "";
+    const [tens, ones] = label.split("十");
+    return label.includes("十") ? (digits[tens!] ?? 1) * 10 + (digits[ones!] ?? 0) : digits[label] ?? Number(label);
+  }))].filter((day) => day >= 1 && day <= 90);
+}
+
+export function localDayEditScope(state: TravelState | undefined, input: string): DayPlanningScope | undefined {
+  const plan = state?.itinerary;
+  if (!state || !plan || !isExplicitPlanEdit(input) || /重新规划|重做行程|重新生成|修改需求|更新需求|更改需求/.test(input)) return undefined;
+  const dates = taskDates(state);
+  const requested = requestedTravelDays(input);
+  const literal = [...input.matchAll(/\b\d{4}-\d{2}-\d{2}\b/g)].map(([date]) => date);
+  const candidates = new Set([...literal, ...requested.map((day) => dates[day - 1] ?? plan.daySummaries?.find((entry) => entry.day === day)?.date)]);
+  const date = candidates.size === 1 ? [...candidates][0] : undefined;
+  if (!date || !dates.includes(date) && !plan.daySummaries?.some((entry) => entry.date === date)) return undefined;
+  const append = ADD_VISIT.test(input) && !/缩短|压缩|缩减|减少|延长|删掉|删除|去掉|取消|替换|换成|调换|改为|推迟|提前|重排/.test(input);
+  return { title: plan.title, date, layer: "schedule", edit: append ? "append_visit" : "update", revision: plan.revision,
+    day_number: dates.includes(date) ? dates.indexOf(date) + 1 : plan.daySummaries?.find((entry) => entry.date === date)?.day,
+    locked_dates: (plan.daySummaries ?? []).flatMap((entry) => entry.date && entry.date !== date ? [entry.date] : []) };
 }
 /** 仅发送当前日期的工作历史；原始需求由宿主提供，旧日期工具过程不再送模型。 */
 export function dayTaskHistory(history: readonly PromptMessage[], boundary: string, requests: readonly PromptMessage[]): PromptMessage[] {
@@ -181,8 +225,13 @@ export function dayTaskDefinitions(definitions: readonly ToolDefinition[], scope
         ...(schedule ? { schedule: { ...schedule, properties: { ...schedule.properties, date: { type: "string", enum: [scope.date] } } } } : {}),
         days: { ...days, minItems: 1, maxItems: 1, items: { ...item, required: ["date", "items"], properties: { ...item?.properties, date: { type: "string", enum: [scope.date] } } } },
       }, required: ["title"] } };
-    return { ...tool, description: `优先用schedule生成${scope.date}时间路线，模型只给景点顺序/时长/出行方式，程序计算时间与交通占位；或局部修复现有日程；日内P0/P1未清零仅算草稿，仍可局部修改。其他日期保持。需要换景点时提交当前日期outline，已有日程保留，替代方案校验通过后提交。`, parameters: { ...tool.parameters, additionalProperties: false,
-      properties: { ...safeDefaults, title: properties.title, ...(schedule ? { schedule: { ...schedule, properties: { ...schedule.properties, date: { type: "string", enum: [scope.date] } } } } : {}), outline: scopedOutline, days: { ...days, minItems: 1, maxItems: 1, items: { ...item, properties: { ...item?.properties, date: { type: "string", enum: [scope.date] } } } }, edits: properties.edits, repair_routes: { type: "array", maxItems: 1, items: { type: "string", enum: [scope.date] } }, expected_revision: properties.expected_revision }, required: ["title"],
+    return { ...tool, description: scope.edit === "append_visit"
+      ? `只给${scope.date}追加景点。schedule.visits按顺序提供旧景点和新增景点，旧景点省略duration_min以继承原时长，保留固定预约。若候选放不下，试另一个候选；有取舍时询问用户。`
+      : scope.edit ? `只修改${scope.date}的用户指定内容。保留其他日期，用schedule、days或edits保存实际修改。`
+      : `优先用schedule生成${scope.date}时间路线，模型只给景点顺序/时长/出行方式，程序计算时间与交通占位；或局部修复现有日程；日内P0/P1未清零仅算草稿，仍可局部修改。其他日期保持。需要换景点时提交当前日期outline，已有日程保留，替代方案校验通过后提交。`, parameters: { ...tool.parameters, additionalProperties: false,
+      properties: { ...safeDefaults, title: scope.edit ? { ...properties.title as object, enum: [scope.title] } : properties.title, ...(schedule ? { schedule: { ...schedule, properties: { ...schedule.properties, date: { type: "string", enum: [scope.date] } } } } : {}),
+        ...(scope.edit ? {} : { outline: scopedOutline }), days: { ...days, minItems: 1, maxItems: 1, items: { ...item, ...(scope.edit ? { required: ["date", "items"] } : {}), properties: { ...item?.properties, date: { type: "string", enum: [scope.date] } } } },
+        ...(scope.edit === "append_visit" ? {} : { edits: properties.edits }), repair_routes: { type: "array", maxItems: 1, items: { type: "string", enum: [scope.date] } }, expected_revision: properties.expected_revision }, required: ["title"],
     } };
   });
 }
@@ -227,6 +276,38 @@ export function assertDayTaskSave(saved: Itinerary | null, plan: Itinerary, scop
     if (JSON.stringify(before?.visits.map((visit) => visit.name)) !== JSON.stringify(patch.visits?.map((visit) => visit.name))) fail(`不能改动其他日期${patch.date}的基础安排`);
   }
   for (const date of scope.locked_dates) if (JSON.stringify(saved?.outline?.find((day) => day.date === date)) !== JSON.stringify(plan.outline?.find((day) => day.date === date))) fail(`不能改动${date}的景点预留`);
+}
+
+/** 比较真实保存前后的日程，schedule、days 和路线修订都不能绕过追加保护。 */
+export function assertVisitAddition(saved: Itinerary, plan: Itinerary, date: string, routeRepair: boolean): void {
+  const before = saved.days.find((day) => day.date === date);
+  const after = plan.days.find((day) => day.date === date);
+  const original = before?.items.filter((item) => item.type === "visit") ?? [];
+  const next = after?.items.filter((item) => item.type === "visit") ?? [];
+  const city = plan.constraints?.destination;
+  const fail = (message: string): never => { throw new ToolValidationError([{ code: "VISIT_ADDITION_CONFLICT", path: "days", date, message,
+    hint: "保留已安排景点和原时长、顺序、固定预约及住宿；尝试更近或更短的新增候选。需要改动既有安排时请先请用户确认。" }]); };
+  const duration = (item: ItineraryDay["items"][number]) => item.time && itemEndMinutes(item) !== undefined
+    ? itemEndMinutes(item)! - timeToMinutes(item.time) : item.planned_duration_min;
+  let previousIndex = -1;
+  for (const item of original) {
+    const index = next.findIndex((entry) => sameVisitName(item.name, entry.name, city));
+    if (index < 0) fail(`追加景点会移除已安排的「${item.name}」。`);
+    if (index <= previousIndex) fail(`追加景点会改动「${item.name}」的既有游览顺序。`);
+    const was = duration(item), willBe = duration(next[index]!);
+    if (was !== undefined && willBe !== was) fail(`追加景点需要把「${item.name}」的游览时长从 ${was} 分钟改为 ${willBe === undefined ? "待定" : `${willBe} 分钟`}，请先确认。`);
+    previousIndex = index;
+  }
+  for (const item of before?.items.filter((entry) => entry.time_locked) ?? []) {
+    if (!after?.items.some((entry) => entry.type === item.type && entry.name === item.name && entry.time_locked && entry.time === item.time && duration(entry) === duration(item))) {
+      fail(`追加景点会改动「${item.name}」的固定安排 ${item.time ?? ""}，请先确认。`);
+    }
+  }
+  for (const item of before?.items.filter((entry) => entry.type === "accommodation") ?? []) {
+    if (!after?.items.some((entry) => entry.type === "accommodation" && entry.name === item.name && entry.stay_nights === item.stay_nights)) fail(`追加景点会改动住宿「${item.name}」，请先确认。`);
+  }
+  if (before?.schedule_input?.return_station && after?.schedule_input?.return_station !== before.schedule_input.return_station) fail("追加景点会改动返程站点，请先确认。");
+  if (!routeRepair && !next.some((item) => !original.some((entry) => sameVisitName(item.name, entry.name, city)))) fail("本次提交没有新增景点。");
 }
 
 export function setDayTaskDraft(state: TravelState, date: string, path: string): TravelState {

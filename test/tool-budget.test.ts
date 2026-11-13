@@ -126,6 +126,7 @@ test("工具预算评估: 重新校验已保存行程，区分可修复项与外
   assert.match(guidance, /用户已授权追加工具轮次/);
   assert.match(guidance, /当前已保存版本「杭州一日游」评分 93\/100/);
   assert.match(guidance, /timeline-gap/);
+  assert.equal(assessment.repair.items[0]?.level, "P1");
   assert.doesNotMatch(guidance, /unverified-coordinates/);
 });
 

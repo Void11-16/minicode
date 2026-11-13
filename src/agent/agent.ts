@@ -1,11 +1,11 @@
 import { loadBriefForTitle } from "../tools/brief.ts";
-import { activeDayTask, taskDates, setDayTaskDraft, selectDayTask, blockDayTask, recordDayTaskRound, dayTaskScope, dayTaskHistory, dayTaskDefinitions, dayTaskCallIssue, isExplicitPlanEdit, dayTaskRounds, dayTaskCalls } from "../core/day-tasks.ts";
+import { activeDayTask, taskDates, setDayTaskDraft, selectDayTask, extendDayTaskAttempts, blockDayTask, recordDayTaskRound, dayTaskScope, dayTaskHistory, dayTaskDefinitions, dayTaskCallIssue, isExplicitPlanEdit, dayTaskRounds, dayTaskCalls } from "../core/day-tasks.ts";
 import { evidenceId } from "../tools/travel-evidence.ts";
 import { executionStateOf, type ToolExecutionState } from "../core/execution-state.ts";
 import { recoverInterruptedToolCalls } from "./tool-recovery.ts";
 import { repeatVisitAllowed } from "../tools/repeat-visit-policy.ts";
 import { normalizeVisitInfoArgs, normalizeReviewArgs, queryKeyArgs } from "../tools/travel-query.ts";
-import { ToolDiagnostics, type ToolErrorCategory } from "../core/tool-diagnostics.ts";
+import { ToolDiagnostics, toolErrorCategory, type ToolErrorCategory } from "../core/tool-diagnostics.ts";
 import { ToolValidationError, toolErrorOutput, toolErrorPayload, type ToolValidationIssue } from "../core/tool-error.ts";
 import { mkdir, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -141,6 +141,7 @@ const BUDGET_EXTENSION_LIMIT = 20;
 /** 相同工具错误连续出现后注入恢复提示，再连续出现则熔断当前工具循环 */
 const REPEATED_FAILURE_GUIDANCE_AT = 2;
 const REPEATED_FAILURE_CIRCUIT_AT = 5;
+const EMPTY_MODEL_REPLY = "模型返回了空回复。可以重新发送本次请求。";
 
 /** 用户主动中断当前轮（/stop）时抛出 */
 export class TurnAbortedError extends Error {
@@ -148,6 +149,18 @@ export class TurnAbortedError extends Error {
     super("已中断当前轮");
     this.name = "TurnAbortedError";
   }
+}
+
+export function describeTurnError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const status = message.match(/^(?:LLM 返回|HTTP)\s+(\d{3})\b/)?.[1];
+  if (status === "401" || status === "403") return "模型服务拒绝了访问，请检查当前模型配置和密钥。";
+  if (status === "429") return "模型服务限制了请求频率或额度（HTTP 429），可以稍后再试。";
+  if (status) return `模型服务返回 HTTP ${status}。`;
+  const category = toolErrorCategory(error);
+  if (category === "timeout") return "服务请求超时，可以稍后重试。";
+  if (category === "network") return "服务连接中断，可以在网络恢复后重试。";
+  return message.trim().split("\n", 1)[0]?.slice(0, 240) || "本轮执行异常，服务未返回具体原因。";
 }
 
 /**
@@ -204,7 +217,8 @@ export class ChatAgent {
     const history = await this.preparePlainHistory([], options);
     const measured = this.provider.chatWithUsage === undefined ? undefined : await this.provider.chatWithUsage(history, this.currentController?.signal);
     if (measured?.usage !== undefined) { this.sessionValue.addUsage(measured.usage); this.sessionValue.completeRequestContext(measured.usage); }
-    const reply = measured?.type === "text" ? measured.content : await this.provider.chat(history);
+    const content = measured?.type === "text" ? measured.content : await this.provider.chat(history);
+    const reply = content.trim() ? content : EMPTY_MODEL_REPLY;
     this.sessionValue.add("assistant", reply);
     return reply;
   }
@@ -289,6 +303,58 @@ export class ChatAgent {
 
     const controller = new AbortController();
     this.currentController = controller;
+    const failures = new Map<string, { tool: string; reason: string; count: number }>();
+    let hadSuccessfulToolCall = false;
+    let committedPlanThisRun = false;
+    let failedSaveThisRun = false;
+    let streamedResponse = "";
+    const recordFailure = (tool: string, error: string) => {
+      const reason = error.trim().split("\n").slice(0, 2).join(" ").slice(0, 320) || "工具未返回具体原因";
+      const key = toolFailureKey(tool, reason);
+      const count = (failures.get(key)?.count ?? 0) + 1;
+      failures.delete(key);
+      failures.set(key, { tool, reason, count });
+      if (failures.size > 20) failures.delete(failures.keys().next().value!);
+      if (tool === "save_itinerary") failedSaveThisRun = true;
+    };
+    const failureDetails = () => {
+      if (failures.size === 0) return undefined;
+      const latest = [...failures.values()].reverse();
+      const lastSaveFailure = latest.find((failure) => failure.tool === "save_itinerary");
+      const shown = lastSaveFailure ? [lastSaveFailure, ...latest.filter((failure) => failure !== lastSaveFailure).slice(0, 3)] : latest.slice(0, 4);
+      return [
+        hadSuccessfulToolCall ? "本轮遇到的工具问题" : "本轮工具未取得可用结果，原因如下",
+        "",
+        ...shown.map(({ tool, reason, count }) => `- \`${tool}\` ${reason}${count > 1 ? `（重复 ${count} 次）` : ""}`),
+      ].join("\n");
+    };
+    const nextStep = () => {
+      const plan = this.sessionValue.travelState?.itinerary;
+      if (!failedSaveThisRun || cumulative.operationRecovery || cumulative.blockedKind === "dependency"
+        || (committedPlanThisRun && plan?.strictPass && plan.complete !== false)) return undefined;
+      if ([...failures.values()].some(({ reason }) => reason.includes("[DAY_SCHEDULE_CONFLICT]"))) {
+        return "如果结束时间或固定预约不能调整，请告诉我新增景点的优先顺序，我可以据此重新安排。";
+      }
+      return "可以回复「继续修复」，我会根据上面的原因重新尝试保存。";
+    };
+    const planStatus = () => {
+      if (cumulative.operationRecovery) return cumulative.blockedReason ?? "有操作待核对，请先查看当前版本。";
+      const saved = this.sessionValue.travelState?.itinerary;
+      if (!saved) return "本轮尚未保存行程。";
+      const version = saved.revision === undefined ? "" : ` v${saved.revision}`;
+      return committedPlanThisRun
+        ? `本轮已保存「${saved.title}」${version}，共 ${saved.dayCount} 天。未完成的修改可以从该版本继续。`
+        : `本轮未保存新的行程版本。最近已保存「${saved.title}」${version}，共 ${saved.dayCount} 天。`;
+    };
+    const finish = async (reply: string) => {
+      if (controller.signal.aborted) throw new TurnAbortedError();
+      const delta = streamedResponse && reply.startsWith(streamedResponse) ? reply.slice(streamedResponse.length)
+        : streamedResponse ? `\n\n${reply}` : reply;
+      if (delta) safeEmit(() => options.onTextDelta?.(delta));
+      this.sessionValue.add("assistant", reply);
+      await this.checkpoint(options);
+      return reply;
+    };
 
     try {
       this.sessionValue.add("user", trimmed);
@@ -298,7 +364,11 @@ export class ChatAgent {
       let executed = 0;
       let extensions = 0;
       let budgetGuidance: string | undefined;
+      let budgetExtensionStart: { round: number; limit: number } | undefined;
+      const extensionSummary = () => this.committedSnapshot && budgetExtensionStart && budgetExtensionStart.limit > budgetExtensionStart.round
+        ? `最近一次追加了 ${budgetExtensionStart.limit - budgetExtensionStart.round} 轮，实际使用 ${executed - budgetExtensionStart.round} 轮。` : undefined;
       let failureGuidance: string | undefined;
+      let modelFailure: string | undefined;
       let failureKey = "";
       let failureCount = 0;
       let circuitOpen = false;
@@ -316,9 +386,13 @@ export class ChatAgent {
       cumulative.basicDiscoveryCalls ??= new Map();
       const basicQueries = () => cumulative.basicDiscoveryCalls!.get(this.sessionValue.travelState?.brief?.title ?? "") ?? 0;
       const researchOnly = /(?:核实|查询|重查|刷新|查一下|看看).*(?:开放|闭馆|天气|资料|时长)|(?:检查|查看|读取|加载|展示).*(?:当前|已有|已保存)?行程/.test(trimmed) && !/规划|补齐|生成|(?<!已)保存|重排|调整行程/.test(trimmed);
-      let dailyEnabled = !isExplicitPlanEdit(trimmed) && !researchOnly;
+      const explicitEdit = isExplicitPlanEdit(trimmed);
+      let dailyEnabled = !explicitEdit && !researchOnly;
       const planningRequested = /规划|行程|补齐|续跑|接着|继续|旅游|旅行|保存|(?:玩|去).{0,20}[一二三四五六七八九十\d]+(?:天|日)/.test(trimmed);
-      const resumingDates = /继续|补齐|续跑|接着|还缺|缺失|未完成|剩余|后[面续].*(?:天|行程)/.test(trimmed);
+      const explicitlyNew = /(?:新建|另建|另起|另做|另存|再(?:做|排|规划|生成)一份).{0,16}(?:行程|旅行|旅程|日游|天)|(?:新建|另建|另起|另做|再(?:做|排|规划|生成))一份|(?:新的一趟|新的行程|新的旅行)/.test(trimmed);
+      const resumingDates = !explicitlyNew && /继续|补齐|续跑|接着|还缺|缺失|未完成|剩余|后[面续].*(?:天|行程)/.test(trimmed);
+      const currentTravel = this.sessionValue.travelState;
+      const newTravelPlan = explicitlyNew || (planningRequested && !currentTravel?.brief && !currentTravel?.itinerary && !resumingDates && dailyEnabled);
       if (!dailyEnabled) {
         const active = activeDayTask(this.sessionValue.travelState);
         if (active) this.sessionValue.setTravelState(blockDayTask(this.sessionValue.travelState!, active.date, "用户指定修订，暂停该日期补天任务"));
@@ -408,7 +482,7 @@ export class ChatAgent {
         }
         let dateTask = nextDateTask();
         if (dateTask && (dateTask.attempt_rounds >= dayTaskRounds(dateTask) || dateTask.attempt_calls >= dayTaskCalls(dateTask))) {
-          this.sessionValue.setTravelState(blockDayTask(this.sessionValue.travelState!, dateTask.date, "该日期达到单次软额度，先处理其他日期，再按独立额度重试"));
+          this.sessionValue.setTravelState(blockDayTask(this.sessionValue.travelState!, dateTask.date, dateTask.last_error ?? "该日期达到单次软额度，先处理其他日期，再按独立额度重试"));
           dateTask = nextDateTask();
           await this.checkpoint(options);
           if (!dateTask) continue;
@@ -428,7 +502,10 @@ export class ChatAgent {
             dates: routeDates, maxQueries: supportsRouteQueries ? Math.min(4, routeCallSlots - 1) : 0,
             queriedLegs: queriedRouteLegs, attemptedRepairs: attemptedRouteCommits,
           }) : undefined;
-        if (dayPlanning && !dateTask && !routeFollowUp) {
+        const limit = await roundLimit();
+        const finishedDates = dayPlanning && !dateTask && !routeFollowUp;
+        const retryableDates = finishedDates && this.sessionValue.travelState?.itinerary?.dayTasks?.some((task) => task.status !== "saved");
+        if (finishedDates && (!retryableDates || executed < limit || extensions >= BUDGET_EXTENSION_LIMIT)) {
           circuitOpen = true;
           const tasks = this.sessionValue.travelState?.itinerary?.dayTasks ?? [];
           failureGuidance = tasks.some((task) => task.status !== "saved") ? "各日期已按独立额度尝试；以下日期仍待处理：" + tasks.filter((task) => task.status !== "saved").map((task) => `${task.date}/${task.layer ?? "时间路线"}（${task.attempts}次：${task.last_error ?? "缺少有效安排"}）`).join("；") : "各层已完成可完成的核验与细排；基础安排保留全部日期，整体质量与待确认事项如下。";
@@ -439,7 +516,6 @@ export class ChatAgent {
           if (recovery) { failureGuidance = recovery; stagnantRounds = 0; circuitOpen = false; }
           else { circuitOpen = true; failureGuidance = cumulative.blockedReason ?? ((cumulative.deliveryStagnantRounds ?? 0) >= MAX_DELIVERY_STAGNATION ? "连续 20 轮未推进交付，本阶段已停滞；不是预算耗尽。保留已保存版本及待修问题。" : "连续 12 轮无实际进展，本阶段已停滞；不是预算耗尽。保留已保存版本及待修问题。"); break; }
         }
-        const limit = await roundLimit();
         if (executed >= limit) {
           // 预算用尽：先问宿主能否续期（例如按行程天数放宽），不能续期才收尾
           if (extensions >= BUDGET_EXTENSION_LIMIT) break;
@@ -450,6 +526,8 @@ export class ChatAgent {
           }
           extensions += 1;
           budgetGuidance = decision.guidance;
+          budgetExtensionStart = { round: executed, limit: await roundLimit() };
+          if (dayPlanning && this.sessionValue.travelState) extendDayTaskAttempts(this.sessionValue.travelState, cumulative);
           continue;
         }
         if (controller.signal.aborted) throw new TurnAbortedError();
@@ -571,22 +649,27 @@ export class ChatAgent {
             request = buildRequest(2_000);
           }
           syncUsage();
-          if (exhausted()) break;
+          if (exhausted()) { budgetGuidance = "上下文整理后，累计预算已用尽，本轮没有发送后续模型请求。"; break; }
           this.sessionValue.recordRequestContext(request.metrics);
           options.onRequestContext?.(request.metrics);
           debugLog("context", JSON.stringify(request.metrics));
-          if (request.metrics.estimatedInputTokens > request.metrics.inputLimit) throw new ContextInputLimitError(request.metrics);
           const { requestHistory, requestTools } = request;
           requestChars = request.metrics.totalChars;
 
           // 优先流式（最终回答逐字输出），Provider 不支持时降级
           try {
+            if (request.metrics.estimatedInputTokens > request.metrics.inputLimit) throw new ContextInputLimitError(request.metrics);
             if (streamWithTools !== undefined) {
+              const streamReply = this.sessionValue.travelState?.brief === undefined && !this.savedThisRun && failures.size === 0;
               result = await streamWithTools.call(
                 this.provider,
                 requestHistory,
                 requestTools,
-                this.sessionValue.travelState?.brief === undefined && !this.savedThisRun ? options.onTextDelta ?? (() => {}) : () => {},
+                (delta) => {
+                  if (!streamReply) return;
+                  streamedResponse += delta;
+                  safeEmit(() => options.onTextDelta?.(delta));
+                },
                 controller.signal,
               );
             } else {
@@ -595,7 +678,9 @@ export class ChatAgent {
           } catch (error) {
             // 中断信号导致的任何失败统一转为 TurnAbortedError
             if (controller.signal.aborted) throw new TurnAbortedError();
-            throw error;
+            if (executed === 0) throw error;
+            modelFailure = describeTurnError(error);
+            break;
           }
         }
 
@@ -642,13 +727,19 @@ export class ChatAgent {
         if (result.type === "text") {
           const progress = planningProgress(this.sessionValue.travelState);
           const incomplete = this.sessionValue.travelState?.itinerary !== undefined && (progress.remaining > 0 || this.sessionValue.travelState.itinerary.complete === false);
-          const reply = (incomplete ? this.canonicalReply(false) ?? `当前有效安排${progress.count}/${progress.expected ?? "待确认"}天，行程尚未完成；${progress.missing.length ? `缺失日期：${progress.missing.join("、")}。` : "请按独立进度卡补齐有效日期。"}` : this.canonicalReply()) ?? result.content;
-          if (this.sessionValue.travelState?.brief !== undefined || this.canonicalReply() !== undefined) options.onTextDelta?.(reply);
-          this.sessionValue.add("assistant", reply);
-          await this.checkpoint(options);
-          return reply;
+          const savedReply = incomplete ? this.canonicalReply(false) ?? `当前有效安排${progress.count}/${progress.expected ?? "待确认"}天，行程尚未完成。${progress.missing.length ? `缺失日期为 ${progress.missing.join("、")}。` : ""}` : this.canonicalReply();
+          const failedChange = failedSaveThisRun && !committedPlanThisRun;
+          const missingReply = !result.content.trim() && !savedReply;
+          return finish([
+            extensionSummary(),
+            failedChange || (missingReply && this.sessionValue.travelState) ? planStatus() : undefined,
+            savedReply ?? (missingReply ? EMPTY_MODEL_REPLY : failedChange ? undefined : result.content),
+            failedChange || missingReply || !hadSuccessfulToolCall ? failureDetails() : undefined,
+            failedChange ? nextStep() : undefined,
+          ].filter(Boolean).join("\n\n"));
         }
 
+        streamedResponse = "";
         // 模型和宿主工具调用共用同一执行、权限和诊断路径。
         const callBatch = this.sessionValue.add("assistant", "", { toolCalls: result.toolCalls });
         // 先持久化调用意图。崩溃后根据批次 ID 核对账本，不自动重放副作用。
@@ -758,24 +849,33 @@ export class ChatAgent {
           cumulative.calls += 1;
           if (scope) dayCallsThisRound += 1;
           if (effectiveBasicStage && call.name === "search_attractions") cumulative.basicDiscoveryCalls!.set(this.sessionValue.travelState!.brief!.title, basicQueries() + 1);
+          const awaitingPlan = !this.briefSavedThisRun && !this.savedThisRun;
+          const allocatingPlan = newTravelPlan && awaitingPlan;
+          const creatingBrief = call.name === "save_travel_brief" && awaitingPlan && dailyEnabled && !resumingDates && !currentTravel?.brief && !currentTravel?.itinerary;
           const execution = await cumulative.diagnostics.run(call, cumulative.rounds + 1, () => this.executeTool(
             call,
             tools,
             { workspace: this.workspace, operationId: `${this.sessionValue.id}:${callBatch.id}:${call.id}`, signal: controller.signal, readVersions: this.sessionValue.travelMode ? cumulative.readVersions : undefined, readCallId: call.id, queryAttempts: cumulative.queryAttempts, queryStats: cumulative.queryStats,
               basicPlanning: effectiveBasicStage,
+              newTravelPlan: allocatingPlan || creatingBrief,
+              isolateDisjointTripDates: dailyEnabled,
               dayPlanningScope: scope,
               destination: this.sessionValue.travelState?.brief?.destination,
               travelMode: this.sessionValue.travelMode,
               onArgumentsPrepared: (args, corrections) => { preparedArgs = args; argumentCorrections = corrections; },
-              brief: this.sessionValue.travelState?.brief,
+              brief: allocatingPlan ? undefined : this.sessionValue.travelState?.brief,
               // 当前请求产生新授权；之前已确认的授权随对应行程持久化，不挪用其他任务的旧消息。
               userRequests: this.sessionValue.history.filter((message) => message.role === "user").slice(-1).map(({ id, content }) => ({ id, content })),
               onBrief: (brief) => {
                 snapshotReceived = true;
+                if ((allocatingPlan || this.briefSavedThisRun) && call.name === "load_travel_brief" && this.sessionValue.travelState?.brief?.title !== brief.title) return;
+                if (this.committedSnapshot?.itinerary.title !== brief.title) this.committedSnapshot = undefined;
                 this.sessionValue.setTravelState(updateTravelStateFromBrief(this.sessionValue.travelState, { ...brief }));
               },
               onItinerary: (snapshot) => {
                 snapshotReceived = true;
+                const brief = this.sessionValue.travelState?.brief;
+                if (call.name !== "save_itinerary" && (allocatingPlan || this.briefSavedThisRun && brief?.title !== snapshot.itinerary.title)) return;
                 this.committedSnapshot = snapshot;
                 if (call.name === "save_itinerary") {
                   this.savedThisRun = true;
@@ -810,11 +910,14 @@ export class ChatAgent {
             failureGuidance = cumulative.blockedReason;
           }
           if (execution.error === undefined) {
+            if (!isActivationTool(call.name)) hadSuccessfulToolCall = true;
+            if (call.name === "save_itinerary" && execution.executionState?.effect_status === "committed" && !execution.executionState.replayed) committedPlanThisRun = true;
             if (call.name === "plan_day_routes") routesQueried = true;
             failureKey = "";
             failureCount = 0;
             failureGuidance = cumulative.operationRecovery ? cumulative.blockedReason : undefined;
           } else {
+            recordFailure(call.name, execution.error);
             const key = toolFailureKey(call.name, execution.error);
             failureCount = key === failureKey ? failureCount + 1 : 1;
             failureKey = key;
@@ -874,6 +977,11 @@ export class ChatAgent {
           if (stagnantRounds >= 12) { circuitOpen = true; failureGuidance = "连续 12 轮无实际进展，已停止调用；已保存版本仍有缺口时必须明确列出。"; }
         }
         const observations = cumulative.diagnostics.records.slice(diagnosticStart);
+        for (const observation of observations) {
+          if (observation.execution !== "blocked" && observation.execution !== "denied") continue;
+          const result = pendingResults.find((item) => item.callId === observation.call_id);
+          if (result) recordFailure(result.toolName, result.output);
+        }
         if (this.sessionValue.travelState?.brief !== undefined) {
           const progressThisRound = cumulative.deliveryStagnantRounds === 0;
           if (!progressThisRound) cumulative.redundantCalls = (cumulative.redundantCalls ?? 0) + observations.filter((r) => r.execution === "blocked" || r.execution === "cache_hit").length;
@@ -910,33 +1018,43 @@ export class ChatAgent {
       }
       if (dayPlanning) {
         const unfinished = activeDayTask(this.sessionValue.travelState);
-        if (unfinished) this.sessionValue.setTravelState(blockDayTask(this.sessionValue.travelState!, unfinished.date, failureGuidance ?? budgetGuidance ?? "任务预算达到上限，保留该日期进度待续接"));
+        if (unfinished) this.sessionValue.setTravelState(blockDayTask(this.sessionValue.travelState!, unfinished.date,
+          modelFailure ? `模型请求未完成：${modelFailure}` : failureGuidance ?? budgetGuidance ?? "任务预算达到上限，保留该日期进度待续接"));
       }
-      // 轮次用尽：再做一次"禁用工具"的收尾请求，保证用户拿到最终产出而不是硬报错
+      // 优先用已保存状态交付。没有可用快照时，模型收尾失败也交付本地记录。
       const canonical = this.canonicalReply(false);
-      if (canonical !== undefined || exhausted() || stagnantRounds >= 12 || cumulative.operationRecovery !== undefined || (circuitOpen && this.sessionValue.travelState?.brief !== undefined)) {
+      const details = failureDetails();
+      const stopReason = circuitOpen ? "工具调用因重复失败或未取得进展而停止。" : `已用完本轮 ${executed} 轮工具额度。`;
+      if (modelFailure || canonical !== undefined || exhausted() || stagnantRounds >= 12 || cumulative.operationRecovery !== undefined || (circuitOpen && this.sessionValue.travelState?.brief !== undefined)) {
         const recoveryNote = cumulative.operationRecovery ? `操作 ${cumulative.operationRecovery.operation_id ?? "当前调用"}：${cumulative.operationRecovery.effect_status}。请先核对状态，未自动重放。` : undefined;
-        const reply = [budgetGuidance, failureGuidance, canonical ?? recoveryNote ?? (circuitOpen ? this.sessionValue.travelState?.itinerary !== undefined ? `本次规划未完成，保留已保存「${this.sessionValue.travelState.itinerary.title}」${this.sessionValue.travelState.itinerary.dayCount}天版本，仍需按质量报告处理未通过条件。` : "本次规划未完成，尚未保存可交付的行程。" : "本次规划尚未保存可交付的行程，累计预算已用尽。")].filter(Boolean).join("\n\n");
-        options.onTextDelta?.(reply);
-        this.sessionValue.add("assistant", reply);
-        await this.checkpoint(options);
-        return reply;
+        const budgetResult = canonical !== undefined ? extensionSummary() ?? budgetGuidance : budgetGuidance;
+        const status = this.sessionValue.travelState || failedSaveThisRun ? planStatus() : undefined;
+        return finish([
+          modelFailure ? `工具执行后的模型请求未完成。原因是 ${modelFailure}` : budgetResult,
+          modelFailure ? undefined : failureGuidance,
+          canonical === undefined || !committedPlanThisRun ? status : undefined,
+          recoveryNote,
+          details,
+          nextStep(),
+          canonical,
+        ].filter(Boolean).join("\n\n") || "本轮已停止。累计预算已用尽。");
+      }
+      if (failedSaveThisRun && !committedPlanThisRun) {
+        return finish([planStatus(), stopReason, details, nextStep()].filter(Boolean).join("\n\n"));
       }
       const wrapUp = await this.forceFinalAnswer(
-        options.onTextDelta,
         [budgetGuidance, failureGuidance].filter((value) => value !== undefined).join("\n\n"),
         circuitOpen
           ? "检测到同一工具错误连续重复，已熔断工具调用"
           : "工具调用轮次已全部用尽",
       );
       syncUsage();
-      if (wrapUp !== undefined && wrapUp.trim() !== "") {
-        if (controller.signal.aborted) throw new TurnAbortedError();
-        this.sessionValue.add("assistant", wrapUp);
-        await this.checkpoint(options);
-        return wrapUp;
-      }
-      throw new Error(`工具调用超过 ${await roundLimit()} 轮上限，模型未能给出最终回答`);
+      return finish([
+        failedSaveThisRun || (!wrapUp.reply && this.sessionValue.travelState) ? planStatus() : undefined,
+        wrapUp.reply ?? `${stopReason}模型未能生成收尾回复。原因是 ${wrapUp.reason}`,
+        details,
+        nextStep(),
+      ].filter(Boolean).join("\n\n"));
     } finally {
       this.currentController = undefined;
     }
@@ -970,7 +1088,11 @@ export class ChatAgent {
   private canonicalReply(requireSave = true): string | undefined {
     if ((requireSave && !this.savedThisRun) || this.committedSnapshot === undefined) return undefined;
     const { itinerary, report, file } = this.committedSnapshot;
+    const brief = this.sessionValue.travelState?.brief;
+    if (brief && itinerary.title !== brief.title && (this.briefSavedThisRun || brief.requestedTitle)) return undefined;
     const progress = planningProgress(this.sessionValue.travelState);
+    if (!this.savedThisRun && progress.dates.length && itinerary.days.length && itinerary.days.every((day) => day.date && !progress.dates.includes(day.date))
+      && !itinerary.outline?.some((day) => progress.dates.includes(day.date))) return undefined;
     const passed = report.issue_count.P0 === 0 && report.issue_count.P1 === 0 && progress.remaining === 0 && this.sessionValue.travelState?.itinerary?.complete !== false;
     return [
       `已保存「${itinerary.title}」v${itinerary.revision ?? 1}，${itinerary.days.length} 天 / ${itinerary.days.reduce((sum, day) => sum + day.items.length, 0)} 项。strict ${passed ? "通过" : "未通过，当前版本尚未通过 strict 校验，以下为待修订版本"}。`,
@@ -993,13 +1115,12 @@ export class ChatAgent {
 
   /**
    * 收尾兜底：工具已被禁用，要求模型基于已有信息直接给出最终回答。
-   * 失败（网络/脚本耗尽）返回 undefined，由调用方回落到原始报错。
+   * 失败时返回原因，调用方用本地记录生成最终回复。
    */
   private async forceFinalAnswer(
-    onTextDelta?: (delta: string) => void,
     guidance?: string,
     reason: string = "工具调用轮次已全部用尽",
-  ): Promise<string | undefined> {
+  ): Promise<{ reply: string; reason?: never } | { reply?: never; reason: string }> {
     const instruction: PromptMessage = {
       role: "system",
       content:
@@ -1011,19 +1132,19 @@ export class ChatAgent {
     };
     try {
       const history = await this.preparePlainHistory([instruction]);
+      let reply: string;
       if (this.provider.chatWithUsage !== undefined) {
         const result = await this.provider.chatWithUsage(history, this.currentController?.signal);
         if (result.usage !== undefined) { this.sessionValue.addUsage(result.usage); this.sessionValue.completeRequestContext(result.usage); }
-        if (result.type !== "text") return undefined;
-        onTextDelta?.(result.content);
-        return result.content;
+        reply = result.type === "text" ? result.content : "";
+      } else if (this.provider.chatStream !== undefined) {
+        reply = await this.provider.chatStream(history, () => {});
+      } else {
+        reply = await this.provider.chat(history);
       }
-      if (this.provider.chatStream !== undefined) {
-        return await this.provider.chatStream.call(this.provider, history, onTextDelta ?? (() => {}));
-      }
-      return await this.provider.chat(history);
-    } catch {
-      return undefined;
+      return reply.trim() ? { reply } : { reason: EMPTY_MODEL_REPLY };
+    } catch (error) {
+      return { reason: describeTurnError(error) };
     }
   }
 

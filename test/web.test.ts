@@ -546,6 +546,37 @@ test("web: 聊天 SSE 流式返回并持久化会话", async () => {
   await close();
 });
 
+test("web: 模型请求失败时只发一次错误并保存可见的聊天回复", async () => {
+  const root = await mkdtemp(join(tmpdir(), "minicode-web-chat-failure-"));
+  const provider: ChatProvider = {
+    name: "unavailable",
+    async chat() { throw new Error("LLM 返回 503: upstream response body"); },
+  };
+  const running = await startWebServer({ rootDir: root, port: 0, auth: false, providerOverride: provider });
+  const base = `http://127.0.0.1:${running.port}`;
+  try {
+    const res = await fetch(`${base}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "帮我继续调整行程" }),
+    });
+    const events: Record<string, unknown>[] = [];
+    await collectSse(res, (event) => { events.push(event); });
+    assert.deepEqual(events.filter(({ type }) => ["reply", "error", "done"].includes(String(type))).map(({ type }) => type), ["reply", "error", "done"]);
+    const reply = String(events.find(({ type }) => type === "reply")?.text);
+    assert.match(reply, /模型服务返回 HTTP 503/);
+    assert.doesNotMatch(reply, /upstream response body/);
+    const history = await (await fetch(`${base}/api/history`)).json();
+    assert.equal(history.messages.at(-1)?.role, "assistant");
+    assert.equal(history.messages.at(-1)?.content, reply);
+    const { currentId } = await (await fetch(`${base}/api/sessions`)).json();
+    const saved = await new JsonFileSessionStore(join(root, ".minicode", "sessions")).load(currentId);
+    assert.equal(saved?.history.at(-1)?.content, reply);
+  } finally {
+    await running.close();
+  }
+});
+
 test("web: 工具轮次耗尽返回质量报告，用户授权追加后继续", async () => {
   const root = await mkdtemp(join(tmpdir(), "minicode-web-budget-"));
   const provider = new BudgetToolProvider();

@@ -23,7 +23,7 @@ import { requireString } from "./tool.ts";
 import { trackRead, readWasDeferred } from "./read-progress.ts";
 import { TravelEvidenceStore, evidenceId } from "./travel-evidence.ts";
 import { DEFAULT_TRAVELERS, briefDays, loadBriefForTitle, type TravelBrief } from "./brief.ts";
-import { atomicWrite, planFileFor, withPlanLock } from "./plan-files.ts";
+import { atomicWrite, planFileFor, withPlanLock, withTripTitleLock } from "./plan-files.ts";
 export { planFileFor } from "./plan-files.ts";
 import {
   parseItinerary,
@@ -289,9 +289,10 @@ export function createSaveItineraryTool(rootDir: string = process.cwd()): Tool {
         }
       }
       const file = itineraryFile(rootDir, requireString(args, "title"));
-      return runManagedOperation({ root: rootDir, file, tool: "save_itinerary", request: args, ...ctx,
+      const save = () => runManagedOperation({ root: rootDir, file, tool: "save_itinerary", request: args, ...ctx,
         onReplay: async () => { const plan = await readSaved(file); if (plan) ctx?.onItinerary?.({ itinerary: plan, report: validateItinerary(plan), file }); },
       }, (commit) => saveItineraryUnlocked(rootDir, args, ctx, commit));
+      return ctx?.newTravelPlan ? withTripTitleLock(rootDir, save, ctx.signal) : save();
     },
   };
   return tool;
@@ -314,6 +315,10 @@ async function saveItineraryUnlocked(rootDir: string, args: Record<string, unkno
   if (ctx?.basicPlanning && (args.schedule !== undefined || args.days !== undefined || args.edits !== undefined || args.repair_routes !== undefined || !Array.isArray(args.outline))) throw new ToolValidationError([{ code: "BASIC_LAYER_OUTLINE_REQUIRED", path: "outline", message: "基础层先保存各日期的景点outline，不提交详细时间草稿。", hint: "使用outline=[{date,visits:[{name,evidence_id}]}]；未识别必去由后续独立任务处理，不会阻挡其他日期。" }]);
   const sessionBrief = ctx?.brief?.title === title ? ctx.brief : undefined;
   const brief = sessionBrief?.requirementVersion ? sessionBrief : await loadBriefForTitle(rootDir, title) ?? sessionBrief;
+  if (ctx?.newTravelPlan && (saved || brief) && !sessionBrief) throw new ToolValidationError([{
+    code: "ITINERARY_TITLE_OCCUPIED", path: "title", message: `已有行程或需求单使用「${title}」，本次新行程尚未关联需求单`,
+    hint: "先用save_travel_brief保存本次需求，程序会分配独立标题。编辑旧行程时使用明确选中的已有行程。",
+  }]);
   const evidence = ctx?.evidence ?? new TravelEvidenceStore(rootDir);
   await evidence.load();
   await evidence.refresh();
