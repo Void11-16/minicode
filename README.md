@@ -398,7 +398,7 @@ npm run eval:compare -- --agent <agent-run-id> --workflow <workflow-run-id>
 | Tool calls | 43 | 23 |
 
 这个结果说明 workflow 在稳定、结构化场景上可以更强；下一步应扩到多案例和原始请求抽取，
-找出 Agent 在哪些异常/个性化案例上更有价值。
+找出 Agent 在哪些异常/个性化案例上更有价值。完整方法与边界见 [Agent vs Workflow 评测](docs/agent-vs-workflow-eval.md)。
 
 评测分为三层：
 
